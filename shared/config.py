@@ -11,3 +11,8 @@ DATA_DIR = BASE_DIR / 'data'
 ARTICLES_PATH = DATA_DIR / 'articles.csv.zip'
 CUSTOMERS_PATH = DATA_DIR / 'customers.csv.zip'
 TRANSACTIONS_PATH = DATA_DIR / 'transactions_train.csv.zip'
+
+# Force HuggingFace to download massively heavy AI models to the F:\ drive instead of C:\
+HF_CACHE_DIR = BASE_DIR / 'huggingface_cache'
+HF_CACHE_DIR.mkdir(exist_ok=True)
+os.environ["HF_HOME"] = str(HF_CACHE_DIR)
