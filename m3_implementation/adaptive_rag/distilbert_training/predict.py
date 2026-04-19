@@ -19,9 +19,13 @@
 
 import re
 import torch
+# from transformers import (
+#     DistilBertForSequenceClassification,
+#     DistilBertTokenizer,
+# )
 from transformers import (
     DistilBertForSequenceClassification,
-    DistilBertTokenizer,
+    AutoTokenizer,
 )
 from config import MODEL_SAVE_DIR, LABEL_NAMES, RETRIEVAL_STRATEGY_MAP, MAX_LEN
 
@@ -75,12 +79,25 @@ class Predictor:
     every single conversation turn.
     """
 
-    def __init__(self, model_dir: str = MODEL_SAVE_DIR):
+    # def __init__(self, model_dir: str = MODEL_SAVE_DIR):
+    #     device_str = "cuda" if torch.cuda.is_available() else "cpu"
+    #     self.device = torch.device(device_str)
+
+    #     print(f"Loading trained model from: {model_dir}")
+    #     self.tokenizer = DistilBertTokenizer.from_pretrained(model_dir)
+    #     self.model     = DistilBertForSequenceClassification.from_pretrained(model_dir)
+    #     self.model.to(self.device)
+    #     self.model.eval()
+    #     print("Model loaded and ready.")
+
+    def __init__(self, model_dir: str = None):
+        if model_dir is None:
+            model_dir = MODEL_SAVE_DIR
         device_str = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device_str)
 
         print(f"Loading trained model from: {model_dir}")
-        self.tokenizer = DistilBertTokenizer.from_pretrained(model_dir)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
         self.model     = DistilBertForSequenceClassification.from_pretrained(model_dir)
         self.model.to(self.device)
         self.model.eval()
