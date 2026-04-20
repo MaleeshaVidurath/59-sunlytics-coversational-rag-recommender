@@ -1,2 +1,6 @@
 # RAG-Powered Explainable Conversational Recommender System
 # Add project dependencies here
+google-genai
+python-dotenv
+fastapi
+uvicorn
