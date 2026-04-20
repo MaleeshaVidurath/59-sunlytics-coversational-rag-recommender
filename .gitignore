@@ -15,6 +15,9 @@ data/
 .vscode/
 .idea/
 
+# AI Model Cache
+huggingface_cache/
+
 # OS
 .DS_Store
 Thumbs.db

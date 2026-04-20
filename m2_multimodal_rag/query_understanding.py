@@ -2,6 +2,10 @@ import torch
 from transformers import BlipProcessor, BlipForConditionalGeneration
 from PIL import Image
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 class QueryUnderstandingVLM:
     """
@@ -11,6 +15,20 @@ class QueryUnderstandingVLM:
     def __init__(self, use_vqa=False):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.use_vqa = use_vqa
+        
+        self.gemini_client = None
+        self.gemini_model_name = "gemini-2.5-flash"
+        
+        api_key = os.getenv("GEMINI_API_KEY")
+        if api_key and api_key != "your_key_here":
+            try:
+                from google import genai
+                self.gemini_client = genai.Client(api_key=api_key)
+                print(f"VLM: [SUCCESS] Gemini Cloud Vision initialized for intelligent query understanding.")
+            except Exception as e:
+                print(f"VLM: [WARNING] Failed to initialize Gemini client: {e}. Falling back to local BLIP.")
+        else:
+            print("VLM: [WARNING] No GEMINI_API_KEY found. Falling back to local BLIP.")
         
         print(f"Loading BLIP Pre-processor on {self.device}...")
         
@@ -29,22 +47,36 @@ class QueryUnderstandingVLM:
         """
         Master function to evaluate the user's messy multimodal input and 
         return a highly-clean string optimized for CLIP encoding.
+        Uses Gemini 2.5 Flash for intelligent intent extraction, falling back to BLIP.
         """
         # 1. TEXT ONLY
         if text_query and not image_path:
+            clean_query = self._gemini_extract_text_intent(text_query)
+            if clean_query:
+                return clean_query
             return text_query.strip()
             
         # 2. IMAGE ONLY
         elif image_path and not text_query:
             if not os.path.exists(image_path):
                 raise FileNotFoundError(f"Image not found at {image_path}")
-            print("VLM: Generating visual caption for pure image query...")
+            
+            clean_query = self._gemini_extract_image_features(image_path)
+            if clean_query:
+                return clean_query
+                
+            print("VLM: Falling back to BLIP visual captioning for pure image query...")
             return self._generate_caption(image_path)
             
         # 3. TEXT + IMAGE (Noise Removal Challenge)
         elif image_path and text_query:
             print("VLM: Analyzing Image+Text to isolate core fashion features...")
             
+            clean_query = self._gemini_multimodal_intent(image_path, text_query)
+            if clean_query:
+                return clean_query
+                
+            print("VLM: Falling back to BLIP for Image+Text analysis...")
             if self.use_vqa:
                 # Use Visual Question Answering to precisely isolate features
                 # Prompt tuning optimized for fashion noise-removal
@@ -58,6 +90,85 @@ class QueryUnderstandingVLM:
                 return f"{text_query}. The reference image shows: {caption}"
                 
         return ""
+
+    def _gemini_extract_text_intent(self, text_query: str) -> str:
+        if not self.gemini_client: return None
+        try:
+            from google.genai import types
+            prompt = (
+                f"You are a strict fashion search intent extractor. "
+                f"Extract the core fashion keywords (color, exact item type, pattern, style) "
+                f"from the following user text. Ignore all conversational filler (e.g., 'I am looking for', 'find me'). "
+                f"You MUST include the specific clothing item (e.g., 'dress', 'shirt', 'pants') in your output if it is mentioned. "
+                f"If the user specifies a negative constraint (e.g., 'not red'), output what it SHOULD be, or omit the negative feature.\n"
+                f"User text: \"{text_query}\"\n"
+                f"Output ONLY the keywords separated by spaces. Nothing else. Example: 'black elegant dress'"
+            )
+            response = self.gemini_client.models.generate_content(
+                model=self.gemini_model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=30)
+            )
+            if response.text:
+                result = response.text.strip().replace('\n', ' ')
+                print(f"VLM (Gemini Text): Cleaned '{text_query}' -> '{result}'")
+                return result
+        except Exception as e:
+            print(f"   [Gemini API Error] {e}")
+        return None
+
+    def _gemini_extract_image_features(self, image_path: str) -> str:
+        if not self.gemini_client: return None
+        try:
+            from PIL import Image
+            from google.genai import types
+            raw_image = Image.open(image_path).convert('RGB')
+            prompt = (
+                f"You are a strict fashion feature extractor. "
+                f"Look at this image and describe the primary clothing item shown in 3-5 keywords. "
+                f"Include the color and the exact item type. "
+                f"Output ONLY the keywords separated by spaces. Nothing else. Do not write full sentences."
+            )
+            response = self.gemini_client.models.generate_content(
+                model=self.gemini_model_name,
+                contents=[raw_image, prompt],
+                config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=30)
+            )
+            if response.text:
+                result = response.text.strip().replace('\n', ' ')
+                print(f"VLM (Gemini Image): Extracted -> '{result}'")
+                return result
+        except Exception as e:
+            print(f"   [Gemini API Error] {e}")
+        return None
+
+    def _gemini_multimodal_intent(self, image_path: str, text_query: str) -> str:
+        if not self.gemini_client: return None
+        try:
+            from PIL import Image
+            from google.genai import types
+            raw_image = Image.open(image_path).convert('RGB')
+            prompt = (
+                f"You are a strict multimodal fashion intent extractor. "
+                f"The user uploaded an image and provided this text: \"{text_query}\".\n"
+                f"Synthesize the visual evidence from the image and the user's specific request "
+                f"to determine the exact fashion item they are searching for.\n"
+                f"For example, if the image shows a blue jacket and the text says 'I want this but in red', output 'red jacket'.\n"
+                f"Output ONLY the final core keywords (color, item type, etc.) separated by spaces. "
+                f"Do not write full sentences. Ignore conversational filler."
+            )
+            response = self.gemini_client.models.generate_content(
+                model=self.gemini_model_name,
+                contents=[raw_image, prompt],
+                config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=30)
+            )
+            if response.text:
+                result = response.text.strip().replace('\n', ' ')
+                print(f"VLM (Gemini Multimodal): Cleaned Image + '{text_query}' -> '{result}'")
+                return result
+        except Exception as e:
+            print(f"   [Gemini API Error] {e}")
+        return None
 
     def _generate_caption(self, image_path):
         raw_image = Image.open(image_path).convert('RGB')

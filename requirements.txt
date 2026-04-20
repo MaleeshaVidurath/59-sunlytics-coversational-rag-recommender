@@ -17,3 +17,9 @@ matplotlib>=3.7.0
 seaborn>=0.12.0
 tqdm>=4.65.0
 accelerate>=0.27.0
+# RAG-Powered Explainable Conversational Recommender System
+# Add project dependencies here
+google-genai
+python-dotenv
+fastapi
+uvicorn
