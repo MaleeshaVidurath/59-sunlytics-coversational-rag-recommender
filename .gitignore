@@ -6,6 +6,7 @@ dist/
 build/
 venv/
 .env
+outputs/
 
 # Data
 data/
