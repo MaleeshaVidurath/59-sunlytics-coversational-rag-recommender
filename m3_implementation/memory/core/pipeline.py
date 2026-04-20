@@ -40,6 +40,7 @@ from memory.core.session_manager import SessionManager
 from memory.core.turn_manager import TurnManager
 from memory.core.user_manager import UserManager
 from memory.core.enrichment import EnrichmentLayer
+from memory.core.entity_extractor import extract_entities, is_fashion_relevant
 from memory.models.schemas import (
     TurnClassification, ItemInContext,
     RecommendationDocument, now_utc
@@ -175,8 +176,65 @@ class MemoryPipeline:
             current_message=message
         )
 
-        # ── Step 4: DistilBERT classification ─────────────────────────────
-        if self.predictor is not None:
+        # ── Step 3b: Not-relevant input guard ─────────────────────────────────
+        # Check whether the user's message is fashion-relevant before
+        # running any classification or retrieval. If the user asks about
+        # the weather, sports results, cooking etc. — politely decline.
+        # Uses keyword fast-path first, vector similarity as fallback.
+        _is_relevant, _relevance_score = is_fashion_relevant(message)
+        if not _is_relevant:
+            # Store the turn but return a refusal — no classification, no retrieval
+            _refusal_turn = await self.turn_mgr.add_user_turn(
+                session_id=active_session_id,
+                user_id=user_id,
+                content=message,
+                classification=TurnClassification(
+                    label="CHITCHAT",
+                    retrieval_strategy="NO",
+                    confidence=_relevance_score,
+                    used_rules=True
+                ),
+                entities={}
+            )
+            return {
+                "user_id":    user_id,
+                "session_id": active_session_id,
+                "turn_id":    _refusal_turn.turn_id,
+                "label":              "CHITCHAT",
+                "retrieval_strategy": "NO",
+                "confidence":         _relevance_score,
+                "used_rules":         True,
+                "retrieval_input":    None,
+                "memory_context": {
+                    "not_relevant":           True,
+                    "refusal_message":         (
+                        "I can only help with fashion and clothing recommendations. "
+                        "Please ask me about clothes, styles, or outfit advice!"
+                    ),
+                    "dialogue_state":          {},
+                    "long_term_preferences":   [],
+                    "style_profile":           {},
+                    "preference_summary":      {},
+                    "existing_explanation":    None,
+                },
+                "side_effects":       ["Not-relevant input — refusal returned"],
+                "classifier_input":   classifier_input,
+            }
+
+        # ── Step 4a: Pre-classification guard for short/ambiguous messages ───────
+        # Before DistilBERT, check for very short messages that are clearly
+        # acknowledgments or filler. Prevents "ok", "yes", "sure" from
+        # becoming spurious REFINEMENT calls that trigger catalog searches.
+        pre_label, pre_strategy = self._pre_classify_short_message(
+            message, history
+        )
+        if pre_label is not None:
+            label              = pre_label
+            retrieval_strategy = pre_strategy
+            confidence         = 0.0
+            used_rules         = True
+        # ── Step 4b: DistilBERT classification ─────────────────────────────────
+        elif self.predictor is not None:
             classification_result = self.predictor.predict(
                 history=history,
                 current_message=message
@@ -190,8 +248,14 @@ class MemoryPipeline:
             confidence  = 0.0
             used_rules  = True
 
-        # ── Step 5: Entity extraction ──────────────────────────────────────
-        entities = self._extract_entities(message)
+
+        # ── Step 5: Entity extraction (three-tier: keyword → vector → LLM) ────
+        # Tier 1 (keyword+regex) always runs first.
+        # Tier 2 (vector similarity) fills missing colour/product_type.
+        # Tier 3 (LLM) handles complex natural language when < 2 entities found.
+        # Pass label so extraction is skipped for non-search turns
+        # (ATTRIBUTE_QUESTION, COMPARISON, FEEDBACK, CHITCHAT etc.)
+        entities = await extract_entities(message, label=label)
 
         # ── Step 6: Store user turn ────────────────────────────────────────
         turn_classification = TurnClassification(
@@ -330,6 +394,66 @@ class MemoryPipeline:
         }
 
     # ── Helper methods ────────────────────────────────────────────────────────
+
+    def _pre_classify_short_message(
+        self,
+        message: str,
+        history: list
+    ):
+        """
+        Pre-classification for very short messages (≤ 4 words).
+        Returns (label, strategy) if the message is clearly an
+        acknowledgment or filler, otherwise returns (None, None)
+        to let DistilBERT handle it.
+
+        This prevents common misclassifications:
+          "ok"     with history → REFINEMENT (wrong) → now CHITCHAT
+          "yes"    with history → REFINEMENT (wrong) → now FEEDBACK
+          "great"  with history → REFINEMENT (wrong) → now FEEDBACK
+          "thanks" anywhere    → REFINEMENT (wrong) → now CHITCHAT
+        """
+        msg = message.strip().lower()
+        words = msg.split()
+        word_count = len(words)
+
+        if word_count > 4:
+            return None, None   # Let DistilBERT handle longer messages
+
+        has_history = len(history) > 0
+
+        # Pure acknowledgments / fillers → CHITCHAT (no retrieval)
+        pure_chitchat = {
+            "ok", "okay", "alright", "sure", "right", "noted",
+            "got it", "i see", "understood", "cool", "nice",
+            "thanks", "thank you", "cheers", "bye", "goodbye",
+            "hello", "hi", "hey", "good morning", "good afternoon",
+            "great thanks", "ok thanks", "thank you", "many thanks",
+        }
+        if msg in pure_chitchat:
+            return "CHITCHAT", "NO"
+
+        # Short positive reactions to shown items → FEEDBACK positive
+        # Only when history exists (there is something to react to)
+        short_positive = {
+            "yes", "yes please", "perfect", "great", "amazing",
+            "love it", "i love it", "love this", "i like it",
+            "yes that", "that one", "this one", "i'll take it",
+            "i want it", "yes this", "yes please", "lovely",
+            "wonderful", "excellent", "fantastic", "brilliant",
+        }
+        if has_history and msg in short_positive:
+            return "FEEDBACK", "NO"
+
+        # Short negative reactions → FEEDBACK negative
+        short_negative = {
+            "no", "nope", "nah", "no thanks", "not really",
+            "don't like", "i hate it", "not good", "bad",
+            "terrible", "awful", "no way", "not for me",
+        }
+        if has_history and msg in short_negative:
+            return "FEEDBACK", "NO"
+
+        return None, None   # Not a short-message case — let classifier decide
 
     def _fallback_classify(
         self,
