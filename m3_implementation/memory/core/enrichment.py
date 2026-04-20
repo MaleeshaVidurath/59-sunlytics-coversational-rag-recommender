@@ -620,10 +620,41 @@ class EnrichmentLayer:
     async def _enrich_attribute_question(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        """ATTRIBUTE_QUESTION → action: item_attribute_lookup"""
+        """ATTRIBUTE_QUESTION → action: item_attribute_lookup.
+        
+        Guard: if no items are in context, cannot look up an attribute.
+        Reclassify as INITIAL_REQUEST so the user gets a recommendation first.
+        """
         current_items = state.currently_discussing
         item_a = current_items.get("item_a")
         item_b = current_items.get("item_b")
+
+        # ── Guard: no items in context ────────────────────────────────────
+        if item_a is None and item_b is None:
+            memory_ctx = await self._base_memory_context(user_id, state)
+            memory_ctx["needs_clarification"] = True
+            memory_ctx["clarification_reason"] = (
+                "User asked about item properties but no items have been "
+                "recommended yet. Treating as a new search request."
+            )
+            return {
+                "label":              "INITIAL_REQUEST",
+                "retrieval_strategy": "FULL",
+                "retrieval_input": self._make_retrieval_input(
+                    action="catalog_search",
+                    retrieval_strategy="FULL",
+                    user_message=current_message,
+                    item_a=None, item_b=None,
+                    exclude_ids=state.rejected_items,
+                    payload={
+                        "filters": state.hard_constraints,
+                        "preference_boosts": [],
+                        "penalties": {},
+                    }
+                ),
+                "memory_context": memory_ctx,
+                "side_effects":   ["Reclassified: no items in context → INITIAL_REQUEST"],
+            }
 
         # Resolve which item the question is about
         target_item = _resolve_item_reference(current_message, item_a, item_b)
@@ -742,10 +773,35 @@ class EnrichmentLayer:
     async def _enrich_selection_reference(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        """SELECTION_REFERENCE → action: item_detail_lookup"""
+        """SELECTION_REFERENCE → action: item_detail_lookup.
+        
+        Guard: if no items are in context (session just started or no
+        recommendations have been made yet), we cannot resolve a reference.
+        Return CHITCHAT with a clarification flag instead of crashing.
+        """
         current_items = state.currently_discussing
         item_a = current_items.get("item_a")
         item_b = current_items.get("item_b")
+
+        # ── Guard: no items in context ────────────────────────────────────
+        # If the user says "tell me more about the first one" but no items
+        # have been recommended yet, we cannot resolve the reference.
+        # Return a clarification response instead of article_id: None.
+        if item_a is None and item_b is None:
+            memory_ctx = await self._base_memory_context(
+                user_id, state, include_preferences=False
+            )
+            memory_ctx["needs_clarification"] = True
+            memory_ctx["clarification_reason"] = (
+                "User referenced an item but no items have been recommended yet."
+            )
+            return {
+                "label":              "CHITCHAT",
+                "retrieval_strategy": "NO",
+                "retrieval_input":    None,
+                "memory_context":     memory_ctx,
+                "side_effects":       ["Reclassified: no items in context"],
+            }
 
         selected_item = _resolve_item_reference(current_message, item_a, item_b)
 
