@@ -391,6 +391,37 @@ class UserManager:
                             }
                         }
                     )
+
+                # ── Conflict resolution (Problem 5 fix) ───────────────────
+                # When a user explicitly states a NEW value for an attribute
+                # (e.g. "show me WHITE ones" after previously preferring Black),
+                # reduce the sentiment of conflicting values in the same
+                # attribute slot. We do not delete — we reduce.
+                # This follows Mem0's UPDATE-not-DELETE philosophy:
+                #   new_conflicting_sentiment = old_sentiment × 0.4
+                # (reduced but not zero — the old preference may return)
+                # Only applies to explicit source — implicit signals are
+                # weaker and do not override existing explicit preferences.
+                if source == "explicit" and sentiment > 0.5:
+                    for i, existing_pref in enumerate(user.attribute_preferences):
+                        if (existing_pref.attribute_name == attr_name
+                                and existing_pref.attribute_value != attr_value_str
+                                and existing_pref.sentiment > 0.3):
+                            # Reduce conflicting preference sentiment
+                            reduced_sentiment = existing_pref.sentiment * 0.4
+                            await db.users.update_one(
+                                {
+                                    "user_id": user_id,
+                                    "attribute_preferences.pref_id": existing_pref.pref_id
+                                },
+                                {
+                                    "$set": {
+                                        "attribute_preferences.$.sentiment": reduced_sentiment,
+                                        "attribute_preferences.$.decay_weight": 0.5,
+                                    }
+                                }
+                            )
+
                 updates_made = True
 
             else:
