@@ -5,30 +5,35 @@
 # WHAT IT DOES:
 #   After DistilBERT classifies a user message into one of 8 labels,
 #   this module queries the right memory for that specific label type
-#   and returns an enriched context dict that the retrieval system uses.
+#   and returns a standardised PipelineOutput structure that every
+#   RAG module consumes identically.
 #
-# WHY THIS MATTERS:
-#   Different labels need completely different information from memory.
-#   ATTRIBUTE_QUESTION → needs the currently discussed items
-#   REFINEMENT         → needs current recommendations + full preferences
-#   EXPLANATION_WHY    → needs the stored explanation for that item
-#   INITIAL_REQUEST    → needs long-term preferences + purchase history
-#   FEEDBACK           → needs the item being reacted to (no retrieval)
-#   CHITCHAT           → needs nothing (no retrieval at all)
+# OUTPUT STRUCTURE (always the same shape regardless of label):
+#   {
+#       action:            str        — what the RAG should do
+#       retrieval_strategy: str       — FULL | PARTIAL | NO
+#       user_message:      str        — original user message
+#       items_in_context:  dict       — item_a, item_b (may be None)
+#       exclude_ids:       list       — rejected article_ids
+#       payload:           dict       — action-specific data (see ACTION TAXONOMY)
+#   }
 #
-# THE ENRICHED OUTPUT is a structured dict that your retrieval/RAG system
-# consumes directly. It contains everything needed to either:
-#   a) Run a new catalog search (FULL retrieval)
-#   b) Look up details of existing items (PARTIAL retrieval)
-#   c) Skip retrieval entirely (NO retrieval)
+# ACTION TAXONOMY:
+#   "catalog_search"        ← INITIAL_REQUEST, REFINEMENT
+#   "item_attribute_lookup" ← ATTRIBUTE_QUESTION
+#   "explanation_generate"  ← EXPLANATION_WHY
+#   "item_compare"          ← COMPARISON
+#   "item_detail_lookup"    ← SELECTION_REFERENCE
+#   None                    ← FEEDBACK, CHITCHAT (retrieval_input is None)
 #
-# ALSO handles:
-#   - Updating dialogue state after enrichment
-#     (e.g. updating hard_constraints after REFINEMENT)
-#   - Triggering preference updates after FEEDBACK turns
-#   - Preparing the input query that goes to RAG
+# HYBRID SIMILARITY (keyword + vector):
+#   Three helper methods use keyword matching first (fast, catches obvious cases)
+#   and fall back to sentence embedding similarity (all-MiniLM-L6-v2) when
+#   keyword matching is inconclusive. This handles synonyms and paraphrases
+#   that keyword lists miss (e.g. "what is it constructed from" → material).
 
 import json
+import os
 from typing import Optional
 
 from memory.db.mongo import get_db
@@ -43,13 +48,310 @@ def _session_state_key(session_id: str) -> str:
     return f"session:{session_id}:state"
 
 
+# ── Semantic similarity model (loaded once at module level) ───────────────────
+# Uses all-MiniLM-L6-v2: 80MB, ~3-5ms per comparison on CPU.
+# Loaded lazily on first use to avoid slowing down import time.
+_similarity_model = None
+
+def _get_similarity_model():
+    """Loads the sentence embedding model on first call, then caches it."""
+    global _similarity_model
+    if _similarity_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _similarity_model = SentenceTransformer("all-MiniLM-L6-v2")
+            print("[EnrichmentLayer] Sentence similarity model loaded.")
+        except Exception as e:
+            print(f"[EnrichmentLayer] Could not load similarity model: {e}")
+            print("[EnrichmentLayer] Falling back to keyword-only matching.")
+            _similarity_model = "unavailable"
+    return _similarity_model if _similarity_model != "unavailable" else None
+
+
+def _cosine_similarity(a, b) -> float:
+    """Computes cosine similarity between two numpy vectors."""
+    import numpy as np
+    a = np.array(a)
+    b = np.array(b)
+    denom = (np.linalg.norm(a) * np.linalg.norm(b))
+    if denom == 0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+
+def _best_match(query: str, candidates: list[str]) -> tuple[str, float]:
+    """
+    Returns the best matching candidate string and its similarity score.
+    Uses sentence embeddings to find semantic similarity.
+    """
+    model = _get_similarity_model()
+    if model is None:
+        return candidates[0], 0.0
+
+    embeddings = model.encode([query] + candidates)
+    query_emb = embeddings[0]
+    best_label, best_score = candidates[0], -1.0
+    for i, candidate in enumerate(candidates):
+        score = _cosine_similarity(query_emb, embeddings[i + 1])
+        if score > best_score:
+            best_score = score
+            best_label = candidate
+    return best_label, best_score
+
+
+# ── Attribute topic detection (hybrid keyword + vector) ───────────────────────
+# These keyword lists catch the obvious cases instantly.
+# If no keyword matches, vector similarity handles synonyms/paraphrases.
+
+_ATTRIBUTE_KEYWORDS = {
+    "material_and_care": [
+        "material", "fabric", "made of", "made from", "constructed from",
+        "cotton", "linen", "polyester", "silk", "wool", "jersey", "denim",
+        "synthetic", "natural", "breathable", "wash", "care", "machine wash",
+        "dry clean", "what is it", "what's it"
+    ],
+    "colour": [
+        "colour", "color", "shade", "hue", "tone", "tint", "available in",
+        "come in", "other colours", "other colors"
+    ],
+    "sizing_and_fit": [
+        "size", "fit", "slim", "loose", "relaxed", "fitted", "oversized",
+        "runs small", "runs large", "true to size", "measurements", "dimensions"
+    ],
+    "pockets": [
+        "pocket", "pockets", "storage", "carry"
+    ],
+    "design_details": [
+        "sleeve", "neckline", "collar", "length", "style", "cut", "design",
+        "pattern", "print", "embroidery", "buttons", "zipper", "lining"
+    ],
+    "price": [
+        "price", "cost", "expensive", "cheap", "affordable", "value",
+        "how much", "what does it cost"
+    ],
+    "availability": [
+        "stock", "available", "in stock", "out of stock", "when", "restock"
+    ],
+}
+
+# Anchor phrases for vector similarity fallback.
+# One descriptive sentence per topic — the model compares the user's
+# message against these descriptions.
+_ATTRIBUTE_ANCHORS = {
+    "material_and_care": "What material or fabric is this item made from and how do I care for it",
+    "colour":            "What colour is this item and what colour options are available",
+    "sizing_and_fit":    "What size should I get and how does this item fit",
+    "pockets":           "Does this item have pockets or storage",
+    "design_details":    "What does the design look like including neckline sleeve and style details",
+    "price":             "How much does this item cost",
+    "availability":      "Is this item in stock and available to buy",
+    "general_details":   "Tell me more about this item in general",
+}
+
+
+def _identify_attribute_topic(message: str) -> str:
+    """
+    Identifies what attribute the user is asking about.
+    Step 1: keyword matching (fast, handles obvious cases)
+    Step 2: vector similarity fallback (handles synonyms/paraphrases)
+    """
+    msg = message.lower()
+
+    # Step 1: keyword matching
+    for topic, keywords in _ATTRIBUTE_KEYWORDS.items():
+        if any(kw in msg for kw in keywords):
+            return topic
+
+    # Step 2: vector similarity fallback
+    anchors = list(_ATTRIBUTE_ANCHORS.keys())
+    anchor_sentences = list(_ATTRIBUTE_ANCHORS.values())
+    best_topic, score = _best_match(message, anchor_sentences)
+    if score > 0.30:
+        return anchors[anchor_sentences.index(best_topic)]
+
+    return "general_details"
+
+
+# ── Comparison dimension detection (hybrid keyword + vector) ──────────────────
+
+_COMPARISON_KEYWORDS = {
+    "price":              ["cheaper", "expensive", "price", "cost", "value", "afford", "budget"],
+    "quality":            ["quality", "better", "best", "recommend", "durable", "lasts"],
+    "style_and_occasion": ["casual", "formal", "smart", "style", "occasion", "wear", "event"],
+    "material":           ["material", "fabric", "comfortable", "breathable", "soft", "feel"],
+    "colour":             ["colour", "color", "shade"],
+    "fit":                ["fit", "size", "slim", "loose", "tight"],
+    "overall":            ["overall", "general", "difference", "compare", "which", "versus", "vs"],
+}
+
+_COMPARISON_ANCHORS = {
+    "price":              "Which item is cheaper or better value for money",
+    "quality":            "Which item is better quality and more durable",
+    "style_and_occasion": "Which item is more suitable for a casual or formal occasion",
+    "material":           "Which item has better fabric or is more comfortable to wear",
+    "colour":             "Which item has a better colour option",
+    "fit":                "Which item has a better fit or sizing",
+    "overall":            "Compare these two items overall and tell me which is better",
+}
+
+
+def _identify_comparison_dimension(message: str) -> str:
+    """
+    Identifies what dimension the user wants to compare on.
+    Hybrid keyword → vector similarity.
+    """
+    msg = message.lower()
+
+    for dimension, keywords in _COMPARISON_KEYWORDS.items():
+        if any(kw in msg for kw in keywords):
+            return dimension
+
+    anchors = list(_COMPARISON_ANCHORS.keys())
+    anchor_sentences = list(_COMPARISON_ANCHORS.values())
+    best_dim, score = _best_match(message, anchor_sentences)
+    if score > 0.30:
+        return anchors[anchor_sentences.index(best_dim)]
+
+    return "overall"
+
+
+# ── Feedback sentiment classification (hybrid keyword + vector) ───────────────
+
+_FEEDBACK_KEYWORDS = {
+    "strong_positive": [
+        "love", "perfect", "exactly what", "amazing", "excellent",
+        "wonderful", "great choice", "this is it", "i'll take", "i will take",
+        "yes please", "definitely", "absolutely", "brilliant", "fantastic"
+    ],
+    "mild_positive": [
+        "like", "nice", "good", "looks good", "that works", "suits me",
+        "happy with", "okay i'll", "i'll go with", "i'll go", "yes",
+        "alright", "fine", "sounds good", "works for me"
+    ],
+    "neutral": [
+        "maybe", "possibly", "could work", "not sure", "let me think",
+        "i'll think", "on the fence", "unsure", "perhaps"
+    ],
+    "mild_negative": [
+        "not really", "not my", "don't think so", "not convinced",
+        "not keen", "not for me", "not ideal", "bit disappointed"
+    ],
+    "strong_negative": [
+        "hate", "don't like", "i dislike", "no not", "not what i",
+        "doesn't suit", "not right", "wrong", "bad", "ugly", "horrible",
+        "not impressed", "disappointed", "nah", "awful", "terrible",
+        "not what i wanted", "not happy"
+    ],
+}
+
+# Sentiment scores for each bucket
+_FEEDBACK_SCORES = {
+    "strong_positive": 0.9,
+    "mild_positive":   0.6,
+    "neutral":         0.0,
+    "mild_negative":  -0.5,
+    "strong_negative": -0.8,
+}
+
+_FEEDBACK_ANCHORS = {
+    "strong_positive": "I love this item it is perfect exactly what I wanted",
+    "mild_positive":   "I like this item it looks good and works for me",
+    "neutral":         "Maybe this could work I am not sure yet",
+    "mild_negative":   "This is not really my style I am not convinced",
+    "strong_negative": "I hate this it is not what I wanted at all",
+}
+
+
+def _classify_feedback_sentiment(message: str) -> float:
+    """
+    Returns a sentiment score on [-1.0, 1.0] for a feedback message.
+    Hybrid keyword → vector similarity.
+    """
+    msg = message.lower().strip()
+
+    # Step 1: keyword matching
+    for bucket, keywords in _FEEDBACK_KEYWORDS.items():
+        if any(kw in msg for kw in keywords):
+            return _FEEDBACK_SCORES[bucket]
+
+    # Step 2: vector similarity fallback
+    buckets = list(_FEEDBACK_ANCHORS.keys())
+    anchor_sentences = list(_FEEDBACK_ANCHORS.values())
+    best_bucket, score = _best_match(message, anchor_sentences)
+    if score > 0.35:
+        return _FEEDBACK_SCORES[buckets[anchor_sentences.index(best_bucket)]]
+
+    # Default: mild positive (ambiguous messages lean positive)
+    return 0.3
+
+
+# ── Item reference resolver ───────────────────────────────────────────────────
+
+def _resolve_item_reference(
+    message: str,
+    item_a: Optional[ItemInContext],
+    item_b: Optional[ItemInContext]
+) -> Optional[ItemInContext]:
+    """
+    Resolves a vague reference like "the first one", "the blue one",
+    "option 2" to a specific item. Returns item_a as default.
+    """
+    msg = message.lower()
+
+    # Explicit ordinal references to item_b
+    if any(phrase in msg for phrase in [
+        "second", "option 2", "the other", "second one",
+        "the 2nd", "number two", "item 2", "2nd one"
+    ]):
+        return item_b
+
+    # Colour-based resolution — check item_b first (less default)
+    if item_b and item_b.colour_group_name.lower() in msg:
+        return item_b
+    if item_a and item_a.colour_group_name.lower() in msg:
+        return item_a
+
+    # Name-based resolution
+    if item_b and item_b.prod_name.lower() in msg:
+        return item_b
+    if item_a and item_a.prod_name.lower() in msg:
+        return item_a
+
+    # Default: item_a is the primary focus
+    return item_a
+
+
+# ── Helper: build items_in_context dict ───────────────────────────────────────
+
+def _items_dict(item_a, item_b) -> dict:
+    return {
+        "item_a": item_a.model_dump() if item_a else None,
+        "item_b": item_b.model_dump() if item_b else None,
+    }
+
+
+# ── Main EnrichmentLayer class ────────────────────────────────────────────────
+
 class EnrichmentLayer:
     """
-    Assembles memory context after DistilBERT classification.
+    Assembles memory context after DistilBERT classification and returns
+    a standardised output structure for every label type.
 
-    Usage in your FastAPI endpoint:
+    The output structure is always:
+        {
+            "label":              str
+            "retrieval_strategy": str
+            "retrieval_input":    dict | None
+            "memory_context":     dict
+            "side_effects":       list[str]
+        }
+
+    retrieval_input is always None when retrieval_strategy is "NO".
+    retrieval_input always has the same envelope keys regardless of action.
+
+    Usage:
         enricher = EnrichmentLayer()
-        enriched = await enricher.enrich(
+        result = await enricher.enrich(
             label="ATTRIBUTE_QUESTION",
             retrieval_strategy="PARTIAL",
             session_id="sess_abc",
@@ -57,7 +359,7 @@ class EnrichmentLayer:
             current_message="What material is it?",
             entities={}
         )
-        # enriched is now ready to pass to your RAG system
+        # Pass result["retrieval_input"] to your RAG system
     """
 
     def __init__(self):
@@ -77,132 +379,124 @@ class EnrichmentLayer:
         """
         Main entry point. Called after every DistilBERT classification.
 
-        Args:
-            label:              DistilBERT label e.g. "ATTRIBUTE_QUESTION"
-            retrieval_strategy: "FULL", "PARTIAL", or "NO"
-            session_id:         Active session ID
-            user_id:            User ID
-            current_message:    The user's current message (cleaned text)
-            entities:           Entities extracted from the current message
-                                e.g. {"colour_group_name": "Black",
-                                      "product_type_name": "Dress",
-                                      "price_max": 50.0}
-
-        Returns:
-            An enriched context dict containing:
-                label:              The classification label
-                retrieval_strategy: "FULL" | "PARTIAL" | "NO"
-                current_message:    The original user message
-                memory_context:     Label-specific memory data
-                retrieval_query:    Structured query for your RAG system
-                                    (None if retrieval_strategy is "NO")
-                side_effects:       List of memory updates that were triggered
+        Returns the standardised enrichment output dict described in the
+        class docstring. The "retrieval_input" key is what your RAG
+        system consumes directly.
         """
-
-        # Always get the current dialogue state — every label needs it
         state = await self.session_mgr.get_dialogue_state(session_id)
 
-        # Route to the right enrichment function based on label
         if label == "INITIAL_REQUEST":
             return await self._enrich_initial_request(
-                session_id, user_id, current_message, entities, state
-            )
-
+                session_id, user_id, current_message, entities, state)
         elif label == "REFINEMENT":
             return await self._enrich_refinement(
-                session_id, user_id, current_message, entities, state
-            )
-
+                session_id, user_id, current_message, entities, state)
         elif label == "ATTRIBUTE_QUESTION":
             return await self._enrich_attribute_question(
-                session_id, user_id, current_message, entities, state
-            )
-
+                session_id, user_id, current_message, entities, state)
         elif label == "EXPLANATION_WHY":
             return await self._enrich_explanation_why(
-                session_id, user_id, current_message, entities, state
-            )
-
+                session_id, user_id, current_message, entities, state)
         elif label == "COMPARISON":
             return await self._enrich_comparison(
-                session_id, user_id, current_message, entities, state
-            )
-
+                session_id, user_id, current_message, entities, state)
         elif label == "SELECTION_REFERENCE":
             return await self._enrich_selection_reference(
-                session_id, user_id, current_message, entities, state
-            )
-
+                session_id, user_id, current_message, entities, state)
         elif label == "FEEDBACK":
             return await self._enrich_feedback(
-                session_id, user_id, current_message, entities, state
-            )
-
-        elif label == "CHITCHAT":
-            return await self._enrich_chitchat(
-                session_id, user_id, current_message
-            )
-
+                session_id, user_id, current_message, entities, state)
         else:
-            # Unknown label — treat as chitchat (safe fallback)
+            # CHITCHAT or unknown
             return await self._enrich_chitchat(
-                session_id, user_id, current_message
-            )
+                session_id, user_id, current_message)
 
-    # ── Label-specific enrichment functions ──────────────────────────────────
+    # ── Base memory context (always included regardless of label) ─────────────
 
-    async def _enrich_initial_request(
+    async def _base_memory_context(
         self,
-        session_id: str,
         user_id: str,
-        current_message: str,
-        entities: dict,
-        state: DialogueState
+        state: DialogueState,
+        include_preferences: bool = True
     ) -> dict:
         """
-        INITIAL_REQUEST → FULL retrieval
-
-        User is starting a fresh search. We need:
-        - Long-term preferences to personalise the catalog search
-        - Purchase history summary for additional personalisation
-        - Any items rejected earlier this session to exclude them
-        - The entities extracted from this message as new hard constraints
-
-        Side effects:
-        - Updates dialogue state with new hard constraints from entities
-        - Creates/reinforces preferences from entities
+        Builds the memory_context dict that is always present in output.
+        Includes dialogue state, style profile, and optionally preferences.
         """
+        ctx = {
+            "dialogue_state": {
+                "hard_constraints":    state.hard_constraints,
+                "soft_constraints":    state.soft_constraints,
+                "rejected_items":      state.rejected_items,
+                "accepted_items":      state.accepted_items,
+                "intent_summary":      state.intent_summary,
+            },
+            "long_term_preferences":  [],
+            "style_profile":          {},
+            "preference_summary":     {},
+            "existing_explanation":   None,
+        }
+
+        if include_preferences:
+            try:
+                pref_summary = await self.user_mgr.get_preference_summary(user_id)
+                ctx["long_term_preferences"] = pref_summary.get("liked_attributes", [])
+                ctx["style_profile"]         = pref_summary.get("style_profile", {})
+                ctx["preference_summary"]    = pref_summary
+            except Exception:
+                pass
+
+        return ctx
+
+    # ── Retrieval input envelope builder ──────────────────────────────────────
+
+    def _make_retrieval_input(
+        self,
+        action: str,
+        retrieval_strategy: str,
+        user_message: str,
+        item_a: Optional[ItemInContext],
+        item_b: Optional[ItemInContext],
+        exclude_ids: list,
+        payload: dict
+    ) -> dict:
+        """
+        Builds the standardised retrieval_input envelope.
+        This is the only place retrieval_input is constructed —
+        guarantees consistent shape for every label type.
+        """
+        return {
+            "action":             action,
+            "retrieval_strategy": retrieval_strategy,
+            "user_message":       user_message,
+            "items_in_context":   _items_dict(item_a, item_b),
+            "exclude_ids":        exclude_ids,
+            "payload":            payload,
+        }
+
+    # ── Label-specific enrichment methods ─────────────────────────────────────
+
+    async def _enrich_initial_request(
+        self, session_id, user_id, current_message, entities, state
+    ) -> dict:
+        """INITIAL_REQUEST → action: catalog_search"""
         side_effects = []
 
-        # Load long-term preference summary
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
 
-        # Extract hard constraints from entities in this message
-        # These override anything from previous turns
-        new_hard_constraints = {}
-        entity_field_map = {
-            "product_type_name": "product_type_name",
-            "colour_group_name": "colour_group_name",
-            "index_group_name":  "index_group_name",
-            "section_name":      "section_name",
-            "price_max":         "price_max",
-            "price_min":         "price_min",
-            "style":             "style",
-            "occasion":          "occasion"
+        # Extract hard constraints from entities
+        new_constraints = {
+            k: v for k, v in entities.items()
+            if k not in ("style", "occasion") and v is not None
         }
-        for key, val in entities.items():
-            if key in entity_field_map and val:
-                new_hard_constraints[key] = val
 
-        # Update dialogue state with new constraints
-        if new_hard_constraints:
+        if new_constraints:
             await self.session_mgr.update_dialogue_state(
-                session_id,
-                {"hard_constraints": new_hard_constraints}
+                session_id, {"hard_constraints": new_constraints}
             )
-            side_effects.append(f"Updated hard_constraints: {new_hard_constraints}")
+            side_effects.append(f"Updated hard_constraints: {new_constraints}")
 
-        # Update long-term preferences from entities (explicit source, positive)
+        # Update long-term preferences from entities
         pref_entities = {
             k: v for k, v in entities.items()
             if k not in ("price_max", "price_min")
@@ -215,88 +509,64 @@ class EnrichmentLayer:
                 source="explicit",
                 confidence=0.85
             )
-            side_effects.append(f"Preferences updated from entities")
+            side_effects.append("Preferences updated from entities")
 
-        # Build the retrieval query for your RAG system
-        retrieval_query = self._build_full_retrieval_query(
-            current_message=current_message,
-            hard_constraints={
-                **pref_summary.get("hard_constraints", {}),
-                **new_hard_constraints
-            },
-            preference_boosts=pref_summary.get("liked_attributes", []),
-            disliked_values=pref_summary.get("disliked_values", {}),
-            excluded_article_ids=state.rejected_items
-        )
+        merged_filters = {
+            **pref_summary.get("hard_constraints", {}),
+            **new_constraints
+        }
+
+        memory_ctx = await self._base_memory_context(user_id, state)
 
         return {
             "label":              "INITIAL_REQUEST",
             "retrieval_strategy": "FULL",
-            "current_message":    current_message,
-            "memory_context": {
-                "long_term_preferences":   pref_summary["liked_attributes"],
-                "disliked_values":         pref_summary["disliked_values"],
-                "style_profile":           pref_summary["style_profile"],
-                "purchase_summary":        pref_summary["purchase_summary"],
-                "top_product_types":       pref_summary["top_product_types"],
-                "top_colours":             pref_summary["top_colours"],
-                "new_constraints":         new_hard_constraints,
-                "excluded_article_ids":    state.rejected_items,
-            },
-            "retrieval_query": retrieval_query,
-            "side_effects":    side_effects
+            "retrieval_input": self._make_retrieval_input(
+                action="catalog_search",
+                retrieval_strategy="FULL",
+                user_message=current_message,
+                item_a=state.currently_discussing.get("item_a"),
+                item_b=state.currently_discussing.get("item_b"),
+                exclude_ids=state.rejected_items,
+                payload={
+                    "filters":           merged_filters,
+                    "preference_boosts": [
+                        {
+                            "attribute": p["attribute_name"],
+                            "value":     p["attribute_value"],
+                            "weight":    p["weight"]
+                        }
+                        for p in pref_summary.get("liked_attributes", [])
+                        if p["weight"] > 0.3
+                    ],
+                    "penalties": pref_summary.get("disliked_values", {}),
+                }
+            ),
+            "memory_context": memory_ctx,
+            "side_effects":   side_effects,
         }
 
     async def _enrich_refinement(
-        self,
-        session_id: str,
-        user_id: str,
-        current_message: str,
-        entities: dict,
-        state: DialogueState
+        self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        """
-        REFINEMENT → FULL retrieval
-
-        User is changing or adding a preference. We need:
-        - What was previously recommended (to understand what they are changing from)
-        - Current hard/soft constraints (to understand the baseline)
-        - Updated constraints from this message
-        - Rejection history (to not re-recommend rejected items)
-        - Full preference profile for the new search
-
-        Side effects:
-        - Updates hard_constraints in dialogue state
-        - Updates long-term preferences with new signal
-        """
+        """REFINEMENT → action: catalog_search (same as INITIAL_REQUEST)"""
         side_effects = []
 
-        # Get both the preference summary and current state
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
-        current_items = state.currently_discussing
 
-        # Extract new constraints from this refinement message
-        new_constraints = {}
-        for key, val in entities.items():
-            if val and key not in ("style", "occasion"):
-                new_constraints[key] = val
-
-        # Merge new constraints on top of existing ones
-        merged_constraints = {
-            **state.hard_constraints,
-            **new_constraints
+        # New constraints from this message, merged on top of existing ones
+        new_constraints = {
+            k: v for k, v in entities.items()
+            if k not in ("style", "occasion") and v is not None
         }
+        merged_constraints = {**state.hard_constraints, **new_constraints}
 
-        # Update dialogue state
         if new_constraints:
             await self.session_mgr.update_dialogue_state(
-                session_id,
-                {"hard_constraints": merged_constraints}
+                session_id, {"hard_constraints": merged_constraints}
             )
             side_effects.append(f"Merged constraints: {merged_constraints}")
 
-        # Update preferences with medium confidence
-        # (refinement signals are slightly less certain than direct statements)
         pref_entities = {
             k: v for k, v in entities.items()
             if k not in ("price_max", "price_min")
@@ -309,304 +579,228 @@ class EnrichmentLayer:
                 source="explicit",
                 confidence=0.80
             )
-            side_effects.append("Preferences updated from refinement entities")
+            side_effects.append("Preferences updated from refinement")
 
-        retrieval_query = self._build_full_retrieval_query(
-            current_message=current_message,
-            hard_constraints=merged_constraints,
-            preference_boosts=pref_summary.get("liked_attributes", []),
-            disliked_values=pref_summary.get("disliked_values", {}),
-            excluded_article_ids=state.rejected_items
-        )
+        memory_ctx = await self._base_memory_context(user_id, state)
+        memory_ctx["previous_constraints"] = state.hard_constraints
+        memory_ctx["new_changes"]          = new_constraints
 
-        return {
-            "label":              "REFINEMENT",
-            "retrieval_strategy": "FULL",
-            "current_message":    current_message,
-            "memory_context": {
-                "previous_items":      {
-                    "item_a": current_items.get("item_a"),
-                    "item_b": current_items.get("item_b")
-                },
-                "previous_constraints":  state.hard_constraints,
-                "updated_constraints":   merged_constraints,
-                "new_changes":           new_constraints,
-                "soft_constraints":      state.soft_constraints,
-                "rejected_items":        state.rejected_items,
-                "long_term_preferences": pref_summary["liked_attributes"],
-                "disliked_values":       pref_summary["disliked_values"],
-            },
-            "retrieval_query": retrieval_query,
-            "side_effects":    side_effects
-        }
-
-    async def _enrich_attribute_question(
-        self,
-        session_id: str,
-        user_id: str,
-        current_message: str,
-        entities: dict,
-        state: DialogueState
-    ) -> dict:
-        """
-        ATTRIBUTE_QUESTION → PARTIAL retrieval
-
-        User is asking about a specific property of an item already in context.
-        We do NOT need a new catalog search — just look up the item's details.
-
-        What we need:
-        - The items currently being discussed (item_a and item_b)
-        - The full article details from PostgreSQL (passed as a query to fetch)
-        - Any relevant user preferences for that attribute type
-
-        No side effects — asking a question does not change preferences.
-        """
         current_items = state.currently_discussing
         item_a = current_items.get("item_a")
         item_b = current_items.get("item_b")
 
-        # Identify which item the question is about
-        # Default to item_a (the first/primary recommended item)
-        target_item = item_a
+        return {
+            "label":              "REFINEMENT",
+            "retrieval_strategy": "FULL",
+            "retrieval_input": self._make_retrieval_input(
+                action="catalog_search",
+                retrieval_strategy="FULL",
+                user_message=current_message,
+                item_a=item_a,
+                item_b=item_b,
+                exclude_ids=state.rejected_items,
+                payload={
+                    "filters":           merged_constraints,
+                    "preference_boosts": [
+                        {
+                            "attribute": p["attribute_name"],
+                            "value":     p["attribute_value"],
+                            "weight":    p["weight"]
+                        }
+                        for p in pref_summary.get("liked_attributes", [])
+                        if p["weight"] > 0.3
+                    ],
+                    "penalties": pref_summary.get("disliked_values", {}),
+                }
+            ),
+            "memory_context": memory_ctx,
+            "side_effects":   side_effects,
+        }
 
-        # Check if the message references item_b specifically
-        msg_lower = current_message.lower()
-        if any(phrase in msg_lower for phrase in [
-            "second", "option 2", "the other", "item b",
-            item_b.prod_name.lower() if item_b else ""
-        ]):
-            target_item = item_b
+    async def _enrich_attribute_question(
+        self, session_id, user_id, current_message, entities, state
+    ) -> dict:
+        """ATTRIBUTE_QUESTION → action: item_attribute_lookup"""
+        current_items = state.currently_discussing
+        item_a = current_items.get("item_a")
+        item_b = current_items.get("item_b")
+
+        # Resolve which item the question is about
+        target_item = _resolve_item_reference(current_message, item_a, item_b)
+
+        # Identify what attribute is being asked about (hybrid similarity)
+        attribute_topic = _identify_attribute_topic(current_message)
+
+        memory_ctx = await self._base_memory_context(
+            user_id, state, include_preferences=False
+        )
 
         return {
             "label":              "ATTRIBUTE_QUESTION",
             "retrieval_strategy": "PARTIAL",
-            "current_message":    current_message,
-            "memory_context": {
-                "target_item":   target_item.model_dump() if target_item else None,
-                "item_a":        item_a.model_dump() if item_a else None,
-                "item_b":        item_b.model_dump() if item_b else None,
-                "question_about": self._identify_attribute_topic(current_message)
-            },
-            "retrieval_query": {
-                "action":     "lookup_item_attribute",
-                "article_id": target_item.article_id if target_item else None,
-                "attribute":  self._identify_attribute_topic(current_message),
-                "question":   current_message
-            },
-            "side_effects": []
+            "retrieval_input": self._make_retrieval_input(
+                action="item_attribute_lookup",
+                retrieval_strategy="PARTIAL",
+                user_message=current_message,
+                item_a=item_a,
+                item_b=item_b,
+                exclude_ids=state.rejected_items,
+                payload={
+                    "article_id":      target_item.article_id if target_item else None,
+                    "attribute_topic": attribute_topic,
+                }
+            ),
+            "memory_context": memory_ctx,
+            "side_effects":   [],
         }
 
     async def _enrich_explanation_why(
-        self,
-        session_id: str,
-        user_id: str,
-        current_message: str,
-        entities: dict,
-        state: DialogueState
+        self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        """
-        EXPLANATION_WHY → PARTIAL retrieval
-
-        User is asking why a specific item was recommended.
-        We need to retrieve the stored explanation for that item
-        and the preferences that drove the recommendation.
-
-        What we need:
-        - The explanation record from the explanations collection
-        - The user preference profile (to explain which preferences matched)
-        - The item currently in focus
-        """
+        """EXPLANATION_WHY → action: explanation_generate"""
         db = get_db()
         current_items = state.currently_discussing
         item_a = current_items.get("item_a")
+        item_b = current_items.get("item_b")
 
-        # Try to fetch the stored explanation for item_a
+        # Fetch stored explanation for item_a if it exists
         existing_explanation = None
         if item_a:
             expl_doc = await db.explanations.find_one(
-                {
-                    "session_id": session_id,
-                    "article_id": item_a.article_id
-                },
-                sort=[("created_at", -1)]  # Most recent explanation first
+                {"session_id": session_id, "article_id": item_a.article_id},
+                sort=[("created_at", -1)]
             )
             if expl_doc:
                 expl_doc.pop("_id", None)
                 existing_explanation = expl_doc
 
-        # Get user preferences to explain the match
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
+        memory_ctx = await self._base_memory_context(user_id, state)
+        memory_ctx["existing_explanation"] = existing_explanation
 
         return {
             "label":              "EXPLANATION_WHY",
             "retrieval_strategy": "PARTIAL",
-            "current_message":    current_message,
-            "memory_context": {
-                "item_in_focus":        item_a.model_dump() if item_a else None,
-                "existing_explanation": existing_explanation,
-                "matched_preferences":  pref_summary["liked_attributes"],
-                "style_profile":        pref_summary["style_profile"],
-                "hard_constraints":     state.hard_constraints
-            },
-            "retrieval_query": {
-                "action":        "generate_explanation",
-                "article_id":    item_a.article_id if item_a else None,
-                "question":      current_message,
-                "prior_claims":  (
-                    existing_explanation.get("claims", [])
-                    if existing_explanation else []
-                )
-            },
-            "side_effects": []
+            "retrieval_input": self._make_retrieval_input(
+                action="explanation_generate",
+                retrieval_strategy="PARTIAL",
+                user_message=current_message,
+                item_a=item_a,
+                item_b=item_b,
+                exclude_ids=state.rejected_items,
+                payload={
+                    "article_id":   item_a.article_id if item_a else None,
+                    "prior_claims": (
+                        existing_explanation.get("claims", [])
+                        if existing_explanation else []
+                    ),
+                    "matched_prefs": pref_summary.get("liked_attributes", []),
+                }
+            ),
+            "memory_context": memory_ctx,
+            "side_effects":   [],
         }
 
     async def _enrich_comparison(
-        self,
-        session_id: str,
-        user_id: str,
-        current_message: str,
-        entities: dict,
-        state: DialogueState
+        self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        """
-        COMPARISON → PARTIAL retrieval
-
-        User is comparing two items already in context.
-        We need both items' full details and user preferences
-        (to explain which one better matches their profile).
-
-        No new catalog search needed — items are already known.
-        """
+        """COMPARISON → action: item_compare"""
         current_items = state.currently_discussing
         item_a = current_items.get("item_a")
         item_b = current_items.get("item_b")
 
+        # Identify comparison dimension using hybrid similarity
+        dimension = _identify_comparison_dimension(current_message)
+
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
+        memory_ctx = await self._base_memory_context(user_id, state)
 
         return {
             "label":              "COMPARISON",
             "retrieval_strategy": "PARTIAL",
-            "current_message":    current_message,
-            "memory_context": {
-                "item_a":               item_a.model_dump() if item_a else None,
-                "item_b":               item_b.model_dump() if item_b else None,
-                "user_preferences":     pref_summary["liked_attributes"],
-                "hard_constraints":     state.hard_constraints,
-                "comparison_dimension": self._identify_comparison_dimension(
-                    current_message
-                )
-            },
-            "retrieval_query": {
-                "action":               "compare_items",
-                "article_id_a":         item_a.article_id if item_a else None,
-                "article_id_b":         item_b.article_id if item_b else None,
-                "comparison_question":  current_message,
-                "user_preference_weights": {
-                    p["attribute_name"]: p["weight"]
-                    for p in pref_summary["liked_attributes"]
+            "retrieval_input": self._make_retrieval_input(
+                action="item_compare",
+                retrieval_strategy="PARTIAL",
+                user_message=current_message,
+                item_a=item_a,
+                item_b=item_b,
+                exclude_ids=state.rejected_items,
+                payload={
+                    "article_id_a":        item_a.article_id if item_a else None,
+                    "article_id_b":        item_b.article_id if item_b else None,
+                    "comparison_dimension": dimension,
+                    "preference_weights": {
+                        p["attribute_name"]: p["weight"]
+                        for p in pref_summary.get("liked_attributes", [])
+                    },
                 }
-            },
-            "side_effects": []
+            ),
+            "memory_context": memory_ctx,
+            "side_effects":   [],
         }
 
     async def _enrich_selection_reference(
-        self,
-        session_id: str,
-        user_id: str,
-        current_message: str,
-        entities: dict,
-        state: DialogueState
+        self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        """
-        SELECTION_REFERENCE → PARTIAL retrieval
-
-        User is pointing at a specific item using a pronoun or ordinal
-        like "the first one", "that one", "the blue one".
-        We resolve which item they mean and return its full details.
-
-        Side effects:
-        - May update currently_discussing to focus on the selected item
-        """
+        """SELECTION_REFERENCE → action: item_detail_lookup"""
         current_items = state.currently_discussing
         item_a = current_items.get("item_a")
         item_b = current_items.get("item_b")
 
-        # Resolve which item the user is referring to
-        selected_item = self._resolve_item_reference(
-            current_message, item_a, item_b
-        )
+        selected_item = _resolve_item_reference(current_message, item_a, item_b)
 
-        # Update dialogue state to reflect the focused item
+        # If user selected item_b, swap so item_a is always the focus
         side_effects = []
-        if selected_item and selected_item == item_b:
-            # User selected item_b — swap so item_a is always the focus
+        if selected_item and item_b and selected_item.article_id == item_b.article_id:
             await self.session_mgr.update_dialogue_state(
                 session_id,
                 {"currently_discussing": {
                     "item_a": item_b.model_dump() if item_b else None,
-                    "item_b": item_a.model_dump() if item_a else None
+                    "item_b": item_a.model_dump() if item_a else None,
                 }}
             )
-            side_effects.append("Swapped item focus to selected item")
+            side_effects.append("Item focus swapped to selected item")
+
+        memory_ctx = await self._base_memory_context(
+            user_id, state, include_preferences=False
+        )
 
         return {
             "label":              "SELECTION_REFERENCE",
             "retrieval_strategy": "PARTIAL",
-            "current_message":    current_message,
-            "memory_context": {
-                "selected_item":  (
-                    selected_item.model_dump() if selected_item else None
-                ),
-                "item_a":         item_a.model_dump() if item_a else None,
-                "item_b":         item_b.model_dump() if item_b else None,
-                "resolution_confidence": (
-                    "high" if selected_item else "low"
-                )
-            },
-            "retrieval_query": {
-                "action":     "get_item_details",
-                "article_id": selected_item.article_id if selected_item else None,
-                "question":   current_message
-            },
-            "side_effects": side_effects
+            "retrieval_input": self._make_retrieval_input(
+                action="item_detail_lookup",
+                retrieval_strategy="PARTIAL",
+                user_message=current_message,
+                item_a=item_a,
+                item_b=item_b,
+                exclude_ids=state.rejected_items,
+                payload={
+                    "article_id": selected_item.article_id if selected_item else None,
+                }
+            ),
+            "memory_context": memory_ctx,
+            "side_effects":   side_effects,
         }
 
     async def _enrich_feedback(
-        self,
-        session_id: str,
-        user_id: str,
-        current_message: str,
-        entities: dict,
-        state: DialogueState
+        self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        """
-        FEEDBACK → NO retrieval
-
-        User is reacting to a recommendation (positive, negative, or neutral).
-        No new search needed — just update memory based on the reaction.
-
-        Side effects (the most important side effects in the whole system):
-        - Positive feedback → reinforce preferences of the accepted item
-        - Negative feedback → add dislikes for the rejected item's attributes
-        - Update accepted_items or rejected_items in dialogue state
-        - Update recommendation outcome in recommendations collection
-        """
+        """FEEDBACK → no retrieval. Updates memory based on sentiment."""
         db = get_db()
         side_effects = []
 
         current_items = state.currently_discussing
         item_a = current_items.get("item_a")
 
-        # Determine if feedback is positive or negative
-        sentiment_score = self._classify_feedback_sentiment(current_message)
-        is_positive = sentiment_score > 0.0
+        # Classify sentiment using hybrid keyword + vector similarity
+        sentiment_score = _classify_feedback_sentiment(current_message)
+        is_positive     = sentiment_score > 0.0
 
-        # Update preference memory based on feedback
         if item_a:
-            # Build entities from the item's attributes
             item_entities = {
-                "colour_group_name":  item_a.colour_group_name,
-                "product_type_name":  item_a.product_type_name,
+                "colour_group_name": item_a.colour_group_name,
+                "product_type_name": item_a.product_type_name,
             }
             if item_a.index_group_name:
                 item_entities["index_group_name"] = item_a.index_group_name
@@ -617,7 +811,7 @@ class EnrichmentLayer:
                 user_id=user_id,
                 entities=item_entities,
                 sentiment=sentiment_score,
-                source="implicit",   # Feedback is implicit signal
+                source="implicit",
                 confidence=0.80
             )
             side_effects.append(
@@ -626,40 +820,30 @@ class EnrichmentLayer:
                 f"{list(item_entities.keys())}"
             )
 
-            # Update dialogue state
             if is_positive:
                 updated_accepted = state.accepted_items + [item_a.article_id]
                 await self.session_mgr.update_dialogue_state(
-                    session_id,
-                    {"accepted_items": updated_accepted}
+                    session_id, {"accepted_items": updated_accepted}
                 )
-                side_effects.append(
-                    f"Added {item_a.article_id} to accepted_items"
-                )
+                side_effects.append(f"Added {item_a.article_id} to accepted_items")
 
-                # Update purchase summary if it is a strong acceptance
                 if sentiment_score > 0.7:
                     await self.user_mgr.update_purchase_summary(
                         user_id=user_id,
                         article_data={
-                            "product_type_name":  item_a.product_type_name,
-                            "colour_group_name":  item_a.colour_group_name,
-                            "index_group_name":   item_a.index_group_name
+                            "product_type_name": item_a.product_type_name,
+                            "colour_group_name": item_a.colour_group_name,
+                            "index_group_name":  item_a.index_group_name,
                         }
                     )
                     side_effects.append("Purchase summary updated")
-
             else:
                 updated_rejected = state.rejected_items + [item_a.article_id]
                 await self.session_mgr.update_dialogue_state(
-                    session_id,
-                    {"rejected_items": updated_rejected}
+                    session_id, {"rejected_items": updated_rejected}
                 )
-                side_effects.append(
-                    f"Added {item_a.article_id} to rejected_items"
-                )
+                side_effects.append(f"Added {item_a.article_id} to rejected_items")
 
-            # Update the recommendation outcome in MongoDB
             await db.recommendations.update_one(
                 {
                     "session_id": session_id,
@@ -673,234 +857,45 @@ class EnrichmentLayer:
                 }
             )
             side_effects.append(
-                f"Recommendation outcome: "
-                f"{'accepted' if is_positive else 'rejected'}"
+                f"Recommendation outcome: {'accepted' if is_positive else 'rejected'}"
             )
+
+        memory_ctx = await self._base_memory_context(
+            user_id, state, include_preferences=False
+        )
+        memory_ctx["feedback"] = {
+            "sentiment_score": sentiment_score,
+            "is_positive":     is_positive,
+            "feedback_type": (
+                "positive" if sentiment_score > 0.3
+                else "negative" if sentiment_score < -0.3
+                else "neutral"
+            ),
+            "item_reacted_to": item_a.model_dump() if item_a else None,
+        }
 
         return {
             "label":              "FEEDBACK",
             "retrieval_strategy": "NO",
-            "current_message":    current_message,
-            "memory_context": {
-                "item_reacted_to": item_a.model_dump() if item_a else None,
-                "sentiment_score": sentiment_score,
-                "is_positive":     is_positive,
-                "feedback_type": (
-                    "positive" if sentiment_score > 0.3
-                    else "negative" if sentiment_score < -0.3
-                    else "neutral"
-                )
-            },
-            "retrieval_query": None,   # No retrieval for feedback
-            "side_effects":    side_effects
+            "retrieval_input":    None,   # no retrieval for feedback
+            "memory_context":     memory_ctx,
+            "side_effects":       side_effects,
         }
 
     async def _enrich_chitchat(
-        self,
-        session_id: str,
-        user_id: str,
-        current_message: str
+        self, session_id, user_id, current_message
     ) -> dict:
-        """
-        CHITCHAT → NO retrieval
-
-        Greeting, thanks, off-topic message.
-        Nothing to fetch from memory — just respond conversationally.
-        """
+        """CHITCHAT → no retrieval, minimal memory context."""
         return {
             "label":              "CHITCHAT",
             "retrieval_strategy": "NO",
-            "current_message":    current_message,
-            "memory_context":     {},
-            "retrieval_query":    None,
-            "side_effects":       []
-        }
-
-    # ── Helper methods ────────────────────────────────────────────────────────
-
-    def _build_full_retrieval_query(
-        self,
-        current_message: str,
-        hard_constraints: dict,
-        preference_boosts: list,
-        disliked_values: dict,
-        excluded_article_ids: list
-    ) -> dict:
-        """
-        Builds the structured query dict for your RAG/retrieval system.
-        This is the format your GNN RAG, Text RAG, or Multimodal RAG
-        will receive when it needs to search the catalog.
-
-        hard_constraints → mandatory WHERE filters
-        preference_boosts → ranking weights (soft boosters)
-        disliked_values   → values to penalise in ranking
-        excluded_article_ids → articles to exclude entirely
-        """
-        return {
-            "action":    "catalog_search",
-            "user_query": current_message,
-
-            # These become strict WHERE conditions in your PostgreSQL query
-            # or mandatory filters in your vector search
-            "filters": {
-                k: v for k, v in hard_constraints.items()
-                if v is not None
+            "retrieval_input":    None,
+            "memory_context":     {
+                "dialogue_state":        {},
+                "long_term_preferences": [],
+                "style_profile":         {},
+                "preference_summary":    {},
+                "existing_explanation":  None,
             },
-
-            # These boost ranking scores for matching items
-            # weight is already computed as sentiment × confidence × decay
-            "preference_boosts": [
-                {
-                    "attribute": p["attribute_name"],
-                    "value":     p["attribute_value"],
-                    "weight":    p["weight"]
-                }
-                for p in preference_boosts
-                if p["weight"] > 0.3  # Only include meaningful boosts
-            ],
-
-            # These penalise items with disliked attribute values
-            "penalties": disliked_values,
-
-            # These article_ids are completely excluded from results
-            "exclude_article_ids": excluded_article_ids
+            "side_effects": [],
         }
-
-    def _identify_attribute_topic(self, message: str) -> str:
-        """
-        Identifies what attribute the user is asking about.
-        Maps to column names from sample_articles.csv where possible.
-        """
-        msg = message.lower()
-
-        if any(w in msg for w in ["material", "fabric", "made of", "cotton",
-                                   "linen", "polyester", "wash", "care"]):
-            return "material_and_care"
-
-        if any(w in msg for w in ["colour", "color", "shade", "hue"]):
-            return "colour_group_name"
-
-        if any(w in msg for w in ["pocket", "pockets"]):
-            return "pockets"
-
-        if any(w in msg for w in ["size", "fit", "slim", "loose", "relaxed",
-                                   "fitted", "run small", "run large"]):
-            return "sizing_and_fit"
-
-        if any(w in msg for w in ["sleeve", "neckline", "collar", "length",
-                                   "style", "cut", "design"]):
-            return "design_details"
-
-        if any(w in msg for w in ["price", "cost", "expensive", "cheap"]):
-            return "price"
-
-        return "general_details"
-
-    def _identify_comparison_dimension(self, message: str) -> str:
-        """Identifies what dimension the user wants to compare on."""
-        msg = message.lower()
-
-        if any(w in msg for w in ["cheaper", "expensive", "price", "cost",
-                                   "value", "afford"]):
-            return "price"
-
-        if any(w in msg for w in ["quality", "better", "best", "recommend"]):
-            return "quality_and_recommendation"
-
-        if any(w in msg for w in ["casual", "formal", "smart", "style",
-                                   "occasion", "wear"]):
-            return "style_and_occasion"
-
-        if any(w in msg for w in ["material", "fabric", "comfortable"]):
-            return "material"
-
-        if any(w in msg for w in ["colour", "color"]):
-            return "colour"
-
-        return "overall"
-
-    def _resolve_item_reference(
-        self,
-        message: str,
-        item_a: Optional[ItemInContext],
-        item_b: Optional[ItemInContext]
-    ) -> Optional[ItemInContext]:
-        """
-        Resolves a vague reference like "the first one", "the blue one",
-        "option 2" to a specific item.
-        Returns the resolved ItemInContext, or item_a as default.
-        """
-        msg = message.lower()
-
-        # Explicit ordinal references to item_b
-        if any(phrase in msg for phrase in [
-            "second", "option 2", "the other", "second one",
-            "the 2nd", "number two", "item 2"
-        ]):
-            return item_b
-
-        # Colour-based resolution
-        if item_b and item_b.colour_group_name.lower() in msg:
-            return item_b
-        if item_a and item_a.colour_group_name.lower() in msg:
-            return item_a
-
-        # Name-based resolution
-        if item_b and item_b.prod_name.lower() in msg:
-            return item_b
-        if item_a and item_a.prod_name.lower() in msg:
-            return item_a
-
-        # Default: item_a is always the primary focus
-        return item_a
-
-    def _classify_feedback_sentiment(self, message: str) -> float:
-        """
-        Classifies feedback message sentiment as a float on [-1.0, 1.0].
-
-        Positive feedback  → +0.8 to +1.0 (reinforce preferences)
-        Neutral feedback   → -0.1 to +0.1 (weak signal, small update)
-        Negative feedback  → -0.6 to -0.9 (strengthen dislikes)
-
-        Uses keyword matching — simple and transparent.
-        Your system could replace this with a sentiment model later.
-        """
-        msg = message.lower()
-
-        strong_positive = [
-            "love", "perfect", "exactly", "amazing", "excellent",
-            "wonderful", "great choice", "this is it", "i'll take",
-            "yes please", "definitely", "absolutely"
-        ]
-        mild_positive = [
-            "like", "nice", "good", "looks good", "that works",
-            "suits me", "i'm happy", "okay i'll go", "i'll go with",
-            "yes", "sure", "alright"
-        ]
-        neutral = [
-            "maybe", "possibly", "could work", "not sure",
-            "let me think", "i'll think", "on the fence"
-        ]
-        mild_negative = [
-            "not really", "not my", "don't think", "hmm",
-            "not convinced", "not keen", "not for me"
-        ]
-        strong_negative = [
-            "hate", "don't like", "no", "not what", "doesn't suit",
-            "not right", "wrong", "bad", "ugly", "horrible",
-            "not impressed", "disappointed", "nah", "awful"
-        ]
-
-        if any(w in msg for w in strong_positive):
-            return 0.9
-        if any(w in msg for w in mild_positive):
-            return 0.6
-        if any(w in msg for w in strong_negative):
-            return -0.8
-        if any(w in msg for w in mild_negative):
-            return -0.5
-        if any(w in msg for w in neutral):
-            return 0.0
-
-        # Default: mild positive (ambiguous messages lean positive)
-        return 0.3
