@@ -34,6 +34,13 @@ async def chat_endpoint(request: ChatRequest):
         # 1. Retrieve the best match using M2 Retriever
         recommendations = m2_retriever.get_recommendations(text_query=user_query, top_k=1)
         
+        if recommendations == "IRRELEVANT_QUERY":
+            return {
+                "reply": "I am a fashion design recommender! Please ask me about clothing, styles, or colors.",
+                "article_id": None,
+                "image_url": None
+            }
+        
         if not recommendations:
             return {
                 "reply": "I'm sorry, I couldn't find any items matching your description.",

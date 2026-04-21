@@ -28,9 +28,19 @@ class QueryUnderstandingVLM:
             except Exception as e:
                 print(f"VLM: [WARNING] Failed to initialize Gemini client: {e}. Falling back to local BLIP.")
         else:
-            print("VLM: [WARNING] No GEMINI_API_KEY found. Falling back to local BLIP.")
+            print("VLM: [WARNING] No GEMINI_API_KEY found. BLIP will be lazy-loaded when needed.")
         
-        print(f"Loading BLIP Pre-processor on {self.device}...")
+        # Initialize placeholders for lazy loading
+        self.processor = None
+        self.captioning_model = None
+        self.vqa_model = None
+
+    def _ensure_blip_loaded(self):
+        """Lazy-loads the heavy BLIP models only when absolutely necessary."""
+        if self.processor is not None:
+            return # Already loaded
+            
+        print(f"\n[Lazy Load] Bringing BLIP Pre-processor online on {self.device} (This will take a moment)...")
         
         # Primary VLM (from Tech Stack)
         self.captioning_model_name = "Salesforce/blip-image-captioning-base"
@@ -42,6 +52,8 @@ class QueryUnderstandingVLM:
             from transformers import BlipForQuestionAnswering
             self.vqa_model_name = "Salesforce/blip-vqa-base"
             self.vqa_model = BlipForQuestionAnswering.from_pretrained(self.vqa_model_name).to(self.device)
+            
+        print("[Lazy Load] BLIP models successfully loaded into memory.\n")
 
     def extract_search_query(self, text_query=None, image_path=None):
         """
@@ -53,6 +65,9 @@ class QueryUnderstandingVLM:
         if text_query and not image_path:
             clean_query = self._gemini_extract_text_intent(text_query)
             if clean_query:
+                # If Gemini detected no fashion intent, return the flag directly
+                if clean_query == "IRRELEVANT_QUERY":
+                    return "IRRELEVANT_QUERY"
                 return clean_query
             return text_query.strip()
             
@@ -96,13 +111,10 @@ class QueryUnderstandingVLM:
         try:
             from google.genai import types
             prompt = (
-                f"You are a strict fashion search intent extractor. "
-                f"Extract the core fashion keywords (color, exact item type, pattern, style) "
-                f"from the following user text. Ignore all conversational filler (e.g., 'I am looking for', 'find me'). "
-                f"You MUST include the specific clothing item (e.g., 'dress', 'shirt', 'pants') in your output if it is mentioned. "
-                f"If the user specifies a negative constraint (e.g., 'not red'), output what it SHOULD be, or omit the negative feature.\n"
-                f"User text: \"{text_query}\"\n"
-                f"Output ONLY the keywords separated by spaces. Nothing else. Example: 'black elegant dress'"
+                f"You are a helpful fashion assistant.\n"
+                f"The user said: '{text_query}'\n"
+                f"What is the exact clothing item the user is trying to find? Please extract ONLY the item they want, and ignore any other clothing mentioned as background context (like a friend's dress).\n"
+                f"Reply with just the keywords (e.g., 'blue denim jacket' or 'party wear shirt men'). If there is no clothing item they want to find, reply exactly with 'IRRELEVANT_QUERY'."
             )
             response = self.gemini_client.models.generate_content(
                 model=self.gemini_model_name,
@@ -111,8 +123,13 @@ class QueryUnderstandingVLM:
             )
             if response.text:
                 result = response.text.strip().replace('\n', ' ')
+                if not result:
+                    result = "IRRELEVANT_QUERY"
                 print(f"VLM (Gemini Text): Cleaned '{text_query}' -> '{result}'")
                 return result
+            else:
+                print(f"VLM (Gemini Text): Empty response from Gemini. Treating as irrelevant.")
+                return "IRRELEVANT_QUERY"
         except Exception as e:
             print(f"   [Gemini API Error] {e}")
         return None
@@ -171,6 +188,7 @@ class QueryUnderstandingVLM:
         return None
 
     def _generate_caption(self, image_path):
+        self._ensure_blip_loaded()
         raw_image = Image.open(image_path).convert('RGB')
         # Instruct BLIP to focus on clothing if possible
         text = "a photograph of clothing showing"
@@ -182,6 +200,7 @@ class QueryUnderstandingVLM:
         return self.processor.decode(out[0], skip_special_tokens=True).replace("a photograph of clothing showing", "").strip()
 
     def _run_vqa(self, image_path, question):
+        self._ensure_blip_loaded()
         raw_image = Image.open(image_path).convert('RGB')
         inputs = self.processor(raw_image, question, return_tensors="pt").to(self.device)
         
