@@ -529,7 +529,15 @@ class EnrichmentLayer:
                 item_b=state.currently_discussing.get("item_b"),
                 exclude_ids=state.rejected_items,
                 payload={
-                    "filters":           merged_filters,
+                    # Hard constraints — mandatory WHERE conditions
+                    "filters": merged_filters,
+                    # Soft constraints from session state (style, occasion)
+                    # NOT mandatory — use to contextualise search and ranking
+                    "soft_constraints": {
+                        k: v for k, v in state.soft_constraints.items()
+                        if v is not None
+                    },
+                    # Long-term preference boosts — ranking weights
                     "preference_boosts": [
                         {
                             "attribute": p["attribute_name"],
@@ -539,6 +547,9 @@ class EnrichmentLayer:
                         for p in pref_summary.get("liked_attributes", [])
                         if p["weight"] > 0.3
                     ],
+                    # Purchase history hints — from pre-loaded transaction history
+                    "purchase_history_hints": await self._get_purchase_hints(user_id),
+                    # Disliked values — rank lower in results
                     "penalties": pref_summary.get("disliked_values", {}),
                 }
             ),
@@ -600,7 +611,14 @@ class EnrichmentLayer:
                 item_b=item_b,
                 exclude_ids=state.rejected_items,
                 payload={
-                    "filters":           merged_constraints,
+                    # Hard constraints — merged old + new from this turn
+                    "filters": merged_constraints,
+                    # Soft constraints from session (style, occasion)
+                    "soft_constraints": {
+                        k: v for k, v in state.soft_constraints.items()
+                        if v is not None
+                    },
+                    # Long-term preference boosts
                     "preference_boosts": [
                         {
                             "attribute": p["attribute_name"],
@@ -610,6 +628,9 @@ class EnrichmentLayer:
                         for p in pref_summary.get("liked_attributes", [])
                         if p["weight"] > 0.3
                     ],
+                    # Purchase history hints — from pre-loaded transaction history
+                    "purchase_history_hints": await self._get_purchase_hints(user_id),
+                    # Disliked values
                     "penalties": pref_summary.get("disliked_values", {}),
                 }
             ),
@@ -837,6 +858,37 @@ class EnrichmentLayer:
             ),
             "memory_context": memory_ctx,
             "side_effects":   side_effects,
+        }
+
+    async def _get_purchase_hints(self, user_id: str) -> dict:
+        """
+        Returns purchase_history_hints from the pre-loaded customer profile.
+        Falls back to empty hints if no profile exists.
+        """
+        try:
+            user = await self.user_mgr.get_user_by_id(user_id)
+            if user and hasattr(user, 'purchase_history') and user.purchase_history:
+                ph = user.purchase_history
+                return {
+                    "top_colours": [
+                        c["colour"] for c in ph.get("top_colours", [])
+                    ],
+                    "top_product_types": [
+                        t["type"] for t in ph.get("top_product_types", [])
+                    ],
+                    "inferred_gender":      ph.get("inferred_gender"),
+                    "budget_tier":          ph.get("price_stats", {}).get("budget_tier"),
+                    "preferred_price_range":ph.get("price_stats", {}).get("preferred_range"),
+                    "dominant_colour":      ph.get("dominant_colour"),
+                    "dominant_type":        ph.get("dominant_product_type"),
+                }
+        except Exception:
+            pass
+        return {
+            "top_colours": [], "top_product_types": [],
+            "inferred_gender": None, "budget_tier": None,
+            "preferred_price_range": None,
+            "dominant_colour": None, "dominant_type": None,
         }
 
     async def _enrich_feedback(

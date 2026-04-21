@@ -207,6 +207,49 @@ class UserManager:
 
         return user
 
+    async def get_user_by_id(self, user_id: str):
+        """Returns the User document by user_id."""
+        db = get_db()
+        doc = await db.users.find_one({"user_id": user_id})
+        if not doc:
+            return None
+        doc = _strip_mongo_id(doc)
+        try:
+            from memory.models.schemas import User
+            return User.model_validate(doc)
+        except Exception:
+            return None
+
+    async def get_purchase_history(self, user_id: str) -> dict:
+        """
+        Returns the full purchase_history dict for a user.
+        This contains the complete analysis computed by customer_profile_loader.
+        Returns {} if no history exists.
+        """
+        db  = get_db()
+        doc = await db.users.find_one(
+            {"user_id": user_id},
+            {"purchase_history": 1}
+        )
+        if not doc:
+            # Try by customer_id pattern
+            return {}
+        return doc.get("purchase_history", {})
+
+    async def get_purchase_history_by_customer(self, customer_id: str) -> dict:
+        """
+        Returns the full purchase_history dict for a customer_id.
+        Used during user creation to pre-load history.
+        """
+        db  = get_db()
+        doc = await db.users.find_one(
+            {"customer_id": customer_id},
+            {"purchase_history": 1}
+        )
+        if not doc:
+            return {}
+        return doc.get("purchase_history", {})
+
     async def get_preference_summary(self, user_id: str) -> dict:
         """
         Returns a clean, query-ready summary of the user's preferences.
