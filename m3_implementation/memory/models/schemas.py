@@ -119,6 +119,7 @@ class UserDocument(BaseModel):
     # High-level profile
     style_profile: StyleProfile = Field(default_factory=StyleProfile)
     purchase_summary: PurchaseSummary = Field(default_factory=PurchaseSummary)
+    purchase_history: dict            = Field(default_factory=dict)
 
     class Config:
         # Allow extra fields (in case MongoDB returns _id or other fields)
