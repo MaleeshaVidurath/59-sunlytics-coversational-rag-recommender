@@ -36,13 +36,21 @@ def print_turn(turn_num, user_msg, result):
             print(f"SOFT:    {payload['soft_constraints']}")
 
     rag = result.get("rag_result", {})
-    response  = rag.get("response_text", "")
-    hall_flag = rag.get("hallucination_flag", False)
-    attempts  = rag.get("attempt_count", 1)
-    items     = rag.get("items_recommended", [])
+    response       = rag.get("response_text", "")
+    hall_flag      = rag.get("hallucination_flag", False)
+    attempts       = rag.get("attempt_count", 1)
+    items          = rag.get("items_recommended", [])
+    contra_found   = rag.get("contradiction_found", False)
+    contra_count   = rag.get("contradiction_count", 0)
+    product_ids    = rag.get("product_ids", [])
+    product_names  = rag.get("product_names", [])
 
     if items:
         print(f"ITEMS:  {[i.get('name','?') for i in items]}")
+
+    if product_ids:
+        for pid, pname in zip(product_ids, product_names):
+            print(f"  product_id={pid}  name={pname}")
 
     print(f"\nBOT:   {response}")
 
@@ -52,6 +60,16 @@ def print_turn(turn_num, user_msg, result):
             print(f"     Flagged: {s.get('sentence','')[:80]}")
     else:
         print(f"  ✓  Hallucination check passed (attempt {attempts})")
+
+    if contra_found:
+        print(f"  ⚠  CONTRADICTION DETECTED AND FIXED ({contra_count} contradiction(s))")
+        for c in rag.get("contradictions", []):
+            print(f"     Article: {c.get('article_name','?')} | "
+                  f"Attribute: {c.get('attribute','?')}")
+            print(f"     Old: '{c.get('old_value','?')}' → "
+                  f"Correct: '{c.get('authoritative_value','?')}'")
+    else:
+        print(f"  ✓  Contradiction check passed")
 
 
 async def run_conversation():
@@ -159,7 +177,10 @@ async def run_conversation():
 
     hallucinated = [r for r in results
                     if r.get("rag_result", {}).get("hallucination_flag")]
-    print(f"Hallucination flags: {len(hallucinated)}/{len(results)}")
+    contradicted = [r for r in results
+                    if r.get("rag_result", {}).get("contradiction_found")]
+    print(f"Hallucination flags:   {len(hallucinated)}/{len(results)}")
+    print(f"Contradictions fixed:  {len(contradicted)}/{len(results)}")
 
     session = await db.sessions.find_one({"session_id": new_session})
     if session:
