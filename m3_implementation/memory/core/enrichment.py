@@ -993,12 +993,14 @@ class EnrichmentLayer:
     async def _enrich_chitchat(
         self, session_id, user_id, current_message
     ) -> dict:
-        """CHITCHAT → no retrieval, minimal memory context."""
+        """CHITCHAT → no retrieval, minimal memory context.
+        Passes user_message so the response generator knows what was said."""
         return {
             "label":              "CHITCHAT",
             "retrieval_strategy": "NO",
             "retrieval_input":    None,
             "memory_context":     {
+                "user_message":          current_message,
                 "dialogue_state":        {},
                 "long_term_preferences": [],
                 "style_profile":         {},

@@ -178,10 +178,27 @@ class MemoryPipeline:
 
         # ── Step 3b: Not-relevant input guard ─────────────────────────────────
         # Check whether the user's message is fashion-relevant before
-        # running any classification or retrieval. If the user asks about
-        # the weather, sports results, cooking etc. — politely decline.
-        # Uses keyword fast-path first, vector similarity as fallback.
-        _is_relevant, _relevance_score = is_fashion_relevant(message)
+        # running any classification or retrieval.
+        # EXCEPTION: if there is conversation history, short conversational
+        # messages (thanks, ok, great etc.) are always allowed through.
+        # They are continuations, not off-topic queries.
+        _skip_relevance = False
+        if history:
+            _ml = message.lower().strip()
+            _ok_phrases = [
+                "thanks", "thank you", "cheers", "great", "ok", "okay",
+                "perfect", "awesome", "brilliant", "wonderful", "nice",
+                "that helps", "very helpful", "really helpful",
+                "thanks a lot", "thank you so much", "many thanks",
+                "that is really helpful", "that was helpful",
+            ]
+            if any(p in _ml for p in _ok_phrases):
+                _skip_relevance = True
+
+        _is_relevant, _relevance_score = (
+            (True, 1.0) if _skip_relevance
+            else is_fashion_relevant(message)
+        )
         if not _is_relevant:
             # Store the turn but return a refusal — no classification, no retrieval
             _refusal_turn = await self.turn_mgr.add_user_turn(
