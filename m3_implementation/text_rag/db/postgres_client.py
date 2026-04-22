@@ -228,6 +228,7 @@ async def search_articles_filtered(
     exclude_ids: list[str] = None,
     preference_boosts: list[dict] = None,
     purchase_hints: dict = None,
+    penalties: dict = None,
     limit: int = 20
 ) -> list[dict]:
     """
@@ -293,6 +294,22 @@ async def search_articles_filtered(
             conditions.append(f"article_id != ALL(${p}::bigint[])")
             params.append(ex_ids)
             p += 1
+
+    # Apply penalties — exclude disliked attribute values
+    # e.g. penalties = {"colour_group_name": ["Orange", "Yellow"]}
+    if penalties:
+        penalty_field_map = {
+            "colour_group_name":          "colour_group_name",
+            "product_type_name":          "product_type_name",
+            "graphical_appearance_name":  "graphical_appearance_name",
+            "index_group_name":           "index_group_name",
+        }
+        for attr, disliked_values in penalties.items():
+            pg_field = penalty_field_map.get(attr)
+            if pg_field and disliked_values:
+                conditions.append(f"{pg_field} != ALL(${p}::text[])")
+                params.append(list(disliked_values))
+                p += 1
 
     # Also filter by inferred gender from purchase hints
     if purchase_hints and purchase_hints.get('inferred_gender'):
