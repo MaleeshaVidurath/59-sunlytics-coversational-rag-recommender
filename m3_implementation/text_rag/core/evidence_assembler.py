@@ -138,15 +138,18 @@ class EvidenceAssembler:
             query=semantic_query,
             filters=filters,
             exclude_ids=exclude_ids,
+            penalties=payload.get("penalties", {}),
             top_k=10
         )
 
         # Step 2: PostgreSQL filtered search for ranking diversity
+        penalties   = payload.get("penalties", {})
         pg_results = await search_articles_filtered(
             filters=filters,
             exclude_ids=exclude_ids,
             preference_boosts=preference_boosts,
             purchase_hints=purchase_hints,
+            penalties=penalties,
             limit=10
         )
 

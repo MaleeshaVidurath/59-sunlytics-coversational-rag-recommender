@@ -208,6 +208,7 @@ def semantic_search(
     query: str,
     filters: dict = None,
     exclude_ids: list[str] = None,
+    penalties: dict = None,
     top_k: int = 10
 ) -> list[dict]:
     """
