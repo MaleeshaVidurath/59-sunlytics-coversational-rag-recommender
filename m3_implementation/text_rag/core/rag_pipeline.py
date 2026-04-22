@@ -32,9 +32,10 @@ from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 from text_rag.config import MAX_REGENERATION_ATTEMPTS
-from text_rag.core.evidence_assembler   import EvidenceAssembler
-from text_rag.core.response_generator   import ResponseGenerator
+from text_rag.core.evidence_assembler    import EvidenceAssembler
+from text_rag.core.response_generator    import ResponseGenerator
 from text_rag.core.hallucination_checker import HallucinationChecker
+from memory.core.contradiction_detector  import ContradictionDetector
 
 # Actions that skip hallucination checking (no factual product claims)
 _SKIP_HALLUCINATION_CHECK = {"no_retrieval"}
@@ -61,9 +62,10 @@ class TextRAGPipeline:
     """
 
     def __init__(self):
-        self.assembler = EvidenceAssembler()
-        self.generator = ResponseGenerator()
-        self.checker   = HallucinationChecker()
+        self.assembler    = EvidenceAssembler()
+        self.generator    = ResponseGenerator()
+        self.checker      = HallucinationChecker()
+        self.contradector = ContradictionDetector()
         print("[TextRAGPipeline] Initialised.")
 
     async def process(
@@ -189,7 +191,36 @@ class TextRAGPipeline:
                         f"{MAX_REGENERATION_ATTEMPTS} attempts. Returning with flag."
                     )
 
-        # ── Step 6: Store response in memory ────────────────────────────────
+        # ── Step 6: Contradiction detection ─────────────────────────────────
+        # After hallucination check passes, check the response against
+        # all prior claims made about the same products in this session.
+        # This catches cross-turn inconsistencies and corrects them.
+        try:
+            contra_result = await self.contradector.check_and_resolve(
+                response_text=final_response,
+                evidence=evidence,
+                session_id=session_id,
+                user_id=user_id,
+                turn_id=pipeline_output.get("turn_id", ""),
+            )
+            # Use corrected response if contradiction was found and fixed
+            final_response          = contra_result["response_text"]
+            contradiction_found     = contra_result["contradiction_found"]
+            contradiction_count     = contra_result["contradiction_count"]
+            contradictions_detail   = contra_result["contradictions"]
+            product_ids             = contra_result["product_ids"]
+            product_names           = contra_result["product_names"]
+            claims_stored           = contra_result["claims_stored"]
+        except Exception as e:
+            print(f"[TextRAGPipeline] Contradiction check error: {e}")
+            contradiction_found   = False
+            contradiction_count   = 0
+            contradictions_detail = []
+            product_ids           = []
+            product_names         = []
+            claims_stored         = 0
+
+        # ── Step 7: Store response in memory ─────────────────────────────────
         items_recommended = []
         if action == "catalog_search":
             items_recommended = evidence.get("items", [])
@@ -227,34 +258,54 @@ class TextRAGPipeline:
             hallucination_score=final_score,
             items_recommended=items_recommended,
             evidence=evidence,
+            contradiction_found=contradiction_found,
+            contradiction_count=contradiction_count,
+            contradictions_detail=contradictions_detail,
+            product_ids=product_ids,
+            product_names=product_names,
         )
 
     def _build_result(
         self,
-        response_text:      str,
-        action:             str,
-        attempt_count:      int,
-        hallucination_flag: bool,
-        flagged_sentences:  list,
-        hallucination_score:float,
-        items_recommended:  list,
-        evidence:           dict,
+        response_text:        str,
+        action:               str,
+        attempt_count:        int,
+        hallucination_flag:   bool,
+        flagged_sentences:    list,
+        hallucination_score:  float,
+        items_recommended:    list,
+        evidence:             dict,
+        contradiction_found:  bool = False,
+        contradiction_count:  int  = 0,
+        contradictions_detail:list = None,
+        product_ids:          list = None,
+        product_names:        list = None,
     ) -> dict:
         return {
-            "response_text":       response_text,
-            "hallucination_flag":  hallucination_flag,
-            "hallucination_score": hallucination_score,
-            "flagged_sentences":   [
+            # ── Response ───────────────────────────────────────────────
+            "response_text":          response_text,
+
+            # ── Hallucination check results ────────────────────────────
+            "hallucination_flag":     hallucination_flag,
+            "hallucination_score":    hallucination_score,
+            "flagged_sentences":      [
                 {"sentence": f["sentence"], "score": f.get("nli_scores", {})}
                 for f in flagged_sentences
             ],
-            "attempt_count":       attempt_count,
-            "action":              action,
-            "items_recommended":   items_recommended,
-            "evidence_used":       {
-                k: v for k, v in evidence.items()
-                if k not in ("material_description",)
-            },
+            "attempt_count":          attempt_count,
+
+            # ── Contradiction check results ────────────────────────────
+            "contradiction_found":    contradiction_found,
+            "contradiction_count":    contradiction_count,
+            "contradictions":         contradictions_detail or [],
+
+            # ── Product references ─────────────────────────────────────
+            "product_ids":            product_ids or [],
+            "product_names":          product_names or [],
+
+            # ── Action metadata ────────────────────────────────────────
+            "action":                 action,
+            "items_recommended":      items_recommended,
         }
 
     def _fallback_response(self, action: str, evidence: dict) -> str:
