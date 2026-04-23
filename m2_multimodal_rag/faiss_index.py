@@ -33,14 +33,14 @@ class FAISSDatabase:
                 # Load the row-to-article_id mapping so we know which vector = which product
                 self.mapping_df = pd.read_csv(self.mapping_path)
                 self.mapping = self.mapping_df['article_id'].astype(str).str.zfill(10).tolist()
-                print(f"✅ Successfully loaded {self.index.ntotal:,} vectors from FAISS database!")
+                print(f"[OK] Successfully loaded {self.index.ntotal:,} vectors from FAISS database!")
                 
             except Exception as e:
-                print(f"❌ Error loading FAISS database: {e}")
+                print(f"[ERROR] Error loading FAISS database: {e}")
                 self.database_ready = False
         else:
-            print("⚠️ WARNING: 'm2_clip_faiss.bin' or mapping NOT FOUND in /data/ directory.")
-            print("⚠️ The search will run in DUMMY mode for UI testing until you run your Kaggle Cloud notebook!")
+            print("[WARNING] 'm2_clip_faiss.bin' or mapping NOT FOUND in /data/ directory.")
+            print("[WARNING] The search will run in DUMMY mode for UI testing until you run your Kaggle Cloud notebook!")
 
     def search(self, query_vector: np.ndarray, top_k: int = 5):
         """
@@ -56,7 +56,7 @@ class FAISSDatabase:
         query_vector = query_vector.astype('float32')
 
         if not self.database_ready:
-            print(f"⚠️ FAISS running in fallback DUMMY MODE. Returning {top_k} placeholder recommendations...")
+            print(f"[WARNING] FAISS running in fallback DUMMY MODE. Returning {top_k} placeholder recommendations...")
             # Return dummy valid H&M IDs so the BLIP Verifier can still be built/tested offline!
             dummy_articles = ["0108775015", "0108775044", "0111565001", "0111586001", "0111593001"][:top_k]
             # Dummy decreasing confidence scores (1.0 -> 0.6)

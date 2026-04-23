@@ -48,14 +48,14 @@ class GenerationLoop:
             
             # LOGIC FORK: PASS
             if is_valid:
-                print("   ✅ VLM GUARD PASSED (Consistent)")
+                print("   [PASS] VLM GUARD PASSED (Consistent)")
                 return explanation
                 
             # LOGIC FORK: FAIL
-            print(f"   ❌ VLM GUARD FAILED (Inconsistent) : {reason}")
+            print(f"   [FAIL] VLM GUARD FAILED (Inconsistent) : {reason}")
             
             if attempts == self.max_attempts:
-                print("   ⚠️ MAX RETRIES REACHED. Fallback to basic metadata.")
+                print("   [WARN] MAX RETRIES REACHED. Fallback to basic metadata.")
                 return f"This is a {metadata.get('colour_group_name', 'Black')} {metadata.get('product_type_name', 'item')}."
                 
             # STEP 3: REGENERATE EXPLANATION
