@@ -64,13 +64,17 @@ def _split_sentences(text: str) -> list[str]:
 # ── Factual sentence detection ─────────────────────────────────────────────────
 
 _FACTUAL_PATTERNS = [
-    r'£\d',                          # price mentions
-    r'\d+(?:\.\d+)?',                # any number
-    r'\b(made|fabric|material|cotton|polyester|wool|silk|jersey|denim)\b',
-    r'\b(colour|color|black|white|red|blue|green|pink|grey|beige)\b',
-    r'\b(dress|trousers|skirt|top|jacket|sweater|shirt|blouse)\b',
-    r'\b(is|are|has|have|comes|costs|includes|features|available)\b',
+    r'£\d',                          # price mentions only
+    r'£[\d]+\.\d+',               # exact price format
 ]
+# Only check price and name sentences — descriptions are too complex for NLI
+# Description sentences contain partial/truncated text that NLI misreads
+_SKIP_PATTERNS = [
+    r'\b(short|long|relaxed|slim|fitted|woven|knit|cotton|stretch|denim)\b',
+    r'\b(waist|crotch|pocket|hem|sleeve|collar|button|zip|fly)\b',
+    r'\b(regular|classic|modern|style|design|detail|trim|finish)\b',
+]
+_SKIP_RE = re.compile('|'.join(_SKIP_PATTERNS), re.IGNORECASE)
 _FACTUAL_RE = re.compile('|'.join(_FACTUAL_PATTERNS), re.IGNORECASE)
 
 _NON_FACTUAL_STARTS = [
@@ -81,11 +85,19 @@ _NON_FACTUAL_STARTS = [
 
 
 def _is_factual_sentence(sentence: str) -> bool:
-    """Returns True if the sentence makes a factual claim that should be checked."""
+    """
+    Returns True only if the sentence makes a VERIFIABLE factual claim.
+    We only check price sentences — descriptions are too complex for NLI
+    because they get truncated differently in evidence vs response.
+    """
     s = sentence.lower()
     for start in _NON_FACTUAL_STARTS:
         if s.startswith(start):
             return False
+    # Skip description-style sentences (contain garment detail words)
+    if _SKIP_RE.search(sentence):
+        return False
+    # Only check sentences with price or clear product names
     return bool(_FACTUAL_RE.search(sentence))
 
 

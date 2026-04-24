@@ -18,9 +18,59 @@
 
 import os
 import sys
+import re
 from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+
+def _extract_quantity(message: str) -> int:
+    """
+    Extracts requested quantity from user message.
+    e.g. "5 t shirts in 5 colours" -> 5
+         "show me 3 dresses" -> 3
+         "I need a dress" -> 2 (default)
+    Max allowed: 5
+    """
+    msg = message.lower()
+    patterns = [
+        # "5 colours" / "5 options"
+        r"\b([2-9])\s+(?:different\s+)?(?:colours?|colors?|options?|items?|pieces?|styles?)\b",
+        # "5 t shirts" / "5 shirts" / "5 dresses" — handles "t shirt" too
+        r"\b([2-9])\s+(?:t[- ])?(?:dress|top|shirt|trouser|short|jacket|sweater|skirt|coat|blouse)s?\b",
+        # "show me 5" / "find me 3"
+        r"\b(?:show|find|get|give)\s+(?:me\s+)?([2-9])\b",
+        # "need 5" / "want 3" / "buy 4"
+        r"\b(?:need|want|buy)\s+([2-9])\b",
+        # starts with number "5 shorts"
+        r"^([2-9])\s+",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, msg)
+        if m:
+            qty = int(m.group(1))
+            return min(qty, 5)
+    return 2  # default
+
+
+def _ensure_colour_diversity(articles: list, requested_qty: int) -> list:
+    """
+    Ensures returned items have diverse colours when multiple are requested.
+    Takes the first item per unique colour, then fills with remaining.
+    """
+    if len(articles) <= 1:
+        return articles
+    seen_colours = set()
+    diverse = []
+    same_colour = []
+    for art in articles:
+        colour = art.get("colour_group_name", "").lower()
+        if colour and colour not in seen_colours:
+            seen_colours.add(colour)
+            diverse.append(art)
+        else:
+            same_colour.append(art)
+    result = diverse + same_colour
+    return result[:requested_qty]
 from text_rag.db.postgres_client import (
     get_article_by_id, get_articles_by_ids,
     search_articles_filtered, get_articles_for_comparison
@@ -139,18 +189,21 @@ class EvidenceAssembler:
             filters=filters,
             exclude_ids=exclude_ids,
             penalties=payload.get("penalties", {}),
-            top_k=10
+            top_k=max(20, _extract_quantity(user_message) * 5)
         )
 
         # Step 2: PostgreSQL filtered search for ranking diversity
-        penalties   = payload.get("penalties", {})
+        # Fetch larger pool when user requests multiple items
+        requested_qty = _extract_quantity(user_message)
+        search_limit  = max(20, requested_qty * 5)
+        penalties     = payload.get("penalties", {})
         pg_results = await search_articles_filtered(
             filters=filters,
             exclude_ids=exclude_ids,
             preference_boosts=preference_boosts,
             purchase_hints=purchase_hints,
             penalties=penalties,
-            limit=10
+            limit=search_limit
         )
 
         # Step 3: Merge — Qdrant results first (semantically relevant),
@@ -170,8 +223,11 @@ class EvidenceAssembler:
                 seen_ids.add(aid)
                 merged.append(art)
 
-        # Take top MAX_RECOMMENDATIONS (2)
-        top_articles = merged[:MAX_RECOMMENDATIONS]
+        # Apply colour diversity for multi-item requests
+        if requested_qty > 2:
+            top_articles = _ensure_colour_diversity(merged, requested_qty)
+        else:
+            top_articles = merged[:requested_qty]
 
         return {
             "action":          "catalog_search",

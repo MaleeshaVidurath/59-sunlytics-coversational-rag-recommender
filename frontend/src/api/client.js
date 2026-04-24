@@ -39,3 +39,11 @@ export async function sendMessage({ userId, customerId, message, sessionId }) {
   if (!res.ok) throw new Error("Chat request failed");
   return res.json();
 }
+
+export async function deleteSession(sessionId, userId) {
+  const res = await fetch(`${BASE}/api/sessions/${sessionId}?user_id=${userId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error("Delete failed");
+  return res.json();
+}

@@ -9,10 +9,11 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 
 class ChatRequest(BaseModel):
-    user_id:     str
-    customer_id: str
-    message:     str
-    session_id:  Optional[str] = None   # None = start new session
+    user_id:            str
+    customer_id:        str
+    message:            str
+    session_id:         Optional[str] = None   # None = start new session
+    force_new_session:  bool = False            # True = ignore existing session, start fresh
 
 
 @router.post("")
@@ -48,11 +49,21 @@ async def chat(req: ChatRequest):
         )
 
     try:
+        # If force_new_session, clear Redis active session pointer first
+        if req.force_new_session:
+            try:
+                from memory.db.redis_client import get_redis
+                redis = await get_redis()
+                await redis.delete(f"user:{req.user_id}:active_session")
+                print(f"[Chat] Force new session for user {req.user_id}")
+            except Exception as e:
+                print(f"[Chat] Redis clear error (non-fatal): {e}")
+
         # Step 1: Memory pipeline
         pipeline_output = await memory.process_turn(
             user_id=req.user_id,
             message=req.message,
-            session_id=req.session_id,
+            session_id=None if req.force_new_session else req.session_id,
             customer_id=req.customer_id,
         )
 

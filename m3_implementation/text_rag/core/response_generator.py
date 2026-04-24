@@ -18,6 +18,25 @@ import re
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 from text_rag.config import OLLAMA_HOST, OLLAMA_RAG_MODEL
 
+def _clean_response(text: str) -> str:
+    """
+    Cleans LLM response text before sending to user.
+    Removes markdown artifacts and normalises formatting.
+    """
+    import re
+    # Remove markdown bold/italic
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    # Replace em-dash with colon
+    text = text.replace(' — ', ': ').replace('—', ', ')
+    # Remove double spaces
+    text = re.sub(r'  +', ' ', text)
+    # Remove trailing/leading whitespace per line
+    lines = [line.strip() for line in text.splitlines()]
+    text = '\n'.join(line for line in lines if line)
+    return text.strip()
+
+
 # Fashion context prepended to every prompt.
 # This prevents the model from going off-topic (e.g. confusing dress names
 # with food items, or discussing non-fashion topics).
@@ -94,7 +113,9 @@ Write a recommendation response:
 - Keep total response under 100 words
 - Do not mention internal IDs or article numbers
 - Do not invent details not in the evidence above
-- Do not say items "suit the user" or "match preferences" unless explicitly listed in evidence above"""
+- Do not say items "suit the user" or "match preferences" unless explicitly listed in evidence above
+- Format each item clearly on its own line starting with Option number
+- Use plain text only, no markdown, no asterisks, no dashes"""
 
 
 def _build_attribute_prompt(evidence: dict, strictness: int = 0) -> str:
@@ -159,44 +180,81 @@ Write a clear comparison in 2-3 sentences. State which clothing item is better f
 
 
 def _build_explanation_prompt(evidence: dict, strictness: int = 0) -> str:
-    """Prompt for explaining why an item was recommended."""
-    article = evidence.get("article") or {}
-    matches = evidence.get("confirmed_matches", [])
-    prior   = evidence.get("prior_claims", [])
-    user_msg= evidence.get("user_message", "")
+    """Prompt for explaining why a SPECIFIC item was recommended."""
+    article  = evidence.get("article") or {}
+    matches  = evidence.get("confirmed_matches", [])
+    prior    = evidence.get("prior_claims", [])
+    user_msg = evidence.get("user_message", "")
 
-    match_text = "\n".join(
-        f"  - {m['attribute']} matches: {m['value']} (preference strength {m['weight']:.2f})"
-        for m in matches
-    ) or "  - No strong preference matches confirmed"
+    item_name   = article.get("name", "this item")
+    item_colour = article.get("colour", "")
+    item_type   = article.get("type", "")
+    item_price  = article.get("price", "")
+    item_desc   = article.get("material_description", "")[:200]
+
+    def _weight_word(w):
+        if w >= 0.8: return "very strongly"
+        if w >= 0.6: return "strongly"
+        if w >= 0.4: return "moderately"
+        return "slightly"
+
+    # Convert database attribute names to human-readable form
+    def _human_attr(attr):
+        mapping = {
+            "colour_group_name":          "colour",
+            "product_type_name":          "type",
+            "graphical_appearance_name":  "pattern",
+            "garment_group_name":         "style",
+            "index_group_name":           "category",
+            "section_name":               "section",
+            "avg_price":                  "price",
+        }
+        return mapping.get(attr, attr.replace("_", " ").replace("name", "").strip())
+
+    if matches:
+        match_lines = []
+        for m in matches:
+            attr  = _human_attr(m.get("attribute", ""))
+            val   = m.get("value", "")
+            wt    = m.get("weight", 0)
+            match_lines.append(f"  - You prefer {attr}: {val} ({_weight_word(wt)})")
+        match_text = "\n".join(match_lines)
+    else:
+        match_text = "  - It matches your general shopping preferences"
 
     prior_text = ""
     active_claims = [c for c in prior if c.get("status") == "active"]
     if active_claims:
-        prior_text = "IMPORTANT — Already told the user:\n" + "\n".join(
+        prior_text = "Already told the user (do NOT contradict):\n" + "\n".join(
             f"  - {c['claim_text']}" for c in active_claims
-        ) + "\nDo NOT contradict any of the above."
+        )
 
     strictness_instruction = {
-        0: "Explain naturally and concisely.",
-        1: "STRICT MODE: Justify ONLY using the confirmed matches below.",
-        2: "STRICTEST MODE: List each match as a bullet. No additional claims.",
+        0: "Explain naturally in 2-3 friendly sentences.",
+        1: "STRICT: Only use the confirmed preference matches listed below.",
+        2: "STRICTEST: One sentence per match. No extra claims.",
     }[strictness]
 
-    return FASHION_CONTEXT + f"""You are a fashion shopping assistant.
-{strictness_instruction}
+    return FASHION_CONTEXT + f"""You are a friendly fashion shopping assistant.
+The user is asking specifically about: {item_name}
 
-User asked: "{user_msg}"
-Clothing item: {article.get('name','')} ({article.get('colour','')} {article.get('type','')}, {article.get('price','')})
-Description: {article.get('material_description','')[:200]}
+Item: {item_name} — {item_colour} {item_type}, {item_price}
+Description: {item_desc}
 
-CONFIRMED preference matches (evidence):
+User question: "{user_msg}"
+
+Why {item_name} was recommended:
 {match_text}
 
 {prior_text}
 
-Explain why this item was recommended in 2-3 sentences. 
-Base your explanation ONLY on the confirmed matches above."""
+{strictness_instruction}
+IMPORTANT:
+- Answer about {item_name} specifically, not any other item
+- Use plain English — never say "colour_group_name" or any database field name
+- Say things like "it is a great {item_colour} option" or "it matches your preference for {item_type}s"
+- Do not invent facts not listed above"""
+
 
 
 def _build_detail_prompt(evidence: dict, strictness: int = 0) -> str:
@@ -215,7 +273,6 @@ Clothing item details (use ONLY these facts):
   Colour:  {article.get('colour','')}
   Pattern: {article.get('pattern','')}
   Price:   {article.get('price','')}
-  Section: {article.get('section','')}
   Description: {desc}
 
 Present these details in a friendly, readable format.
@@ -265,8 +322,13 @@ def _build_chitchat_prompt(evidence: dict) -> str:
     msg_lower = user_msg.lower()
 
     # Detect farewell vs greeting based on actual message content
-    farewell_words = ["thanks", "thank you", "helpful", "bye", "goodbye",
-                      "cheers", "great", "awesome", "perfect", "wonderful"]
+    farewell_words = [
+        "thanks", "thank you", "thnak you", "thankyou", "ty",
+        "helpful", "bye", "goodbye", "good bye", "cheers",
+        "great", "awesome", "perfect", "wonderful", "appreciate",
+        "that's all", "thats all", "no more", "done", "finished",
+        "see you", "cya", "take care",
+    ]
     is_farewell = any(w in msg_lower for w in farewell_words)
 
     if is_farewell:
@@ -371,12 +433,12 @@ class ResponseGenerator:
 
         response = await call_ollama(prompt)
 
-        # Basic cleanup
+        # Basic cleanup and markdown removal
         response = response.strip()
         if not response:
-            return self._fallback_response(evidence)
+            return _clean_response(self._fallback_response(evidence))
 
-        return response
+        return _clean_response(response)
 
     def _fallback_response(self, evidence: dict) -> str:
         """
