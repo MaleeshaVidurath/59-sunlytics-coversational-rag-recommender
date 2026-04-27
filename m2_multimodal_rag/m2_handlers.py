@@ -7,7 +7,7 @@ response dict with: action, success, response_text, items, error.
 These handlers reuse existing M2 components:
     - CLIP encoder + FAISS index for catalog_search vector retrieval
     - data_loader for article CSV lookups
-    - llm_generator (Gemini) for natural language responses
+    - llm_generator (Ollama llama3.1) for natural language responses
     - regeneration_loop for verified explanations
 """
 
@@ -59,27 +59,12 @@ def _format_article_for_response(metadata: dict) -> dict:
     }
 
 
-def _call_gemini(prompt: str) -> str | None:
+def _call_llm(prompt: str) -> str | None:
     """
-    Utility to call Gemini for generating natural language responses.
-    Reuses the llm_generator's client for consistency.
+    Utility to call the cloud LLM (Groq) for generating natural language responses.
+    Reuses the llm_generator's configuration for consistency.
     """
-    if not llm_generator.client:
-        return None
-    try:
-        from google.genai import types
-        response = llm_generator.client.models.generate_content(
-            model=llm_generator.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.7,
-                max_output_tokens=250,
-            )
-        )
-        return response.text.strip() if response.text else None
-    except Exception as e:
-        print(f"   [Gemini API Error in handler] {e}")
-        return None
+    return llm_generator._call_llm(prompt, max_tokens=250)
 
 
 # =====================================================================
@@ -305,7 +290,7 @@ def handle_attribute_lookup(retrieval_input: dict) -> dict:
             "error": f"Article {article_id} not found",
         }
 
-    # Build a prompt for Gemini to answer the attribute question
+    # Build a prompt for the LLM to answer the attribute question
     item_info = _format_article_for_response(metadata)
     detail_desc = metadata.get("detail_desc", "No detailed description available.")
 
@@ -323,7 +308,7 @@ def handle_attribute_lookup(retrieval_input: dict) -> dict:
         f"If the information isn't available in the details, say so honestly."
     )
 
-    response_text = _call_gemini(prompt)
+    response_text = _call_llm(prompt)
     if not response_text:
         # Fallback to template-based response
         response_text = (
@@ -402,7 +387,7 @@ def handle_item_compare(retrieval_input: dict) -> dict:
         f"State which item is better for the customer and why, based on the comparison dimension."
     )
 
-    response_text = _call_gemini(prompt)
+    response_text = _call_llm(prompt)
     if not response_text:
         response_text = (
             f"Comparing the {item_a['prod_name']} ({item_a['colour_group_name']}) "
@@ -487,7 +472,7 @@ def handle_explanation_generate(retrieval_input: dict) -> dict:
         f"Do NOT contradict any prior claims listed above."
     )
 
-    response_text = _call_gemini(prompt)
+    response_text = _call_llm(prompt)
     if not response_text:
         # Fallback: build explanation from matched_prefs
         if matched_prefs:
@@ -542,7 +527,7 @@ def handle_item_detail_lookup(retrieval_input: dict) -> dict:
     item_info = _format_article_for_response(metadata)
     detail_desc = metadata.get("detail_desc", "")
 
-    # Generate a natural description using Gemini
+    # Generate a natural description using the LLM
     prompt = (
         f"You are a helpful fashion assistant. A customer asked: \"{user_message}\"\n\n"
         f"Present the full details of this item in a friendly, conversational way (3-4 sentences):\n"
@@ -556,7 +541,7 @@ def handle_item_detail_lookup(retrieval_input: dict) -> dict:
         f"Be informative and enthusiastic. Highlight the key selling points."
     )
 
-    response_text = _call_gemini(prompt)
+    response_text = _call_llm(prompt)
     if not response_text:
         response_text = (
             f"Here are the details for the {item_info['prod_name']}: "
@@ -620,7 +605,7 @@ def handle_no_retrieval(memory_context: dict) -> dict:
                 f"Let me know what you'd prefer and I'll find something better for you!"
             )
 
-        response_text = _call_gemini(prompt) or fallback
+        response_text = _call_llm(prompt) or fallback
 
         return {
             "action": None,
@@ -654,7 +639,7 @@ def handle_no_retrieval(memory_context: dict) -> dict:
             "Tell me what you're looking for — a specific item, colour, or style — and I'll find the perfect match!"
         )
 
-    response_text = _call_gemini(prompt) or fallback
+    response_text = _call_llm(prompt) or fallback
 
     return {
         "action": None,

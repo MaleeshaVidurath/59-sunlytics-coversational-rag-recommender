@@ -1,6 +1,16 @@
 import torch
-from transformers import BlipProcessor, BlipForImageTextRetrieval
+import warnings
+import os
+
+# Suppress unnecessary HuggingFace and Transformers warnings to keep terminal clean
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub.*")
+
+from transformers import BlipProcessor, BlipForImageTextRetrieval, logging as hf_logging
 from PIL import Image
+
+# Suppress the verbose 'LOAD REPORT' and 'UNEXPECTED' weight warnings
+hf_logging.set_verbosity_error()
 
 class VisualVerifier:
     """
