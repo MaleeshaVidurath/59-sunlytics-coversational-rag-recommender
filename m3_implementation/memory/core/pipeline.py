@@ -178,10 +178,27 @@ class MemoryPipeline:
 
         # ── Step 3b: Not-relevant input guard ─────────────────────────────────
         # Check whether the user's message is fashion-relevant before
-        # running any classification or retrieval. If the user asks about
-        # the weather, sports results, cooking etc. — politely decline.
-        # Uses keyword fast-path first, vector similarity as fallback.
-        _is_relevant, _relevance_score = is_fashion_relevant(message)
+        # running any classification or retrieval.
+        # EXCEPTION: if there is conversation history, short conversational
+        # messages (thanks, ok, great etc.) are always allowed through.
+        # They are continuations, not off-topic queries.
+        _skip_relevance = False
+        if history:
+            _ml = message.lower().strip()
+            _ok_phrases = [
+                "thanks", "thank you", "cheers", "great", "ok", "okay",
+                "perfect", "awesome", "brilliant", "wonderful", "nice",
+                "that helps", "very helpful", "really helpful",
+                "thanks a lot", "thank you so much", "many thanks",
+                "that is really helpful", "that was helpful",
+            ]
+            if any(p in _ml for p in _ok_phrases):
+                _skip_relevance = True
+
+        _is_relevant, _relevance_score = (
+            (True, 1.0) if _skip_relevance
+            else is_fashion_relevant(message)
+        )
         if not _is_relevant:
             # Store the turn but return a refusal — no classification, no retrieval
             _refusal_turn = await self.turn_mgr.add_user_turn(
@@ -243,6 +260,86 @@ class MemoryPipeline:
             retrieval_strategy = classification_result["retrieval_strategy"]
             confidence         = classification_result["confidence"]
             used_rules         = classification_result.get("used_rules", False)
+
+        # ── Step 4c: Product keyword override ───────────────────────────────────
+        # DistilBERT misclassifies short product-keyword messages as CHITCHAT/FEEDBACK.
+        # Training data gaps: "red short", "red one", "need red one" are all REFINEMENT
+        # but were never seen in training as such.
+        # This override catches them using colour+product and context-aware rules.
+
+        if label in ("CHITCHAT", "FEEDBACK") and pre_label is None:
+            _ml = message.lower().strip()
+
+            # All product keywords including singular forms
+            _PRODUCT_KW = {
+                "dress", "dresses", "shirt", "shirts",
+                "t-shirt", "t shirt", "tshirt", "tee",
+                "top", "tops", "trouser", "trousers", "pants",
+                "skirt", "skirts", "jacket", "jackets",
+                "sweater", "sweaters", "coat", "coats",
+                "blouse", "blouses", "jeans", "short", "shorts",
+                "hoodie", "hoodies", "leggings", "suit", "suits",
+                "formal wear", "casual wear", "sportswear",
+                "knitwear", "wear", "outfit", "clothing", "clothes",
+                "sock", "socks", "shoe", "shoes", "boot", "boots",
+                "cardigan", "blazer", "blazers", "pant",
+            }
+
+            # Colour words — a colour word alone after items shown = refinement
+            _COLOUR_KW = {
+                "red", "blue", "white", "black", "pink", "green",
+                "yellow", "grey", "gray", "beige", "navy", "brown",
+                "orange", "purple", "light", "dark", "bright",
+            }
+
+            # Search intent words
+            _SEARCH_KW = {
+                "need", "want", "show", "find", "looking", "give",
+                "get", "buy", "purchase", "search", "recommend",
+                "like", "prefer", "another", "different", "instead",
+                "other", "more",
+            }
+
+            _has_product = any(kw in _ml for kw in _PRODUCT_KW)
+            _has_colour  = any(kw in _ml.split() for kw in _COLOUR_KW)
+            _has_search  = any(kw in _ml for kw in _SEARCH_KW)
+            _is_short    = len(_ml.split()) <= 4
+
+            # Rule 1: product keyword present
+            _should_override = _has_product and (_has_search or _is_short)
+
+            # Rule 2: colour + "one" or "ones" = user wants different colour
+            # e.g. "red one", "blue ones", "I like red one"
+            if not _should_override and history:
+                _colour_one = (
+                    _has_colour and
+                    any(w in _ml for w in ["one", "ones", "those", "that"])
+                )
+                if _colour_one:
+                    _should_override = True
+
+            # Rule 3: colour word + short message with history showing items
+            # e.g. "red short" = wants red shorts after seeing white shorts
+            if not _should_override and history and _has_colour and _is_short:
+                # Check if bot previously showed items (items in context)
+                _bot_turns = [t for t in history[-4:] if t.get("role") == "bot"]
+                _bot_showed_items = any(
+                    any(kw in (t.get("content","")).lower()
+                        for kw in ["option 1", "option 2", "£", "found two"])
+                    for t in _bot_turns
+                )
+                if _bot_showed_items:
+                    _should_override = True
+
+            if _should_override:
+                _new_label = "REFINEMENT" if history else "INITIAL_REQUEST"
+                print(f"[Pipeline] Keyword override: {label} ({confidence:.1%}) "
+                      f"→ {_new_label} | msg='{_ml[:40]}'")
+                label              = _new_label
+                retrieval_strategy = "FULL"
+                confidence         = 0.80
+                used_rules         = True
+
         else:
             label, retrieval_strategy = self._fallback_classify(message, history)
             confidence  = 0.0

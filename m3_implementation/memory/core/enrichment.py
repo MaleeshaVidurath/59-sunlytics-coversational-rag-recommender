@@ -709,17 +709,62 @@ class EnrichmentLayer:
     async def _enrich_explanation_why(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        """EXPLANATION_WHY → action: explanation_generate"""
+        """
+        EXPLANATION_WHY → action: explanation_generate
+
+        KEY FIX: Parse which item the user is asking about from their message.
+        User may say "why CA Hugh Linen shirt" or "why the second one" or
+        "why did you recommend option 2" — we must match the correct item.
+        Default to item_a only if no specific item can be identified.
+        """
         db = get_db()
         current_items = state.currently_discussing
         item_a = current_items.get("item_a")
         item_b = current_items.get("item_b")
 
-        # Fetch stored explanation for item_a if it exists
-        existing_explanation = None
+        # ── Identify which specific item user is asking about ──────────────
+        target_item = item_a  # default: first item
+        msg_lower = current_message.lower()
+
+        # Check if user mentioned item_b by name or reference
+        if item_b:
+            item_b_name = (item_b.prod_name or "").lower()
+            # Direct name match — user typed part of item_b's name
+            if item_b_name and any(
+                word in msg_lower
+                for word in item_b_name.split()
+                if len(word) > 3  # skip short words like "the", "a"
+            ):
+                target_item = item_b
+
+            # Reference by position: "second", "option 2", "2nd"
+            elif any(ref in msg_lower for ref in [
+                "second", "option 2", "2nd", "number 2", "the other",
+                "latter", "last one", "#2"
+            ]):
+                target_item = item_b
+
+        # Check if user mentioned item_a by name explicitly
         if item_a:
+            item_a_name = (item_a.prod_name or "").lower()
+            if item_a_name and any(
+                word in msg_lower
+                for word in item_a_name.split()
+                if len(word) > 3
+            ):
+                target_item = item_a
+
+        # Reference by position: "first", "option 1", "1st"
+        if any(ref in msg_lower for ref in [
+            "first", "option 1", "1st", "number 1", "#1"
+        ]):
+            target_item = item_a
+
+        # ── Fetch stored explanation for target item ───────────────────────
+        existing_explanation = None
+        if target_item:
             expl_doc = await db.explanations.find_one(
-                {"session_id": session_id, "article_id": item_a.article_id},
+                {"session_id": session_id, "article_id": target_item.article_id},
                 sort=[("created_at", -1)]
             )
             if expl_doc:
@@ -730,6 +775,11 @@ class EnrichmentLayer:
         memory_ctx = await self._base_memory_context(user_id, state)
         memory_ctx["existing_explanation"] = existing_explanation
 
+        # Log which item was targeted for debugging
+        target_name = (target_item.prod_name if target_item else "unknown")
+        print(f"[EnrichExplanation] User asked about: '{target_name}' "
+              f"(parsed from: '{current_message[:50]}')")
+
         return {
             "label":              "EXPLANATION_WHY",
             "retrieval_strategy": "PARTIAL",
@@ -737,11 +787,11 @@ class EnrichmentLayer:
                 action="explanation_generate",
                 retrieval_strategy="PARTIAL",
                 user_message=current_message,
-                item_a=item_a,
-                item_b=item_b,
+                item_a=target_item,
+                item_b=item_b if target_item != item_b else item_a,
                 exclude_ids=state.rejected_items,
                 payload={
-                    "article_id":   item_a.article_id if item_a else None,
+                    "article_id":   target_item.article_id if target_item else None,
                     "prior_claims": (
                         existing_explanation.get("claims", [])
                         if existing_explanation else []
@@ -993,12 +1043,14 @@ class EnrichmentLayer:
     async def _enrich_chitchat(
         self, session_id, user_id, current_message
     ) -> dict:
-        """CHITCHAT → no retrieval, minimal memory context."""
+        """CHITCHAT → no retrieval, minimal memory context.
+        Passes user_message so the response generator knows what was said."""
         return {
             "label":              "CHITCHAT",
             "retrieval_strategy": "NO",
             "retrieval_input":    None,
             "memory_context":     {
+                "user_message":          current_message,
                 "dialogue_state":        {},
                 "long_term_preferences": [],
                 "style_profile":         {},

@@ -16,9 +16,9 @@ BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR   = os.path.join(BASE_DIR, "data")
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 
-TRAIN_FILE = os.path.join(DATA_DIR, "v2_train_clean.csv")
-VAL_FILE   = os.path.join(DATA_DIR, "v2_val_clean.csv")
-TEST_FILE  = os.path.join(DATA_DIR, "v2_test_clean.csv")
+TRAIN_FILE = os.path.join(DATA_DIR, "v2_train_augmented.csv")
+VAL_FILE   = os.path.join(DATA_DIR, "v2_val_augmented.csv")
+TEST_FILE  = os.path.join(DATA_DIR, "v2_test_augmented.csv")
 
 # Where the best model checkpoint gets saved during training
 MODEL_SAVE_DIR = os.path.join(OUTPUT_DIR, "best_model")
