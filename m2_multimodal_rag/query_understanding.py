@@ -2,6 +2,7 @@ import torch
 from transformers import BlipProcessor, BlipForConditionalGeneration
 from PIL import Image
 import os
+import requests
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -11,26 +12,44 @@ class QueryUnderstandingVLM:
     """
     Intelligent VLM Pre-Processor for M2 Multimodal RAG.
     Handles noisy Image + Text queries by utilizing BLIP as a VLM.
+    Uses Ollama (llama3.1) for text intent extraction, BLIP for all image tasks.
     """
     def __init__(self, use_vqa=False):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.use_vqa = use_vqa
         
-        self.gemini_client = None
-        self.gemini_model_name = "gemini-2.5-flash"
+        # Ollama configuration for text intent extraction
+        self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.ollama_model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+        self.ollama_available = False
         
-        api_key = os.getenv("GEMINI_API_KEY")
-        if api_key and api_key != "your_key_here":
-            try:
-                from google import genai
-                self.gemini_client = genai.Client(api_key=api_key)
-                print(f"VLM: [SUCCESS] Gemini Cloud Vision initialized for intelligent query understanding.")
-            except Exception as e:
-                print(f"VLM: [WARNING] Failed to initialize Gemini client: {e}. Falling back to local BLIP.")
-        else:
-            print("VLM: [WARNING] No GEMINI_API_KEY found. Falling back to local BLIP.")
+        try:
+            resp = requests.get(f"{self.ollama_base_url}/api/tags", timeout=3)
+            if resp.status_code == 200:
+                models = [m["name"] for m in resp.json().get("models", [])]
+                if any(self.ollama_model in m for m in models):
+                    self.ollama_available = True
+                    print(f"VLM: [SUCCESS] Ollama initialized for intelligent query understanding (Model: {self.ollama_model})")
+                else:
+                    print(f"VLM: [WARNING] Model '{self.ollama_model}' not found in Ollama. Falling back to BLIP.")
+            else:
+                print("VLM: [WARNING] Ollama server error. BLIP will be used for all tasks.")
+        except requests.exceptions.ConnectionError:
+            print("VLM: [WARNING] Ollama not reachable. BLIP will be lazy-loaded when needed.")
+        except Exception as e:
+            print(f"VLM: [WARNING] Failed to connect to Ollama: {e}. Falling back to BLIP.")
         
-        print(f"Loading BLIP Pre-processor on {self.device}...")
+        # Initialize placeholders for lazy loading
+        self.processor = None
+        self.captioning_model = None
+        self.vqa_model = None
+
+    def _ensure_blip_loaded(self):
+        """Lazy-loads the heavy BLIP models only when absolutely necessary."""
+        if self.processor is not None:
+            return # Already loaded
+            
+        print(f"\n[Lazy Load] Bringing BLIP Pre-processor online on {self.device} (This will take a moment)...")
         
         # Primary VLM (from Tech Stack)
         self.captioning_model_name = "Salesforce/blip-image-captioning-base"
@@ -42,41 +61,37 @@ class QueryUnderstandingVLM:
             from transformers import BlipForQuestionAnswering
             self.vqa_model_name = "Salesforce/blip-vqa-base"
             self.vqa_model = BlipForQuestionAnswering.from_pretrained(self.vqa_model_name).to(self.device)
+            
+        print("[Lazy Load] BLIP models successfully loaded into memory.\n")
 
     def extract_search_query(self, text_query=None, image_path=None):
         """
         Master function to evaluate the user's messy multimodal input and 
         return a highly-clean string optimized for CLIP encoding.
-        Uses Gemini 2.5 Flash for intelligent intent extraction, falling back to BLIP.
+        Uses Ollama for text intent extraction, BLIP for all image tasks.
         """
         # 1. TEXT ONLY
         if text_query and not image_path:
-            clean_query = self._gemini_extract_text_intent(text_query)
+            clean_query = self._ollama_extract_text_intent(text_query)
             if clean_query:
+                # If Ollama detected no fashion intent, return the flag directly
+                if clean_query == "IRRELEVANT_QUERY":
+                    return "IRRELEVANT_QUERY"
                 return clean_query
             return text_query.strip()
             
-        # 2. IMAGE ONLY
+        # 2. IMAGE ONLY — always use BLIP (llama3.1 can't see images)
         elif image_path and not text_query:
             if not os.path.exists(image_path):
                 raise FileNotFoundError(f"Image not found at {image_path}")
-            
-            clean_query = self._gemini_extract_image_features(image_path)
-            if clean_query:
-                return clean_query
                 
-            print("VLM: Falling back to BLIP visual captioning for pure image query...")
+            print("VLM: Using BLIP visual captioning for image query...")
             return self._generate_caption(image_path)
             
-        # 3. TEXT + IMAGE (Noise Removal Challenge)
+        # 3. TEXT + IMAGE (Noise Removal Challenge) — BLIP handles image, Ollama not needed
         elif image_path and text_query:
-            print("VLM: Analyzing Image+Text to isolate core fashion features...")
+            print("VLM: Analyzing Image+Text using BLIP to isolate core fashion features...")
             
-            clean_query = self._gemini_multimodal_intent(image_path, text_query)
-            if clean_query:
-                return clean_query
-                
-            print("VLM: Falling back to BLIP for Image+Text analysis...")
             if self.use_vqa:
                 # Use Visual Question Answering to precisely isolate features
                 # Prompt tuning optimized for fashion noise-removal
@@ -91,86 +106,44 @@ class QueryUnderstandingVLM:
                 
         return ""
 
-    def _gemini_extract_text_intent(self, text_query: str) -> str:
-        if not self.gemini_client: return None
+    def _ollama_extract_text_intent(self, text_query: str) -> str:
+        """Uses Ollama to extract fashion intent from a text query."""
+        if not self.ollama_available:
+            return None
         try:
-            from google.genai import types
             prompt = (
-                f"You are a strict fashion search intent extractor. "
-                f"Extract the core fashion keywords (color, exact item type, pattern, style) "
-                f"from the following user text. Ignore all conversational filler (e.g., 'I am looking for', 'find me'). "
-                f"You MUST include the specific clothing item (e.g., 'dress', 'shirt', 'pants') in your output if it is mentioned. "
-                f"If the user specifies a negative constraint (e.g., 'not red'), output what it SHOULD be, or omit the negative feature.\n"
-                f"User text: \"{text_query}\"\n"
-                f"Output ONLY the keywords separated by spaces. Nothing else. Example: 'black elegant dress'"
+                f"You are a helpful fashion assistant.\n"
+                f"The user said: '{text_query}'\n"
+                f"What is the exact clothing item the user is trying to find? Please extract ONLY the item they want, and ignore any other clothing mentioned as background context (like a friend's dress).\n"
+                f"Reply with just the keywords (e.g., 'blue denim jacket' or 'party wear shirt men'). If there is no clothing item they want to find, reply exactly with 'IRRELEVANT_QUERY'."
             )
-            response = self.gemini_client.models.generate_content(
-                model=self.gemini_model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=30)
+            response = requests.post(
+                f"{self.ollama_base_url}/api/generate",
+                json={
+                    "model": self.ollama_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.0,
+                        "num_predict": 30,
+                    }
+                },
+                timeout=30
             )
-            if response.text:
-                result = response.text.strip().replace('\n', ' ')
-                print(f"VLM (Gemini Text): Cleaned '{text_query}' -> '{result}'")
+            if response.status_code == 200:
+                result = response.json().get("response", "").strip().replace('\n', ' ')
+                if not result:
+                    result = "IRRELEVANT_QUERY"
+                print(f"VLM (Ollama Text): Cleaned '{text_query}' -> '{result}'")
                 return result
+            else:
+                print(f"   [Ollama API Error] Status {response.status_code}")
         except Exception as e:
-            print(f"   [Gemini API Error] {e}")
-        return None
-
-    def _gemini_extract_image_features(self, image_path: str) -> str:
-        if not self.gemini_client: return None
-        try:
-            from PIL import Image
-            from google.genai import types
-            raw_image = Image.open(image_path).convert('RGB')
-            prompt = (
-                f"You are a strict fashion feature extractor. "
-                f"Look at this image and describe the primary clothing item shown in 3-5 keywords. "
-                f"Include the color and the exact item type. "
-                f"Output ONLY the keywords separated by spaces. Nothing else. Do not write full sentences."
-            )
-            response = self.gemini_client.models.generate_content(
-                model=self.gemini_model_name,
-                contents=[raw_image, prompt],
-                config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=30)
-            )
-            if response.text:
-                result = response.text.strip().replace('\n', ' ')
-                print(f"VLM (Gemini Image): Extracted -> '{result}'")
-                return result
-        except Exception as e:
-            print(f"   [Gemini API Error] {e}")
-        return None
-
-    def _gemini_multimodal_intent(self, image_path: str, text_query: str) -> str:
-        if not self.gemini_client: return None
-        try:
-            from PIL import Image
-            from google.genai import types
-            raw_image = Image.open(image_path).convert('RGB')
-            prompt = (
-                f"You are a strict multimodal fashion intent extractor. "
-                f"The user uploaded an image and provided this text: \"{text_query}\".\n"
-                f"Synthesize the visual evidence from the image and the user's specific request "
-                f"to determine the exact fashion item they are searching for.\n"
-                f"For example, if the image shows a blue jacket and the text says 'I want this but in red', output 'red jacket'.\n"
-                f"Output ONLY the final core keywords (color, item type, etc.) separated by spaces. "
-                f"Do not write full sentences. Ignore conversational filler."
-            )
-            response = self.gemini_client.models.generate_content(
-                model=self.gemini_model_name,
-                contents=[raw_image, prompt],
-                config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=30)
-            )
-            if response.text:
-                result = response.text.strip().replace('\n', ' ')
-                print(f"VLM (Gemini Multimodal): Cleaned Image + '{text_query}' -> '{result}'")
-                return result
-        except Exception as e:
-            print(f"   [Gemini API Error] {e}")
+            print(f"   [Ollama API Error] {e}")
         return None
 
     def _generate_caption(self, image_path):
+        self._ensure_blip_loaded()
         raw_image = Image.open(image_path).convert('RGB')
         # Instruct BLIP to focus on clothing if possible
         text = "a photograph of clothing showing"
@@ -182,6 +155,7 @@ class QueryUnderstandingVLM:
         return self.processor.decode(out[0], skip_special_tokens=True).replace("a photograph of clothing showing", "").strip()
 
     def _run_vqa(self, image_path, question):
+        self._ensure_blip_loaded()
         raw_image = Image.open(image_path).convert('RGB')
         inputs = self.processor(raw_image, question, return_tensors="pt").to(self.device)
         

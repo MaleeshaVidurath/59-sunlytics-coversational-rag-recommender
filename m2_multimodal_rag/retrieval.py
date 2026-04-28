@@ -24,6 +24,10 @@ class MultimodalRetriever:
         clean_text_query = vlm_query_processor.extract_search_query(text_query, image_path)
         print(f"Step 1 | VLM Output Strategy: '{clean_text_query}'")
         
+        if clean_text_query == "IRRELEVANT_QUERY":
+            print("Step 1 | Detected irrelevant query. Returning warning flag.")
+            return "IRRELEVANT_QUERY"
+        
         # Step 2: Vector Math Compilation
         query_vector = clip_encoder.encode_text(clean_text_query)
         if query_vector is not None:
