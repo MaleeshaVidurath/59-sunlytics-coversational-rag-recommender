@@ -12,10 +12,14 @@
 import json
 import os
 import sys
+from text_rag.config import (
+    LLM_PROVIDER, GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL,
+)
 import httpx
 import re
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+# Groq+Ollama imports
 from text_rag.config import OLLAMA_HOST, OLLAMA_RAG_MODEL
 
 def _clean_response(text: str) -> str:
@@ -393,7 +397,55 @@ def _build_chitchat_prompt(evidence: dict) -> str:
 # ── LLM caller ────────────────────────────────────────────────────────────────
 
 async def call_ollama(prompt: str, max_tokens: int = 300) -> str:
-    """Calls Ollama LLM and returns the generated text."""
+    """
+    Unified LLM caller. Routes to Groq or Ollama based on LLM_PROVIDER setting.
+    LLM_PROVIDER=groq  → Groq cloud API (recommended: fast, free, no local RAM)
+    LLM_PROVIDER=ollama → Local Ollama (fallback)
+    """
+    if LLM_PROVIDER == "groq":
+        return await _call_groq(prompt, max_tokens)
+    else:
+        return await _call_ollama_local(prompt, max_tokens)
+
+
+async def _call_groq(prompt: str, max_tokens: int = 300) -> str:
+    """Calls Groq cloud API — same Llama 3.1 8B model, 10-20x faster than local."""
+    import time
+    _t0 = time.time()
+    print(f"[GROQ] ─── calling Groq API: model={GROQ_MODEL} max_tokens={max_tokens}")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{GROQ_BASE_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json={
+                    "model":       GROQ_MODEL,
+                    "messages":    [{"role": "user", "content": prompt}],
+                    "max_tokens":  max_tokens,
+                    "temperature": 0.3,
+                    "top_p":       0.9,
+                }
+            )
+        elapsed = time.time() - _t0
+        if response.status_code != 200:
+            print(f"[GROQ] Error {response.status_code}: {response.text[:200]}")
+            return ""
+        text = response.json()["choices"][0]["message"]["content"].strip()
+        print(f"[GROQ] response in {elapsed:.1f}s len={len(text)} chars")
+        return text
+    except Exception as e:
+        print(f"[GROQ] Exception: {str(e)[:150]}")
+        return ""
+
+
+async def _call_ollama_local(prompt: str, max_tokens: int = 300) -> str:
+    """Calls local Ollama (fallback when LLM_PROVIDER=ollama)."""
+    import time
+    _t0 = time.time()
+    print(f"[OLLAMA] ─── calling local Ollama: model={OLLAMA_RAG_MODEL}")
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
@@ -410,18 +462,18 @@ async def call_ollama(prompt: str, max_tokens: int = 300) -> str:
                     }
                 }
             )
+        elapsed = time.time() - _t0
         if response.status_code != 200:
             return ""
-        return response.json().get("response", "").strip()
+        text = response.json().get("response", "").strip()
+        print(f"[OLLAMA] response in {elapsed:.1f}s len={len(text)} chars")
+        return text
     except Exception as e:
         err_str = str(e)
         if not err_str or err_str.strip() == "":
-            # Empty error usually means connection timeout or Ollama busy
             print(f"[ResponseGenerator] Ollama timeout/no response — using fallback")
         elif "Connection" in err_str or "refused" in err_str:
             print(f"[ResponseGenerator] Ollama not running — run: ollama serve")
-        elif "model" in err_str.lower():
-            print(f"[ResponseGenerator] Ollama model error: {err_str[:100]}")
         else:
             print(f"[ResponseGenerator] Ollama error: {err_str[:150]}")
         return ""

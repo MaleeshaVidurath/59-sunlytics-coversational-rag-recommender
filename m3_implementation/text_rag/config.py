@@ -25,9 +25,22 @@ QDRANT_COLLECTION      = os.getenv("QDRANT_COLLECTION", "articles")
 QDRANT_VECTOR_SIZE     = 384   # all-MiniLM-L6-v2 output dimension
 QDRANT_DISTANCE        = "Cosine"
 
-# ── Ollama ─────────────────────────────────────────────────────────────────────
+# ── LLM Provider (Groq or Ollama) ──────────────────────────────────────────────
+# Set LLM_PROVIDER=groq to use Groq cloud API (recommended)
+# Set LLM_PROVIDER=ollama to use local Ollama (default fallback)
+LLM_PROVIDER           = os.getenv("LLM_PROVIDER", "groq")
+
+# Groq settings
+GROQ_API_KEY           = os.getenv("GROQ_API_KEY", "")
+GROQ_BASE_URL          = "https://api.groq.com/openai/v1"
+GROQ_MODEL             = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+
+# Ollama settings (fallback if LLM_PROVIDER=ollama)
 OLLAMA_HOST            = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
 OLLAMA_RAG_MODEL       = os.getenv("OLLAMA_RAG_MODEL", "llama3.1:8b")
+
+# Unified model name for logging
+ACTIVE_MODEL = GROQ_MODEL if LLM_PROVIDER == "groq" else OLLAMA_RAG_MODEL
 
 # ── NLI Hallucination Checker ──────────────────────────────────────────────────
 NLI_MODEL_NAME              = os.getenv("NLI_MODEL_NAME", "cross-encoder/nli-deberta-v3-base")
