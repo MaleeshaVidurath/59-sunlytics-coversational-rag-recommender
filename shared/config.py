@@ -15,7 +15,7 @@ ARTICLES_PATH = SAMPLE_DATA_DIR / 'sample_articles.csv'
 CUSTOMERS_PATH = DATA_DIR / 'customers.csv.zip'
 TRANSACTIONS_PATH = DATA_DIR / 'transactions_train.csv.zip'
 
-# Force HuggingFace to download massively heavy AI models to the F:\ drive instead of C:\
-HF_CACHE_DIR = BASE_DIR / 'huggingface_cache'
-HF_CACHE_DIR.mkdir(exist_ok=True)
+# M2 model weights cache (BLIP + CLIP) — kept inside m2_multimodal_rag for module cohesion
+HF_CACHE_DIR = BASE_DIR / 'm2_multimodal_rag' / 'models'
+HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["HF_HOME"] = str(HF_CACHE_DIR)

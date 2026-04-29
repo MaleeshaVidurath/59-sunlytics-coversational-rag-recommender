@@ -15,8 +15,9 @@ data/
 .vscode/
 .idea/
 
-# AI Model Cache
+# AI Model Cache (BLIP + CLIP weights for M2)
 huggingface_cache/
+m2_multimodal_rag/models/
 
 # OS
 .DS_Store
