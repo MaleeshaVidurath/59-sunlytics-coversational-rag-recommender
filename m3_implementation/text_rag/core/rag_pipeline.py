@@ -93,6 +93,14 @@ class TextRAGPipeline:
         label           = pipeline_output.get("label", "CHITCHAT")
         strategy        = pipeline_output.get("retrieval_strategy", "NO")
 
+        print("\n" + "="*60)
+        print(f"[RAG] ━━━ process() called ━━━")
+        print(f"[RAG] label={label} strategy={strategy}")
+        print(f"[RAG] session={session_id[:12] if session_id else '?'}")
+        _ri_dbg = retrieval_input or {}
+        print(f"[RAG] retrieval_input action={_ri_dbg.get('action','None')}")
+        _ri_payload = _ri_dbg.get("payload") or {}
+        print(f"[RAG] filters={_ri_payload.get('filters',{})}")
         # ── Step 1: Handle not-relevant inputs immediately ──────────────────
         if memory_context.get("not_relevant"):
             refusal = memory_context.get(
@@ -111,6 +119,9 @@ class TextRAGPipeline:
             )
 
         # ── Step 2: Assemble evidence ───────────────────────────────────────
+        _ri_a = (retrieval_input or {}).get("action", "NO_INPUT")
+        print(f"\n[DBG-4] EVIDENCE ASSEMBLY: action={_ri_a}")
+        print(f"[RAG] ─── Step 2: assembling evidence...")
         try:
             evidence = await self.assembler.assemble(
                 retrieval_input=retrieval_input,
@@ -121,9 +132,17 @@ class TextRAGPipeline:
             evidence = {"action": "no_retrieval", "error": str(e)}
 
         action = evidence.get("action", "no_retrieval")
+        _ev_items = evidence.get("items", [])
+        print(f"[RAG] evidence: action={action} items={len(_ev_items)}")
+        for _ei in _ev_items:
+            print(f"  [RAG-ITEM] {str(_ei.get('article_id','?'))[:12]} | {str(_ei.get('name',_ei.get('prod_name','?')))[:30]} | {_ei.get('colour',_ei.get('colour_group_name','?'))} | {_ei.get('price',_ei.get('avg_price','?'))}")
+        _ev_items = evidence.get("items", [])
+        print(f"[DBG-4] EVIDENCE DONE: action={action} items={len(_ev_items)}")
+        [print(f"  [DBG-4] ITEM: {it.get('article_id','?')} | {str(it.get('name','?'))[:30]} | {it.get('colour','?')} | {it.get('price','')}" ) for it in _ev_items]
 
         # ── Step 3 + 4 + 5: Generate → Check → Regenerate loop ─────────────
         skip_checking  = action in _SKIP_HALLUCINATION_CHECK
+        print(f"[RAG] skip_hallucination={skip_checking} (action={action})")
         response_text  = ""
         check_result   = {}
         attempt_count  = 0
@@ -138,6 +157,8 @@ class TextRAGPipeline:
 
             # Generate response
             try:
+                print(f"[DBG-5] OLLAMA GENERATE: attempt={attempt_count} strictness={strictness} action={action}")
+                print(f"[RAG] ─── generate: attempt={attempt_count} strictness={strictness} action={action}")
                 response_text = await self.generator.generate(
                     evidence=evidence,
                     strictness=strictness,
@@ -169,7 +190,8 @@ class TextRAGPipeline:
                 final_flag     = False
                 final_flagged  = []
                 final_score    = check_result.get("hallucination_score", 0.0)
-                print(f"[TextRAGPipeline] Passed hallucination check on attempt {attempt_count}.")
+                print(f"[RAG-HALL] ✓ PASSED attempt={attempt_count} chars={len(response_text)}")
+                print(f"[DBG-6] HALL PASS: response_len={len(response_text)} chars")
                 break
             else:
                 # Failed — log and try again with stricter prompt
@@ -207,6 +229,7 @@ class TextRAGPipeline:
             final_response          = contra_result["response_text"]
             contradiction_found     = contra_result["contradiction_found"]
             contradiction_count     = contra_result["contradiction_count"]
+            print(f"[DBG-7] CONTRADICTION: found={contradiction_found} count={contradiction_count} claims_stored={contra_result.get('claims_stored',0)}")
             contradictions_detail   = contra_result["contradictions"]
             product_ids             = contra_result["product_ids"]
             product_names           = contra_result["product_names"]
@@ -249,6 +272,10 @@ class TextRAGPipeline:
             except Exception as e:
                 print(f"[TextRAGPipeline] store_response error: {e}")
 
+        print(f"\n[RAG-OUT] ━━━ final result ━━━")
+        print(f"[RAG-OUT] response: {repr(final_response[:150])}")
+        print(f"[RAG-OUT] action={action} items={len(items_recommended)} hall={final_flag} contra={contradiction_found}")
+        print(f"[RAG-OUT] product_ids={product_ids}")
         return self._build_result(
             response_text=final_response,
             action=action,

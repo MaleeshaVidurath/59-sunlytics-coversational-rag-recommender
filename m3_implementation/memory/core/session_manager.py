@@ -109,6 +109,7 @@ class SessionManager:
         return await self._create_new_session(user_id)
 
     async def _create_new_session(self, user_id: str) -> SessionDocument:
+        print(f"[SESSION] ─── _create_new_session for user_id={user_id[:20]}")
         """
         Creates a brand new session in both MongoDB and Redis.
         Called when there is no active session for the user.

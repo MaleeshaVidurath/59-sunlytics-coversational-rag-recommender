@@ -487,12 +487,16 @@ class ContradictionDetector:
         Returns structured result dict.
         """
         action = evidence.get("action", "no_retrieval")
+        print(f"\n[CONTRA] ━━━ check_and_resolve() called ━━━")
+        print(f"[CONTRA] action={action} session={session_id[:12] if session_id else '?'} turn={turn_id}")
+        print(f"[CONTRA] response_text: {repr(response_text[:120])}")
 
         # Only check actions that make factual product claims
         if action not in {
             "catalog_search", "item_attribute_lookup",
             "item_compare", "explanation_generate", "item_detail_lookup"
         }:
+            print(f"[CONTRA] SKIP: action={action} not factual")
             return self._no_check_result(response_text)
 
         # Step 1: Find product references in this response
@@ -514,9 +518,14 @@ class ContradictionDetector:
             )
             all_new_claims.extend(claims)
 
+        print(f"[CONTRA] product_refs={product_refs}")
+        print(f"[CONTRA] claims extracted: {len(all_new_claims)}")
+        for _cl in all_new_claims: print(f"  [CONTRA-CLAIM] attr={_cl['attribute']} val={_cl['value']} text='{_cl['claim_text'][:60]}'")
         # Step 3: Load prior active claims for these articles
         prior_claims = await _load_prior_claims(session_id, article_ids)
 
+        print(f"[CONTRA] prior active claims loaded: {len(prior_claims)}")
+        for _pc in prior_claims: print(f"  [CONTRA-PRIOR] attr={_pc['attribute']} val={_pc['value']} turn={_pc.get('turn_id','?')}")
         # Step 4: Deduplicate new claims — keep only first per (article_id, attribute)
         # This prevents double-counting when same attribute appears twice in response
         seen_attr_keys  = set()
@@ -528,6 +537,7 @@ class ContradictionDetector:
                 deduped_claims.append(claim)
         all_new_claims = deduped_claims
 
+        print(f"[CONTRA] after dedup: {len(all_new_claims)} unique claims")
         # Check each deduplicated new claim against prior claims
         contradictions  = []
         corrected_text  = response_text
@@ -552,14 +562,7 @@ class ContradictionDetector:
                     if not is_contra:
                         continue
 
-                    print(
-                        f"[ContradictionDetector] Contradiction detected! "
-                        f"Article: {new_claim.get('article_name','?')} | "
-                        f"Attribute: {new_claim['attribute']} | "
-                        f"Old: '{prior['value']}' | "
-                        f"New: '{new_claim['value']}' | "
-                        f"NLI: {nli_score:.3f}"
-                    )
+                    print(f"[CONTRA-DETECTED] ⚠ Article: {new_claim.get('article_name','?')} | attr={new_claim['attribute']} | old={prior['value']} vs new={new_claim['value']} NLI={nli_score:.3f}")
 
                     # Step 6: Query PostgreSQL for authoritative truth
                     auth_value = await _get_authoritative_value(
@@ -663,11 +666,10 @@ class ContradictionDetector:
 
         # Step 9: Return final result
         contradiction_found = len(contradictions) > 0
+        print(f"[CONTRA] ─── result: contradiction_found={contradiction_found} count={len(contradictions)} claims_stored={len(claims_to_store)}")
         if contradiction_found:
-            print(
-                f"[ContradictionDetector] {len(contradictions)} contradiction(s) "
-                f"resolved. Response corrected."
-            )
+            print(f"[CONTRA] corrected response: {repr(corrected_text[:200])}")
+            print(f"[ContradictionDetector] {len(contradictions)} contradiction(s) resolved.")
 
         return {
             "response_text":       corrected_text,
