@@ -3,8 +3,11 @@ import pandas as pd
 import numpy as np
 import os
 import traceback
-from shared.config import DATA_DIR
+from pathlib import Path
 import sys
+
+# Vector DB lives inside the m2_multimodal_rag module, not the shared data/ folder
+VECTOR_DB_DIR = Path(__file__).resolve().parent / 'vector_db'
 
 # Optional try-except logic to catch missing Faiss library locally
 try:
@@ -18,8 +21,8 @@ class FAISSDatabase:
     """
     def __init__(self):
         print("Initializing Local FAISS Search Engine...")
-        self.index_path = DATA_DIR / 'm2_clip_faiss.bin'
-        self.mapping_path = DATA_DIR / 'm2_faiss_mapping.csv'
+        self.index_path = VECTOR_DB_DIR / 'm2_clip_faiss.bin'
+        self.mapping_path = VECTOR_DB_DIR / 'm2_faiss_mapping.csv'
         self.index = None
         self.mapping = None
         
@@ -39,8 +42,8 @@ class FAISSDatabase:
                 print(f"[ERROR] Error loading FAISS database: {e}")
                 self.database_ready = False
         else:
-            print("[WARNING] 'm2_clip_faiss.bin' or mapping NOT FOUND in /data/ directory.")
-            print("[WARNING] The search will run in DUMMY mode for UI testing until you run your Kaggle Cloud notebook!")
+            print("[WARNING] 'm2_clip_faiss.bin' or mapping NOT FOUND in m2_multimodal_rag/vector_db/ directory.")
+            print("[WARNING] Download both files from the Kaggle notebook Output tab and place them in m2_multimodal_rag/vector_db/")
 
     def search(self, query_vector: np.ndarray, top_k: int = 5):
         """
