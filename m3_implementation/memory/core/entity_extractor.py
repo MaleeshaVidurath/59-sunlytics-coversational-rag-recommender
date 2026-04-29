@@ -41,6 +41,13 @@ import httpx
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 
+# Groq settings for entity extraction
+# Uses llama-3.1-8b-instant (same model, better accuracy for JSON extraction)
+LLM_PROVIDER  = os.getenv("LLM_PROVIDER",  "groq")
+GROQ_API_KEY  = os.getenv("GROQ_API_KEY",  "")
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_ENTITY_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+
 # ── Labels that require entity extraction ─────────────────────────────────────
 # Only these two labels result in a catalog search.
 # All other labels work with items already in context.
@@ -608,25 +615,61 @@ JSON:"""
 
 
 async def extract_entities_llm(message: str) -> dict:
-    """Tier 3: Ollama LLM. Always called except for very short messages."""
+    """
+    Tier 3: LLM entity extraction.
+    Routes to Groq or local Ollama based on LLM_PROVIDER env variable.
+    Groq uses llama-3.1-8b-instant (better JSON accuracy than llama3.2:3b).
+    Ollama uses llama3.2:3b (smaller, faster for local use).
+    """
     if len(message.strip().split()) <= 2:
         return {}
 
+    prompt = EXTRACTION_PROMPT.format(message=message)
+
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.post(
-                f"{OLLAMA_HOST}/api/generate",
-                json={
-                    "model":  OLLAMA_MODEL,
-                    "prompt": EXTRACTION_PROMPT.format(message=message),
-                    "stream": False,
-                    "format": "json",
-                    "options": {"temperature": 0.0, "num_predict": 150},
-                }
-            )
-        if response.status_code != 200:
-            return {}
-        raw = response.json().get("response", "").strip()
+        if LLM_PROVIDER == "groq":
+            # ── Groq API ──────────────────────────────────────────────────────
+            print(f"[ENTITY-LLM] calling Groq: model={GROQ_ENTITY_MODEL} msg='{message[:50]}'")
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    f"{GROQ_BASE_URL}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type":  "application/json",
+                    },
+                    json={
+                        "model":       GROQ_ENTITY_MODEL,
+                        "messages":    [
+                            {"role": "system", "content": "You are a fashion entity extractor. Return ONLY valid JSON. No explanation."},
+                            {"role": "user",   "content": prompt},
+                        ],
+                        "max_tokens":  150,
+                        "temperature": 0.0,
+                        "response_format": {"type": "json_object"},
+                    }
+                )
+            if response.status_code != 200:
+                print(f"[ENTITY-LLM] Groq error {response.status_code}: {response.text[:100]}")
+                return {}
+            raw = response.json()["choices"][0]["message"]["content"].strip()
+            print(f"[ENTITY-LLM] Groq response: {raw[:100]}")
+        else:
+            # ── Local Ollama ──────────────────────────────────────────────────
+            print(f"[ENTITY-LLM] calling Ollama: model={OLLAMA_MODEL} msg='{message[:50]}'")
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.post(
+                    f"{OLLAMA_HOST}/api/generate",
+                    json={
+                        "model":  OLLAMA_MODEL,
+                        "prompt": prompt,
+                        "stream": False,
+                        "format": "json",
+                        "options": {"temperature": 0.0, "num_predict": 150},
+                    }
+                )
+            if response.status_code != 200:
+                return {}
+            raw = response.json().get("response", "").strip()
         raw = re.sub(r"```(?:json)?", "", raw).strip()
         entities = json.loads(raw)
         return {k: v for k, v in entities.items()
@@ -638,6 +681,7 @@ async def extract_entities_llm(message: str) -> dict:
 # ── Unified extraction ─────────────────────────────────────────────────────────
 
 async def extract_entities(message: str, label: str = None) -> dict:
+    print(f"\n[ENTITY] ━━━ extract_entities ━━━ msg='{message[:60]}' label={label}")
     """
     Main extraction function.
 

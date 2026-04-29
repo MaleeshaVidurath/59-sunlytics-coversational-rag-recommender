@@ -223,18 +223,33 @@ class UserManager:
     async def get_purchase_history(self, user_id: str) -> dict:
         """
         Returns the full purchase_history dict for a user.
-        This contains the complete analysis computed by customer_profile_loader.
+        Tries user_id first, then falls back to customer_id pattern.
         Returns {} if no history exists.
         """
         db  = get_db()
+        # Try by user_id first (primary key used at runtime)
         doc = await db.users.find_one(
             {"user_id": user_id},
-            {"purchase_history": 1}
+            {"purchase_history": 1, "customer_id": 1}
         )
-        if not doc:
-            # Try by customer_id pattern
-            return {}
-        return doc.get("purchase_history", {})
+        if doc and doc.get("purchase_history"):
+            print(f"[USER-MGR] get_purchase_history: found by user_id={user_id[:20]}")
+            return doc.get("purchase_history", {})
+
+        # Fallback: try customer_id derived from user_id
+        # user_id format: "user_hist_XXXXXXXX" where XXXXXXXX = first 8 chars of customer_id
+        if user_id.startswith("user_hist_"):
+            partial_cid = user_id[len("user_hist_"):]
+            doc2 = await db.users.find_one(
+                {"customer_id": {"$regex": f"^{partial_cid}"}},
+                {"purchase_history": 1, "customer_id": 1}
+            )
+            if doc2 and doc2.get("purchase_history"):
+                print(f"[USER-MGR] get_purchase_history: found by customer_id prefix={partial_cid}")
+                return doc2.get("purchase_history", {})
+
+        print(f"[USER-MGR] get_purchase_history: NO history found for user_id={user_id[:20]}")
+        return {}
 
     async def get_purchase_history_by_customer(self, customer_id: str) -> dict:
         """

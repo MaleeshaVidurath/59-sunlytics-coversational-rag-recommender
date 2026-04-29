@@ -12,10 +12,14 @@
 import json
 import os
 import sys
+from text_rag.config import (
+    LLM_PROVIDER, GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL,
+)
 import httpx
 import re
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+# Groq+Ollama imports
 from text_rag.config import OLLAMA_HOST, OLLAMA_RAG_MODEL
 
 def _clean_response(text: str) -> str:
@@ -180,81 +184,121 @@ Write a clear comparison in 2-3 sentences. State which clothing item is better f
 
 
 def _build_explanation_prompt(evidence: dict, strictness: int = 0) -> str:
-    """Prompt for explaining why a SPECIFIC item was recommended."""
-    article  = evidence.get("article") or {}
-    matches  = evidence.get("confirmed_matches", [])
-    prior    = evidence.get("prior_claims", [])
-    user_msg = evidence.get("user_message", "")
+    """
+    Builds a rich explanation prompt combining:
+    - Item details (name, colour, type, price, description)
+    - Confirmed preference matches (verified against article)
+    - All user preferences ranked by weight
+    - Prior claims (must not contradict)
+    """
+    article       = evidence.get("article") or {}
+    matches       = evidence.get("confirmed_matches", [])
+    all_prefs     = evidence.get("matched_prefs", [])
+    prior         = evidence.get("prior_claims", [])
+    user_msg      = evidence.get("user_message", "")
 
     item_name   = article.get("name", "this item")
     item_colour = article.get("colour", "")
     item_type   = article.get("type", "")
     item_price  = article.get("price", "")
-    item_desc   = article.get("material_description", "")[:200]
+    item_desc   = article.get("material_description", "")[:250]
+    item_pattern= article.get("pattern", "")
+    item_group  = article.get("garment_group", "")
 
-    def _weight_word(w):
-        if w >= 0.8: return "very strongly"
-        if w >= 0.6: return "strongly"
+    _ATTR_MAP = {
+        "colour_group_name":         "colour",
+        "product_type_name":         "product type",
+        "graphical_appearance_name": "pattern",
+        "garment_group_name":        "style category",
+        "index_group_name":          "category",
+        "avg_price":                 "price range",
+        "occasion":                  "occasion",
+        "style":                     "style",
+    }
+
+    def _human(attr):
+        return _ATTR_MAP.get(attr, attr.replace("_", " ").replace(" name", "").strip())
+
+    def _strength(w):
+        if w >= 0.7: return "strongly"
         if w >= 0.4: return "moderately"
         return "slightly"
 
-    # Convert database attribute names to human-readable form
-    def _human_attr(attr):
-        mapping = {
-            "colour_group_name":          "colour",
-            "product_type_name":          "type",
-            "graphical_appearance_name":  "pattern",
-            "garment_group_name":         "style",
-            "index_group_name":           "category",
-            "section_name":               "section",
-            "avg_price":                  "price",
-        }
-        return mapping.get(attr, attr.replace("_", " ").replace("name", "").strip())
+    pref_lines = []
 
-    if matches:
-        match_lines = []
-        for m in matches:
-            attr  = _human_attr(m.get("attribute", ""))
-            val   = m.get("value", "")
-            wt    = m.get("weight", 0)
-            match_lines.append(f"  - You prefer {attr}: {val} ({_weight_word(wt)})")
-        match_text = "\n".join(match_lines)
-    else:
-        match_text = "  - It matches your general shopping preferences"
-
-    prior_text = ""
-    active_claims = [c for c in prior if c.get("status") == "active"]
-    if active_claims:
-        prior_text = "Already told the user (do NOT contradict):\n" + "\n".join(
-            f"  - {c['claim_text']}" for c in active_claims
+    # Confirmed matches: article attribute literally equals preference value
+    for m in matches[:4]:
+        attr = _human(m.get("attribute", ""))
+        val  = m.get("value", "")
+        wt   = m.get("weight", 0)
+        pref_lines.append(
+            f"  CONFIRMED MATCH: Your {attr} preference is '{val}' "
+            f"({_strength(wt)} preferred, weight={wt:.2f})"
         )
 
-    strictness_instruction = {
-        0: "Explain naturally in 2-3 friendly sentences.",
-        1: "STRICT: Only use the confirmed preference matches listed below.",
-        2: "STRICTEST: One sentence per match. No extra claims.",
-    }[strictness]
+    # Top user preferences (from matched_prefs in payload)
+    # These use attribute_name/attribute_value keys from enrichment layer
+    top_prefs = sorted(all_prefs, key=lambda x: x.get("weight", 0), reverse=True)[:5]
+    for p in top_prefs:
+        attr = _human(p.get("attribute_name", p.get("attribute", "")))
+        val  = p.get("attribute_value", p.get("value", ""))
+        wt   = p.get("weight", 0)
+        src  = p.get("source", "")
+        if attr and val:
+            pref_lines.append(
+                f"  USER PREFERENCE: {_strength(wt)} preference for {attr}: '{val}' "
+                f"(weight={wt:.2f}, source={src})"
+            )
 
-    return FASHION_CONTEXT + f"""You are a friendly fashion shopping assistant.
-The user is asking specifically about: {item_name}
+    if not pref_lines:
+        pref_lines = ["  User general fashion preferences align with this item"]
 
-Item: {item_name} — {item_colour} {item_type}, {item_price}
-Description: {item_desc}
+    pref_section = "\n".join(pref_lines)
 
-User question: "{user_msg}"
+    prior_text = ""
+    active = [cl for cl in prior if cl.get("status") == "active"]
+    if active:
+        prior_text = "\nAlready told user (do NOT contradict):\n" + "\n".join(
+            f"  - {cl.get('claim_text', '')}" for cl in active
+        )
 
-Why {item_name} was recommended:
-{match_text}
+    strictness_map = {
+        0: "Give a natural, friendly explanation in 3-4 sentences.",
+        1: "Be precise: cite only confirmed preference matches.",
+        2: "One sentence per confirmed match. No additional claims.",
+    }
+    instruction = strictness_map.get(strictness, strictness_map[0])
 
+    return FASHION_CONTEXT + f"""You are a knowledgeable fashion shopping assistant.
+
+USER QUESTION: "{user_msg}"
+
+ITEM BEING EXPLAINED:
+  Name:        {item_name}
+  Type:        {item_type}
+  Colour:      {item_colour}
+  Price:       {item_price}
+  Pattern:     {item_pattern}
+  Category:    {item_group}
+  Description: {item_desc}
+
+WHY THIS ITEM MATCHES THIS USER:
+{pref_section}
 {prior_text}
 
-{strictness_instruction}
-IMPORTANT:
-- Answer about {item_name} specifically, not any other item
-- Use plain English — never say "colour_group_name" or any database field name
-- Say things like "it is a great {item_colour} option" or "it matches your preference for {item_type}s"
-- Do not invent facts not listed above"""
+TASK: {instruction}
 
+WRITE YOUR EXPLANATION:
+- Start with "I recommended {item_name} because..."
+- Mention the {item_colour} colour and {item_type} type specifically
+- Explain the 2-3 strongest preference matches in plain English
+- Mention the price {item_price} and value
+- Be specific and informative
+
+STRICT RULES:
+- Only talk about {item_name}
+- Never use raw field names like colour_group_name or product_type_name
+- Only use facts listed above — do not invent details"""
 
 
 def _build_detail_prompt(evidence: dict, strictness: int = 0) -> str:
@@ -353,7 +397,55 @@ def _build_chitchat_prompt(evidence: dict) -> str:
 # ── LLM caller ────────────────────────────────────────────────────────────────
 
 async def call_ollama(prompt: str, max_tokens: int = 300) -> str:
-    """Calls Ollama LLM and returns the generated text."""
+    """
+    Unified LLM caller. Routes to Groq or Ollama based on LLM_PROVIDER setting.
+    LLM_PROVIDER=groq  → Groq cloud API (recommended: fast, free, no local RAM)
+    LLM_PROVIDER=ollama → Local Ollama (fallback)
+    """
+    if LLM_PROVIDER == "groq":
+        return await _call_groq(prompt, max_tokens)
+    else:
+        return await _call_ollama_local(prompt, max_tokens)
+
+
+async def _call_groq(prompt: str, max_tokens: int = 300) -> str:
+    """Calls Groq cloud API — same Llama 3.1 8B model, 10-20x faster than local."""
+    import time
+    _t0 = time.time()
+    print(f"[GROQ] ─── calling Groq API: model={GROQ_MODEL} max_tokens={max_tokens}")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{GROQ_BASE_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json={
+                    "model":       GROQ_MODEL,
+                    "messages":    [{"role": "user", "content": prompt}],
+                    "max_tokens":  max_tokens,
+                    "temperature": 0.3,
+                    "top_p":       0.9,
+                }
+            )
+        elapsed = time.time() - _t0
+        if response.status_code != 200:
+            print(f"[GROQ] Error {response.status_code}: {response.text[:200]}")
+            return ""
+        text = response.json()["choices"][0]["message"]["content"].strip()
+        print(f"[GROQ] response in {elapsed:.1f}s len={len(text)} chars")
+        return text
+    except Exception as e:
+        print(f"[GROQ] Exception: {str(e)[:150]}")
+        return ""
+
+
+async def _call_ollama_local(prompt: str, max_tokens: int = 300) -> str:
+    """Calls local Ollama (fallback when LLM_PROVIDER=ollama)."""
+    import time
+    _t0 = time.time()
+    print(f"[OLLAMA] ─── calling local Ollama: model={OLLAMA_RAG_MODEL}")
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
@@ -370,18 +462,18 @@ async def call_ollama(prompt: str, max_tokens: int = 300) -> str:
                     }
                 }
             )
+        elapsed = time.time() - _t0
         if response.status_code != 200:
             return ""
-        return response.json().get("response", "").strip()
+        text = response.json().get("response", "").strip()
+        print(f"[OLLAMA] response in {elapsed:.1f}s len={len(text)} chars")
+        return text
     except Exception as e:
         err_str = str(e)
         if not err_str or err_str.strip() == "":
-            # Empty error usually means connection timeout or Ollama busy
             print(f"[ResponseGenerator] Ollama timeout/no response — using fallback")
         elif "Connection" in err_str or "refused" in err_str:
             print(f"[ResponseGenerator] Ollama not running — run: ollama serve")
-        elif "model" in err_str.lower():
-            print(f"[ResponseGenerator] Ollama model error: {err_str[:100]}")
         else:
             print(f"[ResponseGenerator] Ollama error: {err_str[:150]}")
         return ""
@@ -410,7 +502,10 @@ class ResponseGenerator:
 
         Returns generated response text.
         """
+        print(f"\n[RESPONSE-GEN] ━━━ generate() called ━━━")
         action = evidence.get("action", "no_retrieval")
+        print(f"[RESPONSE-GEN] action={action} strictness={strictness}")
+        print(f"[RESPONSE-GEN] evidence_items={len(evidence.get('items',[]))}")
 
         if action == "catalog_search":
             prompt = _build_catalog_search_prompt(evidence, strictness)
@@ -431,14 +526,20 @@ class ResponseGenerator:
         else:
             prompt = _build_chitchat_prompt(evidence)
 
+        print(f"[DBG-5a] PROMPT action={action} strictness={strictness} prompt_len={len(prompt)}")
+        print(f"[DBG-5a] PROMPT PREVIEW: {prompt[:200].replace(chr(10), ' ')!r}")
         response = await call_ollama(prompt)
 
         # Basic cleanup and markdown removal
         response = response.strip()
         if not response:
+            print("[DBG-5b] OLLAMA: no response → using fallback")
             return _clean_response(self._fallback_response(evidence))
 
-        return _clean_response(response)
+        _cleaned = _clean_response(response)
+        print(f"[RESPONSE-GEN] Ollama: RESPONSE len={len(response)}")
+        print(f"[RESPONSE-GEN] Cleaned: {repr(_cleaned[:200])}")
+        return _cleaned
 
     def _fallback_response(self, evidence: dict) -> str:
         """
@@ -504,20 +605,37 @@ class ResponseGenerator:
             )
 
         elif action == "explanation_generate":
-            article = evidence.get("article") or {}
-            matches = evidence.get("confirmed_matches", [])
-            name    = article.get("name", "this item")
-            if matches:
-                reasons = [
-                    f"{m['attribute'].replace('_',' ')} is {m['value']}"
-                    for m in matches[:2]
-                ]
-                return (
-                    f"I recommended {name} because it matches your preference — "
-                    f"{' and '.join(reasons)}. "
-                    f"It is priced at {article.get('price','?')}."
-                )
-            return f"I recommended {name} based on your style preferences."
+            article   = evidence.get("article") or {}
+            matches   = evidence.get("confirmed_matches", [])
+            all_prefs = evidence.get("matched_prefs", [])
+            name      = article.get("name", "this item")
+            colour    = article.get("colour", "")
+            ptype     = article.get("type", "")
+            price     = article.get("price", "?")
+            desc      = article.get("material_description", "")[:120]
+            _AM = {"colour_group_name":"colour","product_type_name":"type",
+                   "occasion":"occasion","style":"style"}
+            def _h(a): return _AM.get(a, a.replace("_"," ").replace(" name",""))
+            reasons = []
+            for m in matches[:3]:
+                reasons.append(f"its {_h(m.get('attribute',''))} is {m.get('value','')}")
+            if len(reasons) < 2:
+                top = sorted(all_prefs, key=lambda x: x.get("weight",0), reverse=True)
+                for p in top[:3]:
+                    attr = _h(p.get("attribute_name", p.get("attribute","")))
+                    val  = p.get("attribute_value", p.get("value",""))
+                    if attr and val:
+                        reasons.append(f"you prefer {attr}: {val}")
+                    if len(reasons) >= 3:
+                        break
+            reason_text = ", and ".join(reasons[:3]) if reasons else "it matches your preferences"
+            result = (
+                f"I recommended {name} because {reason_text}. "
+                f"It is a {colour} {ptype} priced at {price}."
+            )
+            if desc:
+                result += f" {desc}"
+            return result
 
         elif action == "item_detail_lookup":
             article = evidence.get("article") or {}
