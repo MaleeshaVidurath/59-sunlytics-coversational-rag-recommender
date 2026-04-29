@@ -236,8 +236,14 @@ class HallucinationChecker:
         flagged     = []
         total_score = 0.0
 
+        print(f"\n[HALL-CHECK] ━━━ check() called ━━━")
+        print(f"[HALL-CHECK] response_text len={len(response_text)}: {repr(response_text[:120])}")
+        print(f"[HALL-CHECK] sentences={len(sentences)} facts={len(fact_list)}")
+        print(f"[HALL-CHECK] action={evidence.get('action','?')} skip={evidence.get('action','?') in {'no_retrieval','explanation_generate'}}")
+        for _fact in fact_list[:5]: print(f"  [HALL-FACT] {_fact[:80]}")
         for sentence in sentences:
             if not _is_factual_sentence(sentence):
+                print(f"[HALL-CHECK] SKIP non-factual: '{sentence[:70]}'")
                 # Non-factual sentence — skip NLI check
                 results.append({
                     "sentence":       sentence,
@@ -254,6 +260,8 @@ class HallucinationChecker:
             if not best_evidence:
                 continue
 
+            print(f"[HALL-CHECK] NLI checking: '{sentence[:70]}'")
+            print(f"[HALL-CHECK] vs evidence: '{best_evidence[:80]}'")
             # Run NLI: (premise=evidence, hypothesis=sentence)
             scores = nli_model.predict([(best_evidence, sentence)])
             # scores shape: (1, 3) — [contradiction, neutral, entailment]
@@ -288,14 +296,18 @@ class HallucinationChecker:
             }
             results.append(result)
 
+            print(f"[HALL-CHECK] NLI scores: contra={score_dict['contradiction']:.4f} neutral={score_dict['neutral']:.4f} entail={score_dict['entailment']:.4f}")
+            print(f"[HALL-CHECK] → is_contradiction={is_contradiction} is_unsupported={is_unsupported} HALLUCINATION={is_hallucination}")
             if is_hallucination:
                 flagged.append(result)
 
+        print(f"[HALL-CHECK] ─── loop done: checked={len([r for r in results if r['checked']])} flagged={len(flagged)}")
         factual_checked = [r for r in results if r["checked"]]
         n_checked       = len(factual_checked)
         avg_score       = total_score / n_checked if n_checked > 0 else 0.0
         has_hallucination = len(flagged) > 0
 
+        print(f"[HALL-CHECK] RESULT: has_hallucination={has_hallucination} score={round(avg_score,3)} n_flagged={len(flagged)}")
         return {
             "has_hallucination":  has_hallucination,
             "hallucination_score":round(avg_score, 3),

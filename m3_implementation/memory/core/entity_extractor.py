@@ -638,6 +638,7 @@ async def extract_entities_llm(message: str) -> dict:
 # ── Unified extraction ─────────────────────────────────────────────────────────
 
 async def extract_entities(message: str, label: str = None) -> dict:
+    print(f"\n[ENTITY] ━━━ extract_entities ━━━ msg='{message[:60]}' label={label}")
     """
     Main extraction function.
 

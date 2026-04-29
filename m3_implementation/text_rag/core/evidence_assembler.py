@@ -192,11 +192,20 @@ class EvidenceAssembler:
             top_k=max(20, _extract_quantity(user_message) * 5)
         )
 
+        print(f"[ASSEMBLER-QDRANT] got {len(qdrant_results)} results")
+        for _qr in qdrant_results[:3]: print(f"  [QDRANT] {str(_qr.get('article_id',_qr.get('id','?')))[:12]} {str(_qr.get('prod_name',_qr.get('name','?')))[:25]} {_qr.get('colour_group_name',_qr.get('colour','?'))}")
         # Step 2: PostgreSQL filtered search for ranking diversity
         # Fetch larger pool when user requests multiple items
+        print(f"\n[ASSEMBLER-CATALOG] ━━━ catalog search ━━━")
         requested_qty = _extract_quantity(user_message)
+        print(f"[ASSEMBLER-CATALOG] qty={requested_qty} msg='{user_message[:60]}'")
+        print(f"[ASSEMBLER-CATALOG] filters={filters}")
+        print(f"[ASSEMBLER-CATALOG] exclude_ids={exclude_ids}")
+        print(f"[ASSEMBLER-CATALOG] purchase_hints={purchase_hints}")
+        print(f"[ASSEMBLER-CATALOG] preference_boosts={preference_boosts}")
         search_limit  = max(20, requested_qty * 5)
         penalties     = payload.get("penalties", {})
+        print(f"[ASSEMBLER-POSTGRES] searching limit={search_limit}")
         pg_results = await search_articles_filtered(
             filters=filters,
             exclude_ids=exclude_ids,
@@ -206,6 +215,8 @@ class EvidenceAssembler:
             limit=search_limit
         )
 
+        print(f"[ASSEMBLER-POSTGRES] got {len(pg_results)} results")
+        for _pr in pg_results[:3]: print(f"  [POSTGRES] {str(_pr.get('article_id','?'))[:12]} {str(_pr.get('prod_name','?'))[:25]} {_pr.get('colour_group_name','?')} £{_pr.get('avg_price','?')}")
         # Step 3: Merge — Qdrant results first (semantically relevant),
         # then add PostgreSQL results not already in Qdrant set
         seen_ids = set()
@@ -228,6 +239,10 @@ class EvidenceAssembler:
             top_articles = _ensure_colour_diversity(merged, requested_qty)
         else:
             top_articles = merged[:requested_qty]
+        print(f"[DBG-4d] FINAL ITEMS: {len(top_articles)} selected from {len(merged)} merged")
+        for _fa in top_articles:
+            print(f"  [DBG-4d] → {_fa.get('article_id','?')} | {str(_fa.get('prod_name',_fa.get('name','?')))[:30]} | {_fa.get('colour_group_name',_fa.get('colour','?'))} | avg_price={_fa.get('avg_price','?')}")
+
 
         return {
             "action":          "catalog_search",
@@ -248,6 +263,7 @@ class EvidenceAssembler:
         self, ri: dict, mc: dict
     ) -> dict:
         """Fetches a single article and packages the relevant attribute."""
+        print(f"\n[ASSEMBLER-ATTR] ━━━ attribute lookup ━━━")
         payload         = ri.get("payload", {})
         article_id      = payload.get("article_id")
         attribute_topic = payload.get("attribute_topic", "general_details")
@@ -331,26 +347,54 @@ class EvidenceAssembler:
     ) -> dict:
         """
         Assembles evidence for explanation generation.
-        Critically includes prior_claims so the LLM cannot contradict them.
+        Fetches article from PostgreSQL and finds which user preferences match.
         """
+        print(f"\n[ASSEMBLER-EXPLAIN] ━━━ _assemble_explanation ━━━")
         payload      = ri.get("payload", {})
         article_id   = payload.get("article_id")
         prior_claims = payload.get("prior_claims", [])
         matched_prefs= payload.get("matched_prefs", [])
         user_message = ri.get("user_message", "")
+        items_ctx    = ri.get("items_in_context", {})
+
+        print(f"[ASSEMBLER-EXPLAIN] article_id={article_id}")
+        print(f"[ASSEMBLER-EXPLAIN] matched_prefs count={len(matched_prefs)}")
+        print(f"[ASSEMBLER-EXPLAIN] prior_claims count={len(prior_claims)}")
 
         article = None
         if article_id:
             article = await get_article_by_id(str(article_id))
+            print(f"[ASSEMBLER-EXPLAIN] get_article_by_id result: {article is not None}")
+            if article:
+                print(f"[ASSEMBLER-EXPLAIN] article keys: {list(article.keys())[:10]}")
+                print(f"[ASSEMBLER-EXPLAIN] article: name={article.get('prod_name')} colour={article.get('colour_group_name')} type={article.get('product_type_name')}")
+            else:
+                print(f"[ASSEMBLER-EXPLAIN] WARNING: article not found for id={article_id}")
+                # Try from items_in_context as fallback
+                for slot in ['item_a', 'item_b']:
+                    ctx_item = items_ctx.get(slot) or {}
+                    if str(ctx_item.get('article_id','')) == str(article_id):
+                        # Build a minimal article dict from context
+                        article = {
+                            'article_id':        str(article_id),
+                            'prod_name':         ctx_item.get('prod_name',''),
+                            'product_type_name': ctx_item.get('product_type_name',''),
+                            'colour_group_name': ctx_item.get('colour_group_name',''),
+                            'avg_price':         ctx_item.get('price', 0),
+                            'detail_desc':       ctx_item.get('detail_desc',''),
+                        }
+                        print(f"[ASSEMBLER-EXPLAIN] used items_in_context fallback for {slot}")
+                        break
 
-        # Find which preferences actually match this article
+        # Find which user preferences are confirmed by the article attributes
         confirmed_matches = []
         if article and matched_prefs:
             for pref in matched_prefs:
-                attr  = pref.get("attribute_name")
-                val   = pref.get("attribute_value")
+                # Support both attribute_name (from enrichment) and attribute (legacy)
+                attr  = pref.get("attribute_name") or pref.get("attribute")
+                val   = pref.get("attribute_value") or pref.get("value")
                 weight= pref.get("weight", 0)
-                if attr and article.get(attr) == val:
+                if attr and val and article.get(attr) == val:
                     confirmed_matches.append({
                         "attribute": attr,
                         "value":     val,
@@ -358,10 +402,14 @@ class EvidenceAssembler:
                         "confirmed": True,
                     })
 
+        print(f"[ASSEMBLER-EXPLAIN] confirmed_matches={len(confirmed_matches)}")
+        for cm in confirmed_matches:
+            print(f"  [CONFIRM] {cm['attribute']}={cm['value']} weight={cm['weight']:.2f}")
+
         return {
             "action":            "explanation_generate",
             "user_message":      user_message,
-            "article":           _article_summary(article) if article else None,
+            "article":           _article_summary(article) if article else {},
             "prior_claims":      prior_claims,
             "confirmed_matches": confirmed_matches,
             "matched_prefs":     matched_prefs,

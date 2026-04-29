@@ -48,6 +48,11 @@ async def chat(req: ChatRequest):
             detail="Pipeline not initialised. Server starting up."
         )
 
+    print("\n" + "="*60)
+    print(f"[CHAT] ━━━ NEW REQUEST ━━━")
+    print(f"[CHAT] user_id={req.user_id[:20]}")
+    print(f"[CHAT] message='{req.message[:80]}'")
+    print(f"[CHAT] session_id={req.session_id} force_new={req.force_new_session}")
     try:
         # If force_new_session, clear Redis active session pointer first
         if req.force_new_session:
@@ -59,6 +64,7 @@ async def chat(req: ChatRequest):
             except Exception as e:
                 print(f"[Chat] Redis clear error (non-fatal): {e}")
 
+        print(f"[CHAT] ─── Step 1: calling memory.process_turn...")
         # Step 1: Memory pipeline
         pipeline_output = await memory.process_turn(
             user_id=req.user_id,
@@ -67,6 +73,77 @@ async def chat(req: ChatRequest):
             customer_id=req.customer_id,
         )
 
+        print(f"[CHAT] ─── Memory pipeline done")
+        import json as _json
+        print("\n" + "="*60)
+        print("[SPEC-CHECK] ━━━ FULL pipeline_output (vs retrieval_input_reference_v2) ━━━")
+        _ri = pipeline_output.get("retrieval_input") or {}
+        _mc = pipeline_output.get("memory_context") or {}
+        _payload = _ri.get("payload") or {}
+        print(f"[SPEC] user_id              = {pipeline_output.get('user_id','MISSING')[:30]}")
+        print(f"[SPEC] session_id           = {pipeline_output.get('session_id','MISSING')}")
+        print(f"[SPEC] label                = {pipeline_output.get('label','MISSING')}")
+        print(f"[SPEC] confidence           = {pipeline_output.get('confidence','MISSING')}")
+        print(f"[SPEC] retrieval_strategy   = {pipeline_output.get('retrieval_strategy','MISSING')}")
+        print(f"[SPEC] classifier_input     = {str(pipeline_output.get('classifier_input','MISSING'))[:80]}")
+        print(f"[SPEC] side_effects         = {pipeline_output.get('side_effects','MISSING')}")
+        print(f"[SPEC-RI] retrieval_input fields:")
+        if _ri:
+            print(f"  action                  = {_ri.get('action','MISSING')}")
+            print(f"  retrieval_strategy      = {_ri.get('retrieval_strategy','MISSING')}")
+            print(f"  user_message            = {str(_ri.get('user_message','MISSING'))[:80]}")
+            _ctx = _ri.get("items_in_context") or {}
+            print(f"  items_in_context.item_a = {_ctx.get('item_a','None')}")
+            print(f"  items_in_context.item_b = {_ctx.get('item_b','None')}")
+            print(f"  exclude_ids             = {_ri.get('exclude_ids','MISSING')}")
+            print(f"[SPEC-PAYLOAD] payload fields (action={_ri.get('action','?')})")
+            if _ri.get("action") in ("catalog_search",):
+                print(f"  filters                 = {_payload.get('filters','MISSING')}")
+                print(f"  soft_constraints [NEW]  = {_payload.get('soft_constraints','MISSING')}")
+                print(f"  preference_boosts       = {_payload.get('preference_boosts','MISSING')}")
+                _ph = _payload.get("purchase_history_hints") or {}
+                print(f"  purchase_history_hints [NEW]:")
+                print(f"    top_colours           = {_ph.get('top_colours','MISSING')}")
+                print(f"    top_product_types     = {_ph.get('top_product_types','MISSING')}")
+                print(f"    inferred_gender       = {_ph.get('inferred_gender','MISSING')}")
+                print(f"    budget_tier           = {_ph.get('budget_tier','MISSING')}")
+                print(f"    preferred_price_range = {_ph.get('preferred_price_range','MISSING')}")
+                print(f"    dominant_colour       = {_ph.get('dominant_colour','MISSING')}")
+                print(f"    dominant_type         = {_ph.get('dominant_type','MISSING')}")
+                print(f"  penalties               = {_payload.get('penalties','MISSING')}")
+            elif _ri.get("action") == "item_attribute_lookup":
+                print(f"  article_id              = {_payload.get('article_id','MISSING')}")
+                print(f"  attribute_topic         = {_payload.get('attribute_topic','MISSING')}")
+            elif _ri.get("action") == "item_compare":
+                print(f"  article_id_a            = {_payload.get('article_id_a','MISSING')}")
+                print(f"  article_id_b            = {_payload.get('article_id_b','MISSING')}")
+                print(f"  comparison_dimension    = {_payload.get('comparison_dimension','MISSING')}")
+                print(f"  preference_weights      = {_payload.get('preference_weights','MISSING')}")
+            elif _ri.get("action") == "explanation_generate":
+                print(f"  article_id              = {_payload.get('article_id','MISSING')}")
+                print(f"  prior_claims            = {_payload.get('prior_claims','MISSING')}")
+                print(f"  matched_prefs           = {_payload.get('matched_prefs','MISSING')}")
+            elif _ri.get("action") == "item_detail_lookup":
+                print(f"  article_id              = {_payload.get('article_id','MISSING')}")
+        else:
+            print("  retrieval_input = None (FEEDBACK/CHITCHAT — correct per spec)")
+            _fb = _mc.get("feedback") or {}
+            if _fb:
+                print(f"  memory_context.feedback.sentiment_score = {_fb.get('sentiment_score','MISSING')}")
+                print(f"  memory_context.feedback.is_positive     = {_fb.get('is_positive','MISSING')}")
+                print(f"  memory_context.feedback.feedback_type   = {_fb.get('feedback_type','MISSING')}")
+                print(f"  memory_context.feedback.item_reacted_to = {_fb.get('item_reacted_to','MISSING')}")
+        print("[SPEC-CHECK] ━━━ end pipeline_output ━━━")
+        print(f"[CHAT] pipeline_output keys: {list(pipeline_output.keys())}")
+        print(f"[CHAT] label={pipeline_output.get('label')} conf={pipeline_output.get('confidence',0):.1%} strategy={pipeline_output.get('retrieval_strategy')}")
+        _ri_tmp = pipeline_output.get("retrieval_input") or {}
+        print(f"[CHAT] session_id={pipeline_output.get('session_id','?')} action={_ri_tmp.get('action','NO_RETRIEVAL')}")
+        _ri = pipeline_output.get("retrieval_input") or {}
+        _payload_dbg = _ri.get('payload') or {}
+        print(f"[CHAT] filters={_payload_dbg.get('filters',{})}")
+        print(f"[CHAT] soft_constraints={_payload_dbg.get('soft_constraints',{})}")
+        print(f"[CHAT] purchase_hints_present={bool(_payload_dbg.get('purchase_history_hints'))}")
+        print(f"[CHAT] ─── Step 2: calling rag.process...")
         # Step 2: Text RAG pipeline (includes hallucination + contradiction)
         rag_result = await rag.process(
             pipeline_output=pipeline_output,
@@ -74,6 +151,12 @@ async def chat(req: ChatRequest):
             store_response=True,
         )
 
+        print(f"[CHAT] ─── RAG done")
+        print(f"[CHAT] rag_result keys: {list(rag_result.keys())}")
+        print(f"[CHAT] response_text: '{rag_result.get('response_text','')[:100]}'")
+        print(f"[CHAT] action={rag_result.get('action')} items={len(rag_result.get('items_recommended',[]))} hall={rag_result.get('hallucination_flag')} contra={rag_result.get('contradiction_found')}")
+        for _itm in rag_result.get("items_recommended",[]):
+            print(f"[CHAT] ITEM: {_itm.get('article_id','?')} | {str(_itm.get('name','?'))[:30]} | {_itm.get('colour','?')} | {_itm.get('price','?')}")
         # Extract items for product cards
         items = []
         for item in rag_result.get("items_recommended", []):
@@ -88,6 +171,7 @@ async def chat(req: ChatRequest):
                     "pattern":     item.get("pattern", ""),
                 })
 
+        print(f"[CHAT] ─── Returning final response to frontend")
         return {
             "response_text":       rag_result.get("response_text", ""),
             "session_id":          pipeline_output.get("session_id", ""),

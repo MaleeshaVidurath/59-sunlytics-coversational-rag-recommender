@@ -166,6 +166,7 @@ class MemoryPipeline:
         )
         active_session_id = session.session_id
 
+        print(f"[PIPELINE-2] session: session_id={session_id}")
         # ── Step 3: Get recent turns for DistilBERT context ───────────────
         history = await self.turn_mgr.get_turns_as_history(
             session_id=active_session_id,
@@ -246,10 +247,14 @@ class MemoryPipeline:
             message, history
         )
         if pre_label is not None:
+            print(f"[PIPELINE-4a] PRE-CLASSIFIER fired: {pre_label} / {pre_strategy}")
             label              = pre_label
             retrieval_strategy = pre_strategy
             confidence         = 0.0
             used_rules         = True
+            print("\n" + "="*60)
+            print(f"[DBG-1] PRE-CLASSIFIER: label={label} strategy={retrieval_strategy}")
+            print(f"[DBG-1] MSG: '{message[:60]}'")
         # ── Step 4b: DistilBERT classification ─────────────────────────────────
         elif self.predictor is not None:
             classification_result = self.predictor.predict(
@@ -260,6 +265,12 @@ class MemoryPipeline:
             retrieval_strategy = classification_result["retrieval_strategy"]
             confidence         = classification_result["confidence"]
             used_rules         = classification_result.get("used_rules", False)
+            print(f"[PIPELINE-4b] DISTILBERT: label={label} conf={confidence:.1%} strategy={retrieval_strategy}")
+            _top3 = sorted(classification_result.get("all_probabilities",{}).items(), key=lambda x:-x[1])[:3]
+            print(f"[PIPELINE-4b] top3: {[(k,f'{v:.1%}') for k,v in _top3]}")
+            print("\n" + "="*60)
+            print(f"[DBG-1] DISTILBERT: label={label} conf={confidence:.1%} strategy={retrieval_strategy}")
+            print(f"[DBG-1] MSG: '{message[:60]}'")
 
         # ── Step 4c: Product keyword override ───────────────────────────────────
         # DistilBERT misclassifies short product-keyword messages as CHITCHAT/FEEDBACK.
@@ -333,8 +344,7 @@ class MemoryPipeline:
 
             if _should_override:
                 _new_label = "REFINEMENT" if history else "INITIAL_REQUEST"
-                print(f"[Pipeline] Keyword override: {label} ({confidence:.1%}) "
-                      f"→ {_new_label} | msg='{_ml[:40]}'")
+                print(f"[DBG-1] OVERRIDE: {label} ({confidence:.1%}) → {_new_label}")
                 label              = _new_label
                 retrieval_strategy = "FULL"
                 confidence         = 0.80
@@ -346,6 +356,8 @@ class MemoryPipeline:
             used_rules  = True
 
 
+        print(f"[DBG-2] ENTITY EXTRACTION: label={label}")
+        print(f"[PIPELINE-5] starting entity extraction for label={label}")
         # ── Step 5: Entity extraction (three-tier: keyword → vector → LLM) ────
         # Tier 1 (keyword+regex) always runs first.
         # Tier 2 (vector similarity) fills missing colour/product_type.
@@ -370,6 +382,8 @@ class MemoryPipeline:
         )
 
         # ── Step 7: Enrich with memory context ────────────────────────────
+        print(f"[DBG-3] ENRICHMENT: calling for label={label}")
+        print(f"[PIPELINE-6] calling enricher...")
         enriched = await self.enricher.enrich(
             label=label,
             retrieval_strategy=retrieval_strategy,
@@ -406,6 +420,7 @@ class MemoryPipeline:
             # Memory updates that happened as a side effect of this turn
             # Always present, may be empty list
             "side_effects": enriched.get("side_effects", []),
+            "_debug_enriched": enriched,  # temp debug key
 
             # Debug: what was fed to DistilBERT
             "classifier_input": classifier_input,

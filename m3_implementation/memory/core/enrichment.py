@@ -479,6 +479,7 @@ class EnrichmentLayer:
     async def _enrich_initial_request(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
+        print(f"[ENRICH-INIT] ━━━ called msg='{current_message[:50]}' entities={entities}")
         """INITIAL_REQUEST → action: catalog_search"""
         side_effects = []
 
@@ -518,6 +519,7 @@ class EnrichmentLayer:
 
         memory_ctx = await self._base_memory_context(user_id, state)
 
+        print(f"[ENRICH-INIT] returning retrieval_input")
         return {
             "label":              "INITIAL_REQUEST",
             "retrieval_strategy": "FULL",
@@ -560,6 +562,7 @@ class EnrichmentLayer:
     async def _enrich_refinement(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
+        print(f"[ENRICH-REFINE] ━━━ called msg='{current_message[:50]}' entities={entities}")
         """REFINEMENT → action: catalog_search (same as INITIAL_REQUEST)"""
         side_effects = []
 
@@ -641,6 +644,7 @@ class EnrichmentLayer:
     async def _enrich_attribute_question(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
+        print(f"[ENRICH-ATTR] ━━━ called msg='{current_message[:50]}' entities={entities}")
         """ATTRIBUTE_QUESTION → action: item_attribute_lookup.
         
         Guard: if no items are in context, cannot look up an attribute.
@@ -709,6 +713,7 @@ class EnrichmentLayer:
     async def _enrich_explanation_why(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
+        print(f"[ENRICH-WHY] ━━━ called msg='{current_message[:50]}' entities={entities}")
         """
         EXPLANATION_WHY → action: explanation_generate
 
@@ -806,6 +811,7 @@ class EnrichmentLayer:
     async def _enrich_comparison(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
+        print(f"[ENRICH-COMPARE] ━━━ called msg='{current_message[:50]}' entities={entities}")
         """COMPARISON → action: item_compare"""
         current_items = state.currently_discussing
         item_a = current_items.get("item_a")
@@ -844,6 +850,7 @@ class EnrichmentLayer:
     async def _enrich_selection_reference(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
+        print(f"[ENRICH-SELECT] ━━━ called msg='{current_message[:50]}' entities={entities}")
         """SELECTION_REFERENCE → action: item_detail_lookup.
         
         Guard: if no items are in context (session just started or no
@@ -914,36 +921,54 @@ class EnrichmentLayer:
         """
         Returns purchase_history_hints from the pre-loaded customer profile.
         Falls back to empty hints if no profile exists.
+
+        FIX: Uses get_purchase_history() which reads raw MongoDB dict directly,
+        instead of get_user_by_id() which returns a Pydantic UserDocument that
+        may strip the purchase_history field if not declared in the schema.
         """
-        try:
-            user = await self.user_mgr.get_user_by_id(user_id)
-            if user and hasattr(user, 'purchase_history') and user.purchase_history:
-                ph = user.purchase_history
-                return {
-                    "top_colours": [
-                        c["colour"] for c in ph.get("top_colours", [])
-                    ],
-                    "top_product_types": [
-                        t["type"] for t in ph.get("top_product_types", [])
-                    ],
-                    "inferred_gender":      ph.get("inferred_gender"),
-                    "budget_tier":          ph.get("price_stats", {}).get("budget_tier"),
-                    "preferred_price_range":ph.get("price_stats", {}).get("preferred_range"),
-                    "dominant_colour":      ph.get("dominant_colour"),
-                    "dominant_type":        ph.get("dominant_product_type"),
-                }
-        except Exception:
-            pass
-        return {
-            "top_colours": [], "top_product_types": [],
-            "inferred_gender": None, "budget_tier": None,
+        _empty = {
+            "top_colours":           [],
+            "top_product_types":     [],
+            "inferred_gender":       None,
+            "budget_tier":           None,
             "preferred_price_range": None,
-            "dominant_colour": None, "dominant_type": None,
+            "dominant_colour":       None,
+            "dominant_type":         None,
         }
+        try:
+            print(f"[ENRICH-HINTS] loading purchase_history for user_id={user_id[:20]}")
+            ph = await self.user_mgr.get_purchase_history(user_id)
+            print(f"[ENRICH-HINTS] raw purchase_history keys={list(ph.keys()) if ph else 'EMPTY'}")
+            if not ph:
+                print(f"[ENRICH-HINTS] no purchase_history found → returning empty hints")
+                return _empty
+            hints = {
+                "top_colours": [
+                    c["colour"] for c in ph.get("top_colours", [])
+                    if isinstance(c, dict) and c.get("colour")
+                ],
+                "top_product_types": [
+                    t["type"] for t in ph.get("top_product_types", [])
+                    if isinstance(t, dict) and t.get("type")
+                ],
+                "inferred_gender":       ph.get("inferred_gender"),
+                "budget_tier":           ph.get("price_stats", {}).get("budget_tier"),
+                "preferred_price_range": ph.get("price_stats", {}).get("preferred_range"),
+                "dominant_colour":       ph.get("dominant_colour"),
+                "dominant_type":         ph.get("dominant_product_type"),
+            }
+            print(f"[ENRICH-HINTS] hints built: top_colours={hints['top_colours'][:3]} gender={hints['inferred_gender']} budget={hints['budget_tier']} dominant_colour={hints['dominant_colour']}")
+            return hints
+        except Exception as e:
+            print(f"[ENRICH-HINTS] ERROR: {e} → returning empty hints")
+            import traceback; traceback.print_exc()
+            return _empty
+
 
     async def _enrich_feedback(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
+        print(f"[ENRICH-FEEDBACK] ━━━ called msg='{current_message[:50]}' entities={entities}")
         """FEEDBACK → no retrieval. Updates memory based on sentiment."""
         db = get_db()
         side_effects = []
@@ -1043,6 +1068,7 @@ class EnrichmentLayer:
     async def _enrich_chitchat(
         self, session_id, user_id, current_message
     ) -> dict:
+        print(f"[ENRICH-CHITCHAT] ━━━ called msg='{current_message[:50]}' entities={entities}")
         """CHITCHAT → no retrieval, minimal memory context.
         Passes user_message so the response generator knows what was said."""
         return {
