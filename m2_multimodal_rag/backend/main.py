@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 # Local application imports
 from m2_multimodal_rag.m2_action_router import m2_router
 from shared.data_loader import data_loader
-from .schemas import PipelineRequest
+from .schemas import PipelineRequest, SimpleSearchRequest
 
 
 # =====================================================================
@@ -72,6 +72,75 @@ async def process_endpoint(request: PipelineRequest) -> dict:
     except Exception as e:
         logger.error(f"Pipeline processing failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error during pipeline processing.")
+
+@api_router.post("/simple")
+async def simple_search_endpoint(request: SimpleSearchRequest) -> dict:
+    """
+    Simplified endpoint for frontend developers and team members to easily test the M2 
+    backend without constructing the complex M3 Memory Pipeline payload.
+    It automatically wraps the 'query' into a 'catalog_search' action.
+    """
+    # Construct a default M3 payload
+    retrieval_dict = {
+        "action": "catalog_search",
+        "retrieval_strategy": "FULL",
+        "user_message": request.query,
+        "items_in_context": {},
+        "exclude_ids": [],
+        "payload": {
+            "filters": {},
+            "preference_boosts": [],
+            "penalties": {}
+        }
+    }
+    
+    logger.info(f"Received simple search request. Query: '{request.query}'")
+    
+    try:
+        # Route the request through the central M2 dispatcher
+        result = m2_router.process_retrieval_input(
+            retrieval_input=retrieval_dict,
+            memory_context={}
+        )
+        
+        # Post-process: Attach local image URLs
+        _attach_image_urls(result)
+        
+        return result
+
+    except Exception as e:
+        logger.error(f"Simple search processing failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error during simple search processing.")
+
+@api_router.get("/m2output")
+async def mock_endpoint() -> dict:
+    """
+    Mock endpoint that returns a pre-defined JSON response instantly.
+    Useful for frontend developers to test UI rendering without needing 
+    the heavy ML models or vector DB running.
+    """
+    return {
+        "action": "catalog_search",
+        "success": True,
+        "response_text": "Here are some mock dresses for UI testing.",
+        "items": [
+            {
+                "article_id": "0123456789", # You might want to use a real ID from the dataset here if they need images
+                "prod_name": "Mock Summer Dress",
+                "colour_group_name": "Red",
+                "product_type_name": "Dress",
+                "product_group_name": "Garment Full body",
+                "department_name": "Womens Everyday",
+                "index_group_name": "Ladieswear",
+                "graphical_appearance_name": "Solid",
+                "detail_desc": "A lightweight mock dress.",
+                "explanation": "This is a mock response.",
+                "score": 0.99,
+                "image_url": "/api/images/0123456789" # Mock image URL format
+            }
+        ],
+        "error": None
+    }
 
 
 @api_router.get("/images/{article_id}")
