@@ -75,3 +75,13 @@ class PipelineRequest(BaseModel):
     """
     retrieval_input: Optional[RetrievalInputModel] = None   # None indicates FEEDBACK or CHITCHAT actions
     memory_context: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+# --- 4. Simple Testing Request ---
+
+class SimpleSearchRequest(BaseModel):
+    """
+    A simplified request model for frontend developers and other team members 
+    to easily test the M2 backend without building the complex M3 payload.
+    """
+    query: str
+
