@@ -1,9 +1,42 @@
 # m3_implementation/api/routers/chat.py
 import asyncio
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from api.dependencies import get_memory_pipeline, get_rag_pipeline
+
+
+# ── Fire-and-forget: send pipeline_output to friend modules ───────────────────
+# Ports are configured in .env:
+#   M2_MULTIMODAL_URL=http://127.0.0.1:8001
+#   M1_GRAPH_URL=http://127.0.0.1:8002
+import os as _os
+
+_M2_URL = _os.getenv("M2_MULTIMODAL_URL", "")   # Friend A multimodal RAG
+_M1_URL = _os.getenv("M1_GRAPH_URL",      "")   # Friend B graph RAG
+
+async def _fire_and_forget(url: str, pipeline_output: dict, module_name: str):
+    """
+    Sends pipeline_output to a friend module's /api/process endpoint.
+    Does NOT wait for response — your chatbot returns immediately to the user.
+    The friend module processes independently in the background.
+    """
+    if not url:
+        return  # Not configured — skip silently
+
+    body = {
+        "retrieval_input": pipeline_output.get("retrieval_input"),
+        "memory_context":  pipeline_output.get("memory_context") or {},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            await client.post(f"{url}/api/process", json=body)
+        print(f"[CHAT] Sent pipeline_output to {module_name} ({url})")
+    except Exception as e:
+        # Non-fatal — friend module may not be running yet
+        print(f"[CHAT] Could not reach {module_name} at {url}: {type(e).__name__}")
+
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -143,6 +176,11 @@ async def chat(req: ChatRequest):
         print(f"[CHAT] filters={_payload_dbg.get('filters',{})}")
         print(f"[CHAT] soft_constraints={_payload_dbg.get('soft_constraints',{})}")
         print(f"[CHAT] purchase_hints_present={bool(_payload_dbg.get('purchase_history_hints'))}")
+        # ── Fire and forget: send to friend modules ────────────────────────
+        import asyncio as _asyncio
+        _asyncio.ensure_future(_fire_and_forget(_M2_URL, pipeline_output, "M2 Multimodal RAG"))
+        _asyncio.ensure_future(_fire_and_forget(_M1_URL, pipeline_output, "M1 Graph RAG"))
+
         print(f"[CHAT] ─── Step 2: calling rag.process...")
         # Step 2: Text RAG pipeline (includes hallucination + contradiction)
         rag_result = await rag.process(
