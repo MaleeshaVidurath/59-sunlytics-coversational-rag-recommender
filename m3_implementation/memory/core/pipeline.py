@@ -343,7 +343,15 @@ class MemoryPipeline:
                     _should_override = True
 
             if _should_override:
-                _new_label = "REFINEMENT" if history else "INITIAL_REQUEST"
+                # Only mark REFINEMENT if history has actual search turns
+                _has_search_hist = any(
+                    t.get("retrieval_strategy") == "FULL" or
+                    any(kw in (t.get("content") or "").lower()
+                        for kw in ["option 1", "option 2", "£", "found two"])
+                    for t in history
+                    if t.get("role") == "bot"
+                )
+                _new_label = "REFINEMENT" if (history and _has_search_hist) else "INITIAL_REQUEST"
                 print(f"[DBG-1] OVERRIDE: {label} ({confidence:.1%}) → {_new_label}")
                 label              = _new_label
                 retrieval_strategy = "FULL"
@@ -617,7 +625,17 @@ class MemoryPipeline:
             return "CHITCHAT", "NO"
 
         if has_history:
-            return "REFINEMENT", "FULL"
+            # Only override to REFINEMENT if there were previous FULL retrieval
+            # turns (actual product searches), not just CHITCHAT/greetings.
+            _has_search_history = any(
+                t.get("retrieval_strategy") == "FULL" or
+                any(kw in (t.get("content") or "").lower()
+                    for kw in ["option 1", "option 2", "£", "found two", "found these"])
+                for t in history
+                if t.get("role") == "bot"
+            )
+            if _has_search_history:
+                return "REFINEMENT", "FULL"
         return "INITIAL_REQUEST", "FULL"
 
     def _extract_entities(self, message: str) -> dict:
