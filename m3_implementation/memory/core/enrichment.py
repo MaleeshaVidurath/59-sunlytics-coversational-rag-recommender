@@ -1068,7 +1068,7 @@ class EnrichmentLayer:
     async def _enrich_chitchat(
         self, session_id, user_id, current_message
     ) -> dict:
-        print(f"[ENRICH-CHITCHAT] ━━━ called msg='{current_message[:50]}' entities={entities}")
+        print(f"[ENRICH-CHITCHAT] ━━━ called msg='{current_message[:50]}'")
         """CHITCHAT → no retrieval, minimal memory context.
         Passes user_message so the response generator knows what was said."""
         return {

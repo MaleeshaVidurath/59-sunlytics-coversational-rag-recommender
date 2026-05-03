@@ -40,7 +40,9 @@ from memory.core.session_manager import SessionManager
 from memory.core.turn_manager import TurnManager
 from memory.core.user_manager import UserManager
 from memory.core.enrichment import EnrichmentLayer
-from memory.core.entity_extractor import extract_entities, is_fashion_relevant
+from memory.core.entity_extractor import (
+    extract_entities, is_fashion_relevant, is_fashion_relevant_async
+)
 from memory.models.schemas import (
     TurnClassification, ItemInContext,
     RecommendationDocument, now_utc
@@ -177,28 +179,21 @@ class MemoryPipeline:
             current_message=message
         )
 
-        # ── Step 3b: Not-relevant input guard ─────────────────────────────────
-        # Check whether the user's message is fashion-relevant before
-        # running any classification or retrieval.
-        # EXCEPTION: if there is conversation history, short conversational
-        # messages (thanks, ok, great etc.) are always allowed through.
-        # They are continuations, not off-topic queries.
-        _skip_relevance = False
-        if history:
-            _ml = message.lower().strip()
-            _ok_phrases = [
-                "thanks", "thank you", "cheers", "great", "ok", "okay",
-                "perfect", "awesome", "brilliant", "wonderful", "nice",
-                "that helps", "very helpful", "really helpful",
-                "thanks a lot", "thank you so much", "many thanks",
-                "that is really helpful", "that was helpful",
-            ]
-            if any(p in _ml for p in _ok_phrases):
-                _skip_relevance = True
-
-        _is_relevant, _relevance_score = (
-            (True, 1.0) if _skip_relevance
-            else is_fashion_relevant(message)
+        # ── Step 3b: Not-relevant input guard (4-stage hybrid classifier) ────
+        # is_fashion_relevant_async runs:
+        #   Stage 1 (0ms)    — Conversational bypass: continuation phrases
+        #                      in active history always pass through.
+        #   Stage 2 (0ms)    — Fast keyword allowlist + expanded blocklist.
+        #   Stage 3 (3-5ms)  — Dual-pool mean-top-3 semantic scoring
+        #                      (16 fashion anchors vs 12 off-topic anchors).
+        #   Stage 4 (~150ms) — Groq LLM arbitration for ambiguous middle zone.
+        # Passing `history` activates Stage 1 context-awareness.
+        _is_relevant, _relevance_score, _guard_stage = (
+            await is_fashion_relevant_async(message, history=history)
+        )
+        print(
+            f"[PIPELINE-3b] FashionGuard: relevant={_is_relevant} "
+            f"score={_relevance_score:.3f} stage={_guard_stage}"
         )
         if not _is_relevant:
             # Store the turn but return a refusal — no classification, no retrieval
