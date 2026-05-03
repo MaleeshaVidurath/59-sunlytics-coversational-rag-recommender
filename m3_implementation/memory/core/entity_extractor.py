@@ -164,44 +164,28 @@ def _validate_entities(entities: dict) -> dict:
     return validated
 
 
-# ── Fashion relevance detection ────────────────────────────────────────────────
+# ── Advanced Fashion Relevance Classifier ─────────────────────────────────────
+#
+# 4-stage hybrid approach — no training needed, leverages existing infrastructure:
+#
+#   Stage 1 (0ms)   — Conversational bypass: continuation phrases in active
+#                     sessions always pass (they refer to items in context).
+#   Stage 2 (0ms)   — Fast keyword gate: rich allowlist (fashion keywords) +
+#                     expanded blocklist (word-boundary regex patterns).
+#   Stage 3 (3-5ms) — Dual-pool semantic scoring: mean-of-top-3 cosine scores
+#                     from 16 fashion vs 12 off-topic anchors. More robust than
+#                     the old single-max approach.
+#   Stage 4 (≈150ms)— Groq LLM arbitration: only fires for the genuinely
+#                     ambiguous middle zone. Re-uses existing GROQ_API_KEY.
+#
+# Why not train a model?
+#   → No labeled data, high maintenance, overkill for a guard layer.
+# Why not NLI cross-encoder only?
+#   → 50-100× slower than bi-encoder; unacceptable for every turn.
+# Why mean-of-top-3 instead of max?
+#   → Single best anchor is brittle; averaging top-3 anchors per pool
+#     smooths outliers and gives a more reliable signal.
 
-_FASHION_ANCHORS = [
-    "I want to buy clothes shoes bags or fashion accessories",
-    "Show me dresses tops shirts jackets trousers shoes",
-    "I need an outfit to wear for an event or occasion",
-    "What colour material fabric or style is this clothing item",
-    "I like or dislike this fashion recommendation show me something else",
-    "Tell me more details about this clothing item recommendation",
-    "I am looking for something casual formal sporty elegant to wear",
-    "Recommend me fashion items within my budget price range",
-]
-
-_OFF_TOPIC_ANCHORS = [
-    "What is the weather temperature forecast today",
-    "Tell me a funny joke or story",
-    "Who scored in the football soccer cricket match",
-    "What is the capital city country president prime minister",
-    "Help me with coding programming homework assignment",
-    "What happened in the news today current events",
-    "How do I cook this recipe bake ingredients",
-    "What time is it current date",
-]
-
-# Word boundary patterns — prevents "show"→"show me dresses", "war"→"warm"
-_OFF_TOPIC_PATTERNS = [
-    r'\bweather\b', r'\bforecast\b', r'\btemperature\b',
-    r'\bjoke\b', r'\bfunny\b', r'\blaugh\b',
-    r'\bfootball\b', r'\bsoccer\b', r'\bcricket\b', r'\bbasketball\b',
-    r'\bpresident\b', r'\belection\b', r'\bpolitics\b',
-    r'\brecipe\b', r'\bcooking\b', r'\bbaking\b',
-    r'\bhomework\b', r'\bprogramming\b', r'\balgorithm\b',
-    r'\bbitcoin\b', r'\bcrypto\b', r'\bstock price\b',
-    r'\bdoctor\b', r'\bhospital\b', r'\bsymptom\b',
-    r'\btranslate\b', r'\bgrammar\b',
-]
-
-_RELEVANCE_THRESHOLD = 0.20
 _model = None
 
 
@@ -240,43 +224,321 @@ def _best_match_index(query: str, candidates: list) -> tuple:
     return best_idx, best_score
 
 
-def is_fashion_relevant(message: str) -> tuple:
+# ── Stage 1: Continuation bypass phrases ──────────────────────────────────────
+# When these appear in a message that has conversation history, the message
+# is always a continuation (references prior items) — never off-topic.
+_CONTINUATION_PHRASES = [
+    "thanks", "thank you", "cheers", "great", "ok", "okay", "perfect",
+    "awesome", "brilliant", "wonderful", "that helps", "very helpful",
+    "tell me more", "more about", "more details", "more info",
+    "why this", "why the", "explain", "what material", "what fabric",
+    "how much", "the price", "is it", "does it", "tell me about",
+    "first one", "second one", "option 1", "option 2",
+    "which one", "compare", "the first", "the second",
+    "yes please", "yes", "no", "nope", "love it", "hate it",
+    "show me", "another one", "different", "instead",
+]
+
+# ── Stage 2a: Fast allowlist — always fashion-relevant ────────────────────────
+# Plain substring match (already lowercased). Contains H&M product types,
+# fashion intent verbs, occasions and style words.
+_ALLOWLIST_PHRASES = [
+    # Product types (singular + plural)
+    "dress", "blouse", "trousers", "pants", "jeans", "skirt",
+    "jacket", "coat", "hoodie", "sweater", "jumper", "cardigan",
+    "vest top", "shorts", "leggings", "tights", "blazer",
+    "sneakers", "boots", "sandals", "heels", "loafers",
+    "handbag", "backpack", "scarf", "beanie",
+    "swimsuit", "bikini", "activewear", "sportswear",
+    # Must keep "shirt" after "t-shirt" / "blouse" to avoid partial match issues
+    "t-shirt", "tshirt", "polo shirt", "shirt",
+    # Generic fashion signals
+    "outfit", "clothing", "fashion", "wardrobe", "apparel", "garment",
+    # Style / aesthetic words
+    "trendy", "elegant", "smart casual", "minimalist",
+    # Material / attribute queries about a clothing item
+    "what fabric", "what material", "machine wash", "cotton", "linen",
+    # Action phrases unambiguously about fashion
+    "what to wear", "something to wear", "dressed for",
+    "recommend me", "show me clothes", "find me a",
+    # H&M direct reference
+    "h&m",
+]
+
+# ── Stage 2b: Expanded blocklist — clear off-topic signals ────────────────────
+# Word-boundary regex to avoid false positives (e.g. "warm" ≠ "war").
+_BLOCKLIST_PATTERNS = [
+    # Weather
+    r'\bweather\b', r'\bforecast\b', r'\btemperature\b', r'\bhumidity\b',
+    # Humour
+    r'\bjoke\b', r'\bfunny\b', r'\blaugh\b', r'\briddle\b',
+    # Sports
+    r'\bfootball\b', r'\bsoccer\b', r'\bcricket\b', r'\bbasketball\b',
+    r'\btennis\b', r'\bmatch result\b', r'\bsports score\b',
+    # Politics / geography
+    r'\bpresident\b', r'\belection\b', r'\bpolitics\b', r'\bgovernment\b',
+    r'\bcapital city\b',
+    # Cooking
+    r'\brecipe\b', r'\bcooking\b', r'\bbaking\b', r'\bingredients\b',
+    # Programming / homework
+    r'\bhomework\b', r'\bprogramming\b', r'\balgorithm\b', r'\bdebugging\b',
+    r'\bwrite code\b', r'\bfix bug\b', r'\bpython error\b',
+    # Finance / crypto
+    r'\bbitcoin\b', r'\bcrypto\b', r'\bstock price\b', r'\binvest\b',
+    # Medical
+    r'\bdoctor\b', r'\bhospital\b', r'\bsymptom\b', r'\bmedication\b',
+    # Language
+    r'\btranslate\b', r'\bgrammar\b', r'\blanguage lesson\b',
+    # Travel bookings
+    r'\bbook a flight\b', r'\bbook a hotel\b', r'\bbook me a flight\b',
+    r'\bflight to\b', r'\bhotel booking\b', r'\btravel insurance\b',
+    # Time / news
+    r'\bcurrent time\b', r'\bwhat time is\b', r'\bwhat date is\b',
+    r'\bnews today\b', r'\bcurrent events\b', r'\bbreaking news\b',
+]
+
+# ── Stage 0: Exact word blocklist ───────────────────────────────────────────
+# Exact whole-message match (after stripping). Catches single or double words
+# that semantic scoring misclassifies because of incidental word overlap
+# (e.g. 'washroom' scores high fashion due to 'machine washable' in anchors).
+# Keep this set focused on genuinely ambiguous short off-topic words.
+_EXACT_WORD_BLOCKLIST = {
+    # Bathroom / household
+    "washroom", "wash room", "bathroom", "toilet", "restroom", "shower",
+    "kitchen", "bedroom", "living room", "dining room", "garage",
+    # Food
+    "pizza", "burger", "food", "lunch", "dinner", "breakfast", "coffee",
+    "beer", "wine", "restaurant", "cake", "soup", "pasta", "sushi",
+    # Transport
+    "car", "bus", "taxi", "train", "flight", "bike", "motorcycle",
+    "uber", "lyft", "vehicle", "driving",
+    # Tech / general
+    "computer", "laptop", "phone", "wifi", "internet", "website",
+    "google", "facebook", "twitter", "youtube",
+    # Sports / games
+    "football", "cricket", "tennis", "basketball", "chess", "gaming",
+    # Animals
+    "dog", "cat", "bird", "fish", "pet",
+    # Finance
+    "money", "bitcoin", "crypto", "bank", "loan", "salary",
+    # Medical
+    "medicine", "doctor", "hospital", "pain", "sick", "headache",
+}
+
+# ── Stage 3: Dual-pool anchor sentences ───────────────────────────────────────
+# 16 fashion anchors — cover product discovery, attributes, refinement,
+# comparison, feedback, price/budget, style/occasion (H&M specific).
+_FASHION_ANCHOR_POOL = [
+    "I want to buy a dress shirt jacket trousers shoes or bag",
+    "Show me casual or formal clothing options from the collection",
+    "Find me something to wear for a party wedding office or beach",
+    "I need an outfit for a special occasion or everyday use",
+    "What material fabric colour or size is this clothing item",
+    "Does it have pockets how does it fit is it machine washable",
+    "Tell me more about this fashion item its design and style details",
+    "Show me something similar but in a different colour or style",
+    "I prefer something more casual formal sporty or elegant",
+    "Which of these two clothing items is better for my needs",
+    "Can you compare these two fashion recommendations for me",
+    "I love this item it is perfect I want to buy it",
+    "I don't like this show me different fashion options",
+    "I have a budget of fifty pounds show me affordable clothing",
+    "Recommend fashion items under thirty or forty pounds",
+    "I prefer minimalist classic trendy or smart casual clothing styles",
+]
+
+# 12 off-topic anchor sentences covering common chatbot misuse categories.
+_OFF_TOPIC_ANCHOR_POOL = [
+    "What is the weather forecast temperature today or tomorrow",
+    "Tell me a joke funny story or riddle to make me laugh",
+    "Who won the football cricket basketball tennis match score",
+    "What is the capital of a country or who is the president",
+    "Help me write code fix a bug or explain a programming concept",
+    "What happened in the news politics or current world events",
+    "How do I cook bake or prepare a recipe or meal",
+    "What is the current date time or timezone",
+    "Give me financial advice about stocks crypto or bitcoin investment",
+    "I have a medical symptom what doctor hospital should I see",
+    "Translate this sentence to another language or fix my grammar",
+    "Book a hotel flight or recommend travel destinations for a trip",
+]
+
+# Threshold constants
+_SEMANTIC_FASHION_MIN = 0.18   # below this → off-topic regardless of margin
+_SEMANTIC_MARGIN      = 0.10   # off-topic must beat fashion by this to reject
+_AMBIGUITY_HIGH       = 0.28   # above this → confident fashion, skip Groq
+
+
+def _semantic_scores(message: str) -> tuple:
     """
+    Dual-pool mean-of-top-3 cosine scoring.
+    Returns (fashion_score, offtopic_score).
+    """
+    model = _get_model()
+    if model is None:
+        return 0.5, 0.0  # no model → default allow
+
+    all_anchors = _FASHION_ANCHOR_POOL + _OFF_TOPIC_ANCHOR_POOL
+    embeddings  = model.encode([message] + all_anchors)
+    msg_emb     = embeddings[0]
+    n_f         = len(_FASHION_ANCHOR_POOL)
+
+    f_scores = sorted(
+        [_cosine(msg_emb, embeddings[i + 1]) for i in range(n_f)],
+        reverse=True
+    )
+    o_scores = sorted(
+        [_cosine(msg_emb, embeddings[i + 1 + n_f])
+         for i in range(len(_OFF_TOPIC_ANCHOR_POOL))],
+        reverse=True
+    )
+    return sum(f_scores[:3]) / 3, sum(o_scores[:3]) / 3
+
+
+async def _groq_relevance_check(message: str) -> tuple:
+    """
+    Stage 4: Groq LLM arbitration for genuinely ambiguous messages.
     Returns (is_relevant: bool, confidence: float).
-    Uses word-boundary regex first, then vector similarity.
-    Short messages (≤2 words) are always considered relevant.
+    Only called when semantic scores are in the ambiguous middle zone.
+    """
+    if not GROQ_API_KEY:
+        return True, 0.5
+
+    prompt = (
+        "You are a domain guard for an H&M fashion shopping assistant. "
+        "Reply with ONLY JSON: {\"is_fashion\": true/false, \"reason\": \"one sentence\"}.\n\n"
+        "Is this message about fashion, clothing, style, accessories, or H&M shopping?\n"
+        f"Message: \"{message}\""
+    )
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                f"{GROQ_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={
+                    "model": GROQ_ENTITY_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 60,
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                }
+            )
+        if resp.status_code == 200:
+            raw = resp.json()["choices"][0]["message"]["content"]
+            parsed = json.loads(raw)
+            is_fashion = bool(parsed.get("is_fashion", True))
+            conf = 0.92 if is_fashion else 0.08
+            print(f"[FashionGuard] Groq verdict: is_fashion={is_fashion} reason={parsed.get('reason','')}")
+            return is_fashion, conf
+    except Exception as e:
+        print(f"[FashionGuard] Groq fallback error: {e}")
+    return True, 0.5  # on any error → default allow (prefer false-negatives over false-positives)
+
+
+async def is_fashion_relevant_async(
+    message: str,
+    history: list = None
+) -> tuple:
+    """
+    Full 4-stage fashion relevance classifier (async).
+
+    Returns (is_relevant: bool, confidence: float, stage: str)
+
+    IMPORTANT — no blanket short-message bypass:
+      'washroom', 'pizza', 'car' are 1 word and must be blocked.
+      Only messages that hit Stage 1 (continuation with history) or
+      Stage 2a (allowlist fashion keyword) are fast-allowed.
+      Everything else is fully evaluated regardless of length.
     """
     msg = message.lower().strip()
 
-    if len(msg.split()) <= 2:
-        return True, 1.0
+    # ── Stage 0: Exact word blocklist (fastest, no model needed) ───────────
+    # Catches single/double non-fashion words that fool semantic scoring
+    # because of incidental overlap (e.g. 'washroom' ~ 'machine washable').
+    if msg in _EXACT_WORD_BLOCKLIST:
+        print(f"[FashionGuard] Stage0-exact-block: '{msg}'")
+        return False, 0.0, "stage0_exact_block"
 
-    for pattern in _OFF_TOPIC_PATTERNS:
+    # ── Stage 1: Conversational bypass (history-aware) ────────────────────
+    # If history exists AND message contains a continuation phrase,
+    # it is always a reply to shown items — never off-topic.
+    # This handles: "thanks", "yes", "which one", "ok", "tell me more" etc.
+    if history:
+        for phrase in _CONTINUATION_PHRASES:
+            if phrase in msg:
+                return True, 1.0, "stage1_continuation"
+
+    # ── Stage 2a: Fast allowlist — contains a fashion keyword ─────────────
+    # Handles fashion fragments of any length: "dress", "red dress",
+    # "shirt", "navy blazer" etc. Short fashion words land here.
+    for phrase in _ALLOWLIST_PHRASES:
+        if phrase in msg:
+            return True, 0.95, "stage2_allowlist"
+
+    # ── Stage 2b: Fast blocklist — clear off-topic signal ─────────────────
+    for pattern in _BLOCKLIST_PATTERNS:
         if re.search(pattern, msg):
-            return False, 0.0
+            print(f"[FashionGuard] Stage2-blocklist: pattern={pattern!r} msg='{msg[:60]}'")
+            return False, 0.05, "stage2_blocklist"
 
-    model = _get_model()
-    if model is None:
-        return True, 0.5
+    # ── Stage 3: Dual-pool semantic scoring ───────────────────────────────
+    # Runs for ALL messages not caught above — including single unknown words.
+    # Short ambiguous words (washroom, pizza, car) will have low fashion
+    # similarity and get rejected here or escalated to Groq.
+    f_score, o_score = _semantic_scores(message)
+    margin = f_score - o_score
+    print(f"[FashionGuard] Stage3 fashion={f_score:.3f} offtopic={o_score:.3f} margin={margin:.3f} msg='{msg[:40]}'")
 
-    all_anchors = _FASHION_ANCHORS + _OFF_TOPIC_ANCHORS
-    embeddings  = model.encode([message] + all_anchors)
-    msg_emb     = embeddings[0]
+    if o_score > f_score + _SEMANTIC_MARGIN:
+        return False, o_score, "stage3_semantic"
+    if f_score < _SEMANTIC_FASHION_MIN:
+        return False, f_score, "stage3_semantic"
+    if f_score >= _AMBIGUITY_HIGH:
+        return True, f_score, "stage3_semantic"
 
-    fashion_scores  = [_cosine(msg_emb, embeddings[i + 1])
-                       for i in range(len(_FASHION_ANCHORS))]
-    offtopic_scores = [_cosine(msg_emb, embeddings[i + 1 + len(_FASHION_ANCHORS)])
-                       for i in range(len(_OFF_TOPIC_ANCHORS))]
+    # ── Stage 4: Groq LLM for genuinely ambiguous middle zone ─────────────
+    print(f"[FashionGuard] Stage4-Groq: f={f_score:.3f} o={o_score:.3f} msg='{message[:60]}'")
+    is_rel, conf = await _groq_relevance_check(message)
+    return is_rel, conf, "stage4_groq"
 
-    max_fashion  = max(fashion_scores)
-    max_offtopic = max(offtopic_scores)
 
-    if max_offtopic > max_fashion + 0.20:
-        return False, max_offtopic
-    if max_fashion < _RELEVANCE_THRESHOLD:
-        return False, max_fashion
+def is_fashion_relevant(message: str) -> tuple:
+    """
+    Synchronous 3-stage fashion relevance check (no Groq, no history).
+    Returns (is_relevant: bool, confidence: float).
 
-    return True, max_fashion
+    No blanket short-message bypass — single unknown words are still
+    evaluated. Only allowlist hits get fast-allowed.
+    """
+    msg = message.lower().strip()
+
+    # Stage 0: Exact word blocklist
+    if msg in _EXACT_WORD_BLOCKLIST:
+        print(f"[FashionGuard] Stage0-exact-block: '{msg}'")
+        return False, 0.0
+
+    # Stage 2a: allowlist (works for any length including single words)
+    for phrase in _ALLOWLIST_PHRASES:
+        if phrase in msg:
+            return True, 0.95
+
+    # Stage 2b: blocklist
+    for pattern in _BLOCKLIST_PATTERNS:
+        if re.search(pattern, msg):
+            return False, 0.05
+
+    # Stage 3: semantic scoring — runs for ALL remaining messages
+    f_score, o_score = _semantic_scores(message)
+    print(f"[FashionGuard] sync: f={f_score:.3f} o={o_score:.3f} msg='{msg[:40]}'")
+
+    if o_score > f_score + _SEMANTIC_MARGIN:
+        return False, o_score
+    if f_score < _SEMANTIC_FASHION_MIN:
+        return False, f_score
+
+    return True, f_score
+
 
 
 # ── Tier 1: Keyword + regex ───────────────────────────────────────────────────
