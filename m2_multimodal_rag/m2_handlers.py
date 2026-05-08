@@ -12,6 +12,7 @@ These handlers reuse existing M2 components:
 """
 
 import os
+import numpy as np
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -65,6 +66,180 @@ def _call_llm(prompt: str) -> str | None:
     Reuses the llm_generator's configuration for consistency.
     """
     return llm_generator._call_llm(prompt, max_tokens=250)
+
+
+def _rank_faiss_candidates(
+    candidates: list,
+    filters: dict | None = None,
+    boosts: list | None = None,
+    penalties: dict | None = None,
+    exclude_ids: list | None = None,
+    top_n: int = 2,
+) -> list:
+    """
+    Shared post-processing for FAISS candidates:
+    hard filters, preference boosts, penalties, excluded IDs, then top-N rank.
+    """
+    filters = filters or {}
+    boosts = boosts or []
+    penalties = penalties or {}
+    exclude_ids = [str(item_id) for item_id in (exclude_ids or [])]
+
+    articles_df = data_loader.load_articles()
+    filtered_results = []
+
+    for article_id, faiss_score in candidates:
+        article_id = str(article_id).zfill(10)
+
+        if article_id in exclude_ids or article_id.lstrip("0") in exclude_ids:
+            continue
+
+        try:
+            article_row = articles_df[articles_df["article_id"] == int(article_id)]
+        except (ValueError, TypeError):
+            continue
+
+        if article_row.empty:
+            continue
+
+        metadata = article_row.iloc[0].to_dict()
+
+        passes_filters = True
+        for filter_key, filter_value in filters.items():
+            if filter_key == "price_max":
+                article_price = metadata.get("price", float("inf"))
+                if article_price > filter_value:
+                    passes_filters = False
+                    break
+            elif filter_key == "price_min":
+                article_price = metadata.get("price", 0)
+                if article_price < filter_value:
+                    passes_filters = False
+                    break
+            else:
+                article_val = str(metadata.get(filter_key, "")).strip().lower()
+                filter_val = str(filter_value).strip().lower()
+                if article_val != filter_val:
+                    passes_filters = False
+                    break
+
+        if not passes_filters:
+            continue
+
+        penalty_score = 0.0
+        for penalty_key, penalty_values in penalties.items():
+            article_val = str(metadata.get(penalty_key, "")).strip().lower()
+            for penalty_value in penalty_values:
+                if article_val == str(penalty_value).strip().lower():
+                    penalty_score += 0.3
+
+        boost_score = 0.0
+        for boost in boosts:
+            attr = boost.get("attribute", "")
+            value = str(boost.get("value", "")).strip().lower()
+            weight = boost.get("weight", 0.0)
+            article_val = str(metadata.get(attr, "")).strip().lower()
+            if article_val == value:
+                boost_score += weight
+
+        final_score = faiss_score + boost_score - penalty_score
+
+        filtered_results.append({
+            "article_id": article_id,
+            "metadata": metadata,
+            "faiss_score": faiss_score,
+            "final_score": final_score,
+        })
+
+    filtered_results.sort(key=lambda x: x["final_score"], reverse=True)
+    top_results = filtered_results[:top_n]
+
+    if top_results:
+        return top_results
+
+    fallback_results = []
+    for article_id, faiss_score in candidates[:top_n]:
+        article_id = str(article_id).zfill(10)
+        if article_id in exclude_ids or article_id.lstrip("0") in exclude_ids:
+            continue
+
+        metadata = _fetch_article(article_id)
+        if metadata:
+            fallback_results.append({
+                "article_id": article_id,
+                "metadata": metadata,
+                "faiss_score": faiss_score,
+                "final_score": faiss_score,
+            })
+
+    return fallback_results
+
+
+def _mmr_rerank(candidates: list, top_n: int = 2, lambda_param: float = 0.7) -> list:
+    """
+    Maximum Marginal Relevance re-ranking.
+
+    Selects top_n items that balance:
+      - Relevance  : final_score (FAISS cosine sim + boosts - penalties)
+      - Diversity  : penalises items whose CLIP vectors are too similar to
+                     already-selected items
+
+    lambda_param: 0 = pure diversity, 1 = pure relevance (default 0.7).
+
+    Reference: Carbonell & Goldstein (1998) — MMR for query-based summarisation.
+    """
+    if len(candidates) <= top_n:
+        return candidates
+
+    max_score = max(c['final_score'] for c in candidates) or 1.0
+
+    # Pre-fetch stored CLIP vectors from FAISS for inter-item similarity
+    vecs = {}
+    for c in candidates:
+        v = faiss_db.get_vector(c['article_id'])
+        if v is not None:
+            vecs[c['article_id']] = v.flatten()
+
+    selected, remaining = [], list(candidates)
+
+    while len(selected) < top_n and remaining:
+        best, best_mmr = None, float('-inf')
+
+        for cand in remaining:
+            relevance = cand['final_score'] / max_score
+
+            if not selected:
+                diversity_penalty = 0.0
+            else:
+                c_vec = vecs.get(cand['article_id'])
+                if c_vec is None:
+                    diversity_penalty = 0.0
+                else:
+                    sims = [
+                        float(np.dot(c_vec, vecs[s['article_id']]))
+                        for s in selected
+                        if s['article_id'] in vecs
+                    ]
+                    diversity_penalty = max(sims) if sims else 0.0
+
+            mmr_score = lambda_param * relevance - (1 - lambda_param) * diversity_penalty
+            if mmr_score > best_mmr:
+                best_mmr = mmr_score
+                best = cand
+
+        if best:
+            selected.append(best)
+            remaining.remove(best)
+
+    print(f"  [MMR] Selected {len(selected)} diverse items from {len(candidates)} candidates (λ={lambda_param})")
+    return selected
+
+
+def _normalize_query_vector(query_vector: np.ndarray) -> np.ndarray:
+    """Normalizes a single-vector batch for FAISS inner-product search."""
+    norm = np.linalg.norm(query_vector, axis=1, keepdims=True)
+    norm[norm == 0] = 1.0
+    return (query_vector / norm).astype("float32")
 
 
 # =====================================================================
@@ -204,8 +379,8 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
     # Sort by final_score descending
     filtered_results.sort(key=lambda x: x["final_score"], reverse=True)
 
-    # Take top 2 as per the spec
-    top_results = filtered_results[:2]
+    # MMR re-ranking: select top 2 that balance relevance + diversity
+    top_results = _mmr_rerank(filtered_results, top_n=2)
 
     if not top_results:
         # Fallback: if hard filters eliminated everything, return top FAISS results
@@ -221,7 +396,7 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
                         "faiss_score": faiss_score,
                         "final_score": faiss_score,
                     })
-        top_results = fallback_results
+        top_results = _mmr_rerank(fallback_results, top_n=2)
 
     # ------------------------------------------------------------------
     # PHASE 3: Generate verified explanations for the top items
@@ -259,6 +434,137 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
         "success": len(response_items) > 0,
         "response_text": summary,
         "items": response_items,
+        "error": None,
+    }
+
+
+# =====================================================================
+# HANDLER 1B: image_catalog_search
+# Triggered by: Frontend image upload directly to M2
+# Strategy: FULL, M2-only
+# =====================================================================
+def handle_image_catalog_search(
+    image_path: str,
+    user_message: str = "",
+    filters: dict | None = None,
+    boosts: list | None = None,
+    penalties: dict | None = None,
+    exclude_ids: list | None = None,
+) -> dict:
+    """
+    Searches the catalog from an uploaded image without requiring M1/M3 changes.
+    Uses CLIP image retrieval as the primary signal and optional BLIP/VLM text
+    understanding to handle noisy images or user hints like "find this jacket".
+    """
+    filters = filters or {}
+    boosts = boosts or []
+    penalties = penalties or {}
+    exclude_ids = exclude_ids or []
+
+    print(f"  [image_catalog_search] Image path: {image_path}")
+    print(f"  [image_catalog_search] User hint: '{user_message}'")
+    print(f"  [image_catalog_search] Filters: {filters}")
+    print(f"  [image_catalog_search] Boosts: {boosts}")
+    print(f"  [image_catalog_search] Penalties: {penalties}")
+    print(f"  [image_catalog_search] Exclude IDs: {exclude_ids}")
+
+    image_vector = clip_encoder.encode_image(image_path)
+    if image_vector is None:
+        return {
+            "action": "image_catalog_search",
+            "success": False,
+            "response_text": "I couldn't process the uploaded image.",
+            "items": [],
+            "error": "CLIP image encoding failed",
+        }
+
+    visual_query = ""
+    try:
+        from m2_multimodal_rag.query_understanding import vlm_query_processor
+
+        visual_query = vlm_query_processor.extract_search_query(
+            text_query=user_message or None,
+            image_path=image_path,
+        )
+        if visual_query == "IRRELEVANT_QUERY":
+            visual_query = ""
+        print(f"  [image_catalog_search] VLM visual query: '{visual_query}'")
+    except Exception as e:
+        print(f"  [image_catalog_search] VLM noise handling skipped: {e}")
+
+    # Image vector is the main retrieval signal. Text is blended in only as a
+    # lightweight hint so noisy backgrounds do not dominate the search.
+    filter_terms = " ".join(str(v) for v in filters.values() if not isinstance(v, (int, float)))
+    text_parts = []
+    if visual_query:
+        text_parts.append(visual_query)
+    elif user_message:
+        text_parts.append(user_message)
+    if filter_terms:
+        text_parts.append(filter_terms)
+
+    query_vector = image_vector
+    text_search = " ".join(text_parts).strip()
+    if text_search:
+        text_vector = clip_encoder.encode_text(text_search)
+        if text_vector is not None:
+            query_vector = _normalize_query_vector((0.75 * image_vector) + (0.25 * text_vector))
+        print(f"  [image_catalog_search] Blended text hint: '{text_search}'")
+
+    candidates = faiss_db.search(query_vector, top_k=50)
+    if not candidates:
+        return {
+            "action": "image_catalog_search",
+            "success": False,
+            "response_text": "I couldn't find visually similar catalog items.",
+            "items": [],
+            "error": "No FAISS results",
+        }
+
+    # Get a larger pool then apply MMR to ensure diverse final selection
+    mmr_pool = _rank_faiss_candidates(
+        candidates=candidates,
+        filters=filters,
+        boosts=boosts,
+        penalties=penalties,
+        exclude_ids=exclude_ids,
+        top_n=10,
+    )
+    top_results = _mmr_rerank(mmr_pool, top_n=2)
+
+    response_items = []
+    for result in top_results:
+        aid = result["article_id"]
+        meta = result["metadata"]
+
+        explanation = generator_loop.generate_faithful_explanation(article_id=aid)
+
+        item_response = _format_article_for_response(meta)
+        item_response["explanation"] = explanation
+        item_response["score"] = result["final_score"]
+        item_response["retrieval_source"] = "image"
+        response_items.append(item_response)
+
+    if len(response_items) == 2:
+        summary = (
+            f"I found two visually similar options: "
+            f"the {response_items[0]['prod_name']} in {response_items[0]['colour_group_name']} "
+            f"and the {response_items[1]['prod_name']} in {response_items[1]['colour_group_name']}."
+        )
+    elif len(response_items) == 1:
+        summary = (
+            f"I found a visually similar match: the {response_items[0]['prod_name']} "
+            f"in {response_items[0]['colour_group_name']}."
+        )
+    else:
+        summary = "I couldn't find any catalog items similar to the uploaded image."
+
+    return {
+        "action": "image_catalog_search",
+        "success": len(response_items) > 0,
+        "response_text": summary,
+        "items": response_items,
+        "visual_query": visual_query,
         "error": None,
     }
 

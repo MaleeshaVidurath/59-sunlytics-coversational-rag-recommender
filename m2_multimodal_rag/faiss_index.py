@@ -36,6 +36,8 @@ class FAISSDatabase:
                 # Load the row-to-article_id mapping so we know which vector = which product
                 self.mapping_df = pd.read_csv(self.mapping_path)
                 self.mapping = self.mapping_df['article_id'].astype(str).str.zfill(10).tolist()
+                # Reverse lookup: article_id → FAISS row index (needed for MMR vector retrieval)
+                self.article_to_idx = {aid: i for i, aid in enumerate(self.mapping)}
                 print(f"[OK] Successfully loaded {self.index.ntotal:,} vectors from FAISS database!")
                 
             except Exception as e:
@@ -77,6 +79,21 @@ class FAISSDatabase:
                 results.append((str(article_id), float(score)))
                 
         return results
+
+    def get_vector(self, article_id: str) -> np.ndarray | None:
+        """Returns the stored 512-D CLIP vector for an article_id (used by MMR re-ranking)."""
+        if not self.database_ready:
+            return None
+        article_id = str(article_id).zfill(10)
+        idx = getattr(self, 'article_to_idx', {}).get(article_id)
+        if idx is None:
+            return None
+        try:
+            vec = self.index.reconstruct(idx)
+            return vec.reshape(1, -1).astype('float32')
+        except Exception:
+            return None
+
 
 # Singleton access point for entire app
 faiss_db = FAISSDatabase()

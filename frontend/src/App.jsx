@@ -50,6 +50,18 @@ async function apiNewSession(userId) {
   if (!r.ok) console.warn("Could not clear session pointer");
 }
 
+async function apiImageSearch(imageFile, query = "") {
+  const form = new FormData();
+  form.append("image", imageFile);
+  form.append("query", query);
+  const r = await fetch("http://localhost:8001/api/image-search", {
+    method: "POST",
+    body: form,
+  });
+  if (!r.ok) throw new Error("Image search failed");
+  return r.json();
+}
+
 const C = {
   bg: "#0f0f0f", sidebar: "#161616", card: "#1c1c1c",
   border: "#2a2a2a", accent: "#c9a96e", accentDim: "#8a6f3e",
@@ -157,6 +169,11 @@ function Message({ msg }) {
           borderRadius:isUser?"18px 18px 4px 18px":"18px 18px 18px 4px",
           padding:"10px 15px", color:C.text, fontSize:14,
           lineHeight:1.6, wordBreak:"break-word", whiteSpace:"pre-wrap" }}>
+          {msg.imagePreview && (
+            <img src={msg.imagePreview} alt="uploaded"
+              style={{ display:"block", maxWidth:200, maxHeight:200,
+                borderRadius:8, marginBottom:8, objectFit:"cover" }} />
+          )}
           {msg.content}
         </div>
         {msg.items && msg.items.length > 0 && (
@@ -320,8 +337,11 @@ function ChatPage({ user, onLogout }) {
   const [sending, setSending]       = useState(false);
   const [sidebarOpen, setSidebar]   = useState(true);
   const [forceNewSession, setForceNew] = useState(false);
+  const [imageFile, setImageFile]   = useState(null);
+  const [imagePreview, setImagePreview] = useState(null);
   const messagesEndRef              = useRef(null);
   const inputRef                    = useRef(null);
+  const fileInputRef                = useRef(null);
 
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior:"smooth" });
   useEffect(() => { scrollToBottom(); }, [messages, sending]);
@@ -436,6 +456,61 @@ function ChatPage({ user, onLogout }) {
     if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   };
 
+  function handleImageSelect(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImageFile(file);
+    setImagePreview(URL.createObjectURL(file));
+    e.target.value = "";
+  }
+
+  function clearImage() {
+    if (imagePreview) URL.revokeObjectURL(imagePreview);
+    setImageFile(null);
+    setImagePreview(null);
+  }
+
+  async function sendImage() {
+    if (!imageFile || sending) return;
+
+    const file = imageFile;
+    const caption = input.trim();
+    const previewUrl = imagePreview;
+    const userMsg = {
+      id: Date.now(), role: "user",
+      content: caption || "Find similar products to this image",
+      imagePreview: previewUrl,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages(prev => [...prev, userMsg]);
+    setInput("");
+    clearImage();
+    setSending(true);
+
+    try {
+      const res = await apiImageSearch(file, caption);
+      const items = res.items || [];
+      const botMsg = {
+        id: Date.now() + 1, role: "assistant",
+        content: res.response_text || (items.length
+          ? `Found ${items.length} visually similar item${items.length > 1 ? "s" : ""}.`
+          : "No matching items found for that image."),
+        timestamp: new Date().toISOString(),
+        items,
+      };
+      setMessages(prev => [...prev, botMsg]);
+    } catch {
+      setMessages(prev => [...prev, {
+        id: Date.now() + 1, role: "assistant",
+        content: "Sorry, image search failed. Please try again.",
+        timestamp: new Date().toISOString(),
+      }]);
+    } finally {
+      setSending(false);
+      inputRef.current?.focus();
+    }
+  }
+
   return (
     <div style={{ height:"100vh", display:"flex", background:C.bg,
       fontFamily:"system-ui,-apple-system,sans-serif", overflow:"hidden" }}>
@@ -543,12 +618,51 @@ function ChatPage({ user, onLogout }) {
         {/* Input bar */}
         <div style={{ padding:"12px 20px 20px", borderTop:`1px solid ${C.border}`,
           background:C.bg, flexShrink:0 }}>
+
+          {/* Image preview strip */}
+          {imagePreview && (
+            <div style={{ marginBottom:8, display:"flex", alignItems:"flex-start", gap:8 }}>
+              <div style={{ position:"relative", display:"inline-block" }}>
+                <img src={imagePreview} alt="preview"
+                  style={{ height:72, width:72, objectFit:"cover",
+                    borderRadius:8, border:`1px solid ${C.border}`, display:"block" }} />
+                <button onClick={clearImage}
+                  style={{ position:"absolute", top:-6, right:-6, width:18, height:18,
+                    borderRadius:"50%", background:"#333", border:`1px solid ${C.border}`,
+                    color:C.textDim, fontSize:10, lineHeight:"16px", textAlign:"center",
+                    cursor:"pointer", padding:0 }}>✕</button>
+              </div>
+              <div style={{ color:C.textDim, fontSize:11, paddingTop:4 }}>
+                Image ready · optionally add a text hint below
+              </div>
+            </div>
+          )}
+
           <div style={{ display:"flex", gap:10, alignItems:"flex-end",
-            background:C.card, border:`1px solid ${C.border}`,
-            borderRadius:14, padding:"10px 14px" }}>
+            background:C.card, border:`1px solid ${imageFile?C.accent:C.border}`,
+            borderRadius:14, padding:"10px 14px", transition:"border-color 0.2s" }}>
+
+            {/* Hidden file input */}
+            <input ref={fileInputRef} type="file" accept="image/*"
+              style={{ display:"none" }} onChange={handleImageSelect} />
+
+            {/* Image upload button */}
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={sending}
+              title="Upload image to search"
+              style={{ background:"transparent", border:"none",
+                color:imageFile?C.accent:C.textDim, cursor:sending?"not-allowed":"pointer",
+                fontSize:18, padding:"2px 4px", flexShrink:0,
+                transition:"color 0.2s" }}
+              onMouseEnter={e=>{ if(!sending) e.currentTarget.style.color=C.accent; }}
+              onMouseLeave={e=>{ e.currentTarget.style.color=imageFile?C.accent:C.textDim; }}>
+              📷
+            </button>
+
             <textarea ref={inputRef} value={input}
               onChange={e=>setInput(e.target.value)} onKeyDown={handleKey}
-              placeholder="Message Sunlytics..." rows={1}
+              placeholder={imageFile?"Add a hint (optional)…":"Message Sunlytics..."} rows={1}
               style={{ flex:1, background:"transparent", border:"none",
                 color:C.text, fontSize:14, resize:"none", outline:"none",
                 lineHeight:1.6, maxHeight:120, overflowY:"auto",
@@ -557,11 +671,14 @@ function ChatPage({ user, onLogout }) {
                 e.target.style.height="auto";
                 e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";
               }} />
-            <button onClick={send} disabled={!input.trim()||sending}
-              style={{ background:input.trim()&&!sending?C.accent:C.textMuted,
+
+            <button
+              onClick={imageFile ? sendImage : send}
+              disabled={(!input.trim() && !imageFile) || sending}
+              style={{ background:(input.trim()||imageFile)&&!sending?C.accent:C.textMuted,
                 border:"none", borderRadius:9, width:36, height:36,
                 display:"flex", alignItems:"center", justifyContent:"center",
-                cursor:input.trim()&&!sending?"pointer":"not-allowed",
+                cursor:(input.trim()||imageFile)&&!sending?"pointer":"not-allowed",
                 fontSize:16, flexShrink:0, transition:"background 0.2s" }}>
               {sending?"…":"↑"}
             </button>

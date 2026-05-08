@@ -47,3 +47,15 @@ export async function deleteSession(sessionId, userId) {
   if (!res.ok) throw new Error("Delete failed");
   return res.json();
 }
+
+export async function uploadImage(imageFile, query = "") {
+  const form = new FormData();
+  form.append("image", imageFile);
+  form.append("query", query);
+  const res = await fetch("http://localhost:8001/api/image-search", {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) throw new Error("Image search failed");
+  return res.json();
+}

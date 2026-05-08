@@ -1,11 +1,13 @@
-motor==3.3.2
+motor>=3.5.0
 redis==5.0.1
 fastapi==0.109.0
 uvicorn==0.27.0
-pydantic==2.6.0
+pydantic>=2.7.0
+python-multipart>=0.0.9
+open_clip_torch>=2.20.0
 python-dotenv==1.0.0
 sentence-transformers==2.5.1
-asyncpg==0.29.0
+asyncpg>=0.30.0
 
 torch>=2.0.0
 transformers>=4.40.0
@@ -19,6 +21,3 @@ tqdm>=4.65.0
 accelerate>=0.27.0
 # Groq Cloud LLM (free tier, runs Llama 3.1 in the cloud)
 groq>=1.0.0
-python-dotenv
-fastapi
-uvicorn
