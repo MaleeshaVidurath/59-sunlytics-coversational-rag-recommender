@@ -13,121 +13,75 @@ Requirements:
   - HF_TOKEN in .env (free at huggingface.co → Settings → Access Tokens)
 """
 
-import os
-import base64
-import requests
+import torch
+from transformers import ViltProcessor, ViltForQuestionAnswering
+from PIL import Image
 import warnings
-from dotenv import load_dotenv
 
-load_dotenv()
-
-warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub.*")
-os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-
+warnings.filterwarnings("ignore", category=UserWarning)
 
 class VisualVerifier:
     """
-    Cloud-based Visual Verification Guard using HuggingFace Inference API.
-    Calls Salesforce/blip-vqa-base on HF's GPU servers instead of loading locally.
-    Falls back gracefully if the API is unavailable or token is missing.
+    Local Visual Verification Guard using HuggingFace Transformers (ViLT).
+    Runs completely locally (CPU/GPU) without relying on external APIs.
+    Downloads a ~470MB model on the first run.
     """
 
-    # BLIP VQA model — asks "does this image match?" and gets yes/no answer
-    VQA_API_URL = "https://api-inference.huggingface.co/models/Salesforce/blip-vqa-base"
-
     def __init__(self):
-        self.hf_token = os.getenv("HF_TOKEN", "")
-        self._ready = bool(self.hf_token and not self.hf_token.startswith("hf_your"))
-
-        if self._ready:
-            print("M2 VLM: Visual Verifier ready → HuggingFace Cloud GPU (Salesforce/blip-vqa-base)")
-        else:
-            print("M2 VLM: [WARNING] HF_TOKEN not set in .env — VLM Guard running in FALLBACK mode.")
-            print("M2 VLM: Get a free token at huggingface.co → Settings → Access Tokens")
+        print("M2 VLM: Initializing Local Visual Verifier (dandelin/vilt-b32-finetuned-vqa)...")
+        try:
+            self.processor = ViltProcessor.from_pretrained("dandelin/vilt-b32-finetuned-vqa")
+            self.model = ViltForQuestionAnswering.from_pretrained("dandelin/vilt-b32-finetuned-vqa")
+            self._ready = True
+            print("M2 VLM: [SUCCESS] Local VLM Guard Ready!")
+        except Exception as e:
+            self._ready = False
+            print(f"M2 VLM: [ERROR] Failed to load local VLM model: {e}")
 
     def verify(self, image_path: str, llm_explanation: str, threshold: float = 0.5) -> tuple[bool, str]:
         """
-        Sends the product image + LLM explanation to HuggingFace BLIP VQA API.
-        Asks: "Does this clothing item match this description? Answer yes or no."
-        Returns (passed: bool, reason: str).
+        Processes the image and explanation locally using ViLT.
         """
-        # Fallback: pass all if token not configured
-        if not self._ready:
-            return True, "VLM Guard in fallback mode (HF_TOKEN not configured). Skipping verification."
-
-        # Load and base64-encode the image
-        try:
-            with open(image_path, "rb") as f:
-                image_b64 = base64.b64encode(f.read()).decode("utf-8")
-        except Exception as e:
-            return False, f"Image Load Error: {e}"
-
-        # Build a clear yes/no question for BLIP VQA
-        # Trim explanation to 200 chars to stay within model token limits
-        short_desc = llm_explanation[:200].strip()
-        question = (
-            f"Does this clothing item match this description: {short_desc}? "
-            f"Answer yes or no."
-        )
-
-        payload = {
-            "inputs": {
-                "question": question,
-                "image": image_b64,
-            }
-        }
-
-        headers = {
-            "Authorization": f"Bearer {self.hf_token}",
-            "Content-Type": "application/json",
-        }
+        if not getattr(self, "_ready", False):
+            return True, "VLM Guard in fallback mode (Model failed to load). Skipping verification."
 
         try:
-            response = requests.post(
-                self.VQA_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=30,
-            )
+            with Image.open(image_path) as img:
+                # Convert to RGB to avoid issues
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                
+                # ViLT is memory-heavy, so keeping the image reasonably sized helps
+                img.thumbnail((512, 512))
 
-            # Handle model loading delay (HF cold start)
-            if response.status_code == 503:
-                print("   [VLM Guard] HF model loading (cold start)... retrying in 10s")
-                import time
-                time.sleep(10)
-                response = requests.post(
-                    self.VQA_API_URL, headers=headers, json=payload, timeout=45
-                )
+                # Build a clear yes/no question
+                short_desc = llm_explanation[:200].strip()
+                question = f"Does this clothing item match this description: '{short_desc}'? Answer yes or no."
+                
+                # Process inputs
+                inputs = self.processor(img, question, return_tensors="pt")
+                
+                # Forward pass
+                with torch.no_grad():
+                    outputs = self.model(**inputs)
+                
+                # Extract answer
+                logits = outputs.logits
+                idx = logits.argmax(-1).item()
+                answer = self.model.config.id2label[idx].lower().strip()
+                
+                print(f"   [VLM Guard] Local ViLT answer: '{answer}'")
+                
+                if "yes" in answer:
+                    return True, f"Explanation matches visual evidence (ViLT: '{answer}')."
+                else:
+                    return False, (
+                        f"VLM Rejected Explanation! Local ViLT answered '{answer}' — "
+                        f"the text contradicts the image pixels. Regenerating response..."
+                    )
 
-            if response.status_code != 200:
-                print(f"   [VLM Guard] HF API error {response.status_code}: {response.text[:100]}")
-                return True, f"VLM API error ({response.status_code}). Passing by default."
-
-            result = response.json()
-
-            # BLIP VQA returns: [{"score": 0.95, "answer": "yes"}, ...]
-            if not isinstance(result, list) or not result:
-                return True, "VLM: Unexpected API response. Passing by default."
-
-            top_answer = result[0]
-            answer = top_answer.get("answer", "").lower().strip()
-            score = top_answer.get("score", 0.0)
-
-            print(f"   [VLM Guard] BLIP VQA answer: '{answer}' (confidence: {score:.2f})")
-
-            if "yes" in answer:
-                return True, f"Explanation matches visual evidence (BLIP: '{answer}', score: {score:.2f})."
-            else:
-                return False, (
-                    f"VLM Rejected Explanation! BLIP answered '{answer}' (score: {score:.2f}) — "
-                    f"the text contradicts the image pixels. Regenerating response..."
-                )
-
-        except requests.exceptions.Timeout:
-            print("   [VLM Guard] HF API timeout. Passing by default.")
-            return True, "VLM Guard timed out. Passing by default."
         except Exception as e:
-            print(f"   [VLM Guard] HF API exception: {e}. Passing by default.")
+            print(f"   [VLM Guard] Local VLM Error: {e}. Passing by default.")
             return True, f"VLM Guard error: {e}. Passing by default."
 
 
