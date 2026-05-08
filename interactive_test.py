@@ -5,8 +5,8 @@ import os
 import subprocess
 import tempfile
 
-URL = "http://127.0.0.1:8000/api/process"
-IMAGE_BASE = "http://127.0.0.1:8000/api/images"
+URL = "http://127.0.0.1:8001/api/process"
+IMAGE_BASE = "http://127.0.0.1:8001/api/images"
 
 # Directory to cache downloaded images
 IMAGE_CACHE_DIR = os.path.join(tempfile.gettempdir(), "m2_test_images")
