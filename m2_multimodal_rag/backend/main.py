@@ -6,19 +6,15 @@ It acts as the API Gateway for handling structured pipeline requests from the
 m3 Memory Pipeline and serving static image assets.
 """
 
-import json
 import logging
-import uuid
-from pathlib import Path
 from typing import Dict, Any
 
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, APIRouter, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 # Local application imports
 from m2_multimodal_rag.m2_action_router import m2_router
-from m2_multimodal_rag.m2_handlers import handle_image_catalog_search
 from shared.data_loader import data_loader
 from .schemas import PipelineRequest, SimpleSearchRequest
 
@@ -35,8 +31,6 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 
 api_router = APIRouter(prefix="/api")
-UPLOAD_DIR = Path(__file__).resolve().parents[1] / "uploads"
-ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 def _attach_image_urls(result_data: Dict[str, Any]) -> None:
     """Helper function to attach local image URLs to recommended items."""
@@ -47,17 +41,6 @@ def _attach_image_urls(result_data: Dict[str, Any]) -> None:
         article_id = item.get("article_id", "")
         if article_id:
             item["image_url"] = f"/api/images/{article_id}"
-
-
-def _parse_json_form_field(value: str | None, default: Any, field_name: str) -> Any:
-    """Parses optional JSON form fields used by multipart image search."""
-    if value is None or value == "":
-        return default
-
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON in '{field_name}' form field.")
 
 
 @api_router.post("/process")
@@ -128,71 +111,6 @@ async def simple_search_endpoint(request: SimpleSearchRequest) -> dict:
     except Exception as e:
         logger.error(f"Simple search processing failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error during simple search processing.")
-
-
-@api_router.post("/image-search")
-async def image_search_endpoint(
-    image: UploadFile = File(...),
-    query: str = Form(""),
-    filters: str = Form("{}"),
-    preference_boosts: str = Form("[]"),
-    penalties: str = Form("{}"),
-    exclude_ids: str = Form("[]"),
-) -> dict:
-    """
-    M2-only image search endpoint for frontend uploads.
-
-    Accepts multipart/form-data and bypasses M1/M3 so image-based requests can
-    be handled fully inside M2.
-    """
-    if image.content_type and not image.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
-
-    parsed_filters = _parse_json_form_field(filters, {}, "filters")
-    parsed_boosts = _parse_json_form_field(preference_boosts, [], "preference_boosts")
-    parsed_penalties = _parse_json_form_field(penalties, {}, "penalties")
-    parsed_exclude_ids = _parse_json_form_field(exclude_ids, [], "exclude_ids")
-
-    image_path = None
-    try:
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-        suffix = Path(image.filename or "").suffix.lower()
-        if suffix not in ALLOWED_IMAGE_EXTENSIONS:
-            suffix = ".jpg"
-
-        image_path = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
-        image_bytes = await image.read()
-        if not image_bytes:
-            raise HTTPException(status_code=400, detail="Uploaded image is empty.")
-
-        image_path.write_bytes(image_bytes)
-        logger.info(f"Received image search request. Query: '{query}', file: {image.filename}")
-
-        result = handle_image_catalog_search(
-            image_path=str(image_path),
-            user_message=query,
-            filters=parsed_filters,
-            boosts=parsed_boosts,
-            penalties=parsed_penalties,
-            exclude_ids=parsed_exclude_ids,
-        )
-
-        _attach_image_urls(result)
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Image search processing failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error during image search processing.")
-    finally:
-        await image.close()
-        if image_path and image_path.exists():
-            try:
-                image_path.unlink()
-            except OSError as e:
-                logger.warning(f"Temporary upload cleanup skipped for {image_path}: {e}")
 
 @api_router.get("/m2output")
 async def mock_endpoint() -> dict:

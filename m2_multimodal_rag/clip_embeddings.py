@@ -1,11 +1,10 @@
 import torch
 import open_clip
 import numpy as np
-from PIL import Image
 
 class ClipTextEncoder:
     """
-    Local CLIP Encoder for translating text/images into 512-D Math Vectors.
+    Local CLIP Encoder for translating VLM Search Strings into 512-D Math Vectors.
     Crucially, it must load the EXACT same model weights ('laion2b_s34b_b79k') used on Kaggle.
     """
     def __init__(self):
@@ -13,9 +12,8 @@ class ClipTextEncoder:
         print(f"Loading local CLIP Text Encoder on {self.device}...")
         
         try:
-            # Keep the image preprocessor too so uploaded user images use the
-            # exact same CLIP input pipeline as the Kaggle-built FAISS index.
-            self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            # We only need the text portion, but we load the whole model to ensure parity.
+            self.model, _, _ = open_clip.create_model_and_transforms(
                 'ViT-B-32', pretrained='laion2b_s34b_b79k'
             )
             self.model = self.model.to(self.device)
@@ -44,32 +42,6 @@ class ClipTextEncoder:
             text_features /= text_features.norm(dim=-1, keepdim=True)
             
         return text_features.cpu().numpy().astype('float32')
-
-    def encode_image(self, image_path: str) -> np.ndarray:
-        """
-        Converts an uploaded image into a 512-dimension normalized vector.
-        This vector can be searched directly against the image FAISS index.
-        """
-        if not image_path:
-            return None
-
-        if not hasattr(self, "model") or not hasattr(self, "preprocess"):
-            print("Warning: CLIP image encoder is not available.")
-            return None
-
-        try:
-            with Image.open(image_path) as image:
-                image = image.convert("RGB")
-                image_tensor = self.preprocess(image).unsqueeze(0).to(self.device)
-
-            with torch.no_grad():
-                image_features = self.model.encode_image(image_tensor)
-                image_features /= image_features.norm(dim=-1, keepdim=True)
-
-            return image_features.cpu().numpy().astype('float32')
-        except Exception as e:
-            print(f"Warning: CLIP image encoding failed for '{image_path}': {e}")
-            return None
 
 # Singleton instantiator
 clip_encoder = ClipTextEncoder()
