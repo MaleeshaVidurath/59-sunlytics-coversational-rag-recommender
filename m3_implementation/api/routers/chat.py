@@ -176,6 +176,15 @@ async def chat(req: ChatRequest):
         print(f"[CHAT] filters={_payload_dbg.get('filters',{})}")
         print(f"[CHAT] soft_constraints={_payload_dbg.get('soft_constraints',{})}")
         print(f"[CHAT] purchase_hints_present={bool(_payload_dbg.get('purchase_history_hints'))}")
+        _cse = pipeline_output.get("cse", {})
+        if _cse:
+            print(f"[CHAT] CSE: score={_cse.get('sufficiency_score','?'):.4f} "
+                  f"tier={_cse.get('tier','?')} override={_cse.get('override','?')}")
+            print(f"[CHAT] CSE: D1_ref={_cse.get('d1_referent','?'):.2f} "
+                  f"D2_pred={_cse.get('d2_predicate','?'):.2f} "
+                  f"D3_cat={_cse.get('d3_catalog_needed','?'):.2f} "
+                  f"D4_param={_cse.get('d4_parametric','?'):.2f} "
+                  f"D5_known={_cse.get('d5_item_set_known','?'):.2f}")
         # ── Fire and forget: send to friend modules ────────────────────────
         import asyncio as _asyncio
         _asyncio.ensure_future(_fire_and_forget(_M2_URL, pipeline_output, "M2 Multimodal RAG"))
@@ -226,6 +235,7 @@ async def chat(req: ChatRequest):
             "contradiction_found": rag_result.get("contradiction_found", False),
             "contradiction_count": rag_result.get("contradiction_count", 0),
             "contradictions":      rag_result.get("contradictions", []),
+            "cse":                 pipeline_output.get("cse", {}),
         }
 
     except Exception as e:

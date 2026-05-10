@@ -10,6 +10,8 @@ outputs/
 
 # Data
 data/
+data_old/
+train_data_set_backup/
 
 # IDE
 .vscode/

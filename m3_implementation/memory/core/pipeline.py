@@ -40,6 +40,7 @@ from memory.core.session_manager import SessionManager
 from memory.core.turn_manager import TurnManager
 from memory.core.user_manager import UserManager
 from memory.core.enrichment import EnrichmentLayer
+from memory.core.context_sufficiency_evaluator import get_cse
 from memory.core.entity_extractor import (
     extract_entities, is_fashion_relevant, is_fashion_relevant_async
 )
@@ -359,6 +360,55 @@ class MemoryPipeline:
             used_rules  = True
 
 
+        # ── Step 4d: Context Sufficiency Evaluation (CSE) ──────────────────────
+        # Applies the formal information-theoretic tier assignment from
+        # Joren et al. ICLR 2025 (Sufficient Context predicate) and
+        # Jeong et al. NAACL 2024 (Adaptive-RAG 3-tier policy).
+        #
+        # Computes sufficiency_score across 5 dimensions:
+        #   D1: referent items in dialogue context?
+        #   D2: specific predicate/attribute already in state?
+        #   D3: ANN catalog search required?
+        #   D4: parametric LLM knowledge sufficient?
+        #   D5: candidate item set already known?
+        #
+        # tier(q, C) = NO      if S >= 0.85  (parametrically sufficient)
+        #            = PARTIAL  if S >= 0.70  (context sufficient, bounded lookup)
+        #            = FULL     otherwise      (catalog search required)
+        #
+        # This replaces the hardcoded label→strategy map with a principled,
+        # measurable, and scientifically justified tier assignment.
+        try:
+            _dialogue_state = await self.session_mgr.get_dialogue_state(
+                active_session_id
+            )
+            _ds_dict = _dialogue_state.model_dump() if hasattr(
+                _dialogue_state, "model_dump") else (
+                _dialogue_state.__dict__ if hasattr(_dialogue_state, "__dict__")
+                else {}
+            )
+        except Exception:
+            _ds_dict = {}
+
+        _cse = get_cse()
+        _cse_result = _cse.evaluate(
+            label=label,
+            message=message,
+            dialogue_state=_ds_dict,
+            history=history,
+            confidence=confidence,
+        )
+
+        # Override retrieval strategy with CSE result
+        _prior_strategy = retrieval_strategy
+        retrieval_strategy = _cse_result.tier
+
+        print(f"[CSE] sufficiency_score={_cse_result.sufficiency_score:.4f} "
+              f"tier={_cse_result.tier} override={_cse_result.override}")
+        if _cse_result.override:
+            print(f"[CSE] *** STRATEGY OVERRIDE: "
+                  f"{_prior_strategy} → {retrieval_strategy} ***")
+
         print(f"[DBG-2] ENTITY EXTRACTION: label={label}")
         print(f"[PIPELINE-5] starting entity extraction for label={label}")
         # ── Step 5: Entity extraction (three-tier: keyword → vector → LLM) ────
@@ -423,6 +473,21 @@ class MemoryPipeline:
             # Memory updates that happened as a side effect of this turn
             # Always present, may be empty list
             "side_effects": enriched.get("side_effects", []),
+
+            # Context Sufficiency Evaluation result — scientific tier justification
+            # Dimensions: D1(referent) D2(predicate) D3(catalog) D4(parametric) D5(known)
+            "cse": {
+                "sufficiency_score": _cse_result.sufficiency_score,
+                "tier":              _cse_result.tier,
+                "prior_strategy":    _cse_result.prior_strategy,
+                "override":          _cse_result.override,
+                "d1_referent":       _cse_result.d1_referent,
+                "d2_predicate":      _cse_result.d2_predicate,
+                "d3_catalog_needed": _cse_result.d3_catalog_needed,
+                "d4_parametric":     _cse_result.d4_parametric,
+                "d5_item_set_known": _cse_result.d5_item_set_known,
+                "rationale":         _cse_result.rationale,
+            },
             "_debug_enriched": enriched,  # temp debug key
 
             # Debug: what was fed to DistilBERT
