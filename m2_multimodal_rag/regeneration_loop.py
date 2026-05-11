@@ -34,9 +34,23 @@ class GenerationLoop:
         # -------------------------------------------------------------
         explanation = llm_generator.generate(article_id, metadata, force_hallucination=force_hallucination_test)
         print(f"[LLM Initial Output] : \"{explanation}\"")
-        
+
+        # -------------------------------------------------------------
+        # STEP 1.5: NOVELTY 4 — Proactive Self-Reflection Gate
+        # LLM evaluates its own output quality BEFORE ViLT sees it.
+        # Low-confidence explanations are corrected early, reducing the
+        # chance of ViLT rejection and improving final output quality.
+        # Paper: MARC — reflection process as core Agentic RAG pillar.
+        # -------------------------------------------------------------
+        print("   -> Self-Reflection Gate: LLM evaluating its own explanation...")
+        passes_self_eval, self_feedback = llm_generator.self_evaluate(explanation, metadata)
+        if not passes_self_eval:
+            print(f"   [Self-Reflect FAIL] Proactively regenerating. Reason: {self_feedback}")
+            explanation = llm_generator.regenerate(article_id, metadata, visual_feedback=self_feedback)
+            print(f"[LLM Self-Corrected Output]: \"{explanation}\"")
+
         attempts = 1
-        
+
         # -------------------------------------------------------------
         # STEP 2: VERIFICATION & REGENERATION LOOP
         # -------------------------------------------------------------

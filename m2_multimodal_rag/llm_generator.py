@@ -113,9 +113,9 @@ class ExplanationGenerator:
         """
         color = metadata.get('colour_group_name', 'Black')
         product_type = metadata.get('product_type_name', 'Garment')
-        
+
         print("\n[LLM INTERNAL] Received strict feedback from Visual Guard. Regenerating response...")
-        
+
         # Try Groq Cloud with corrective feedback
         if self.is_available:
             prompt = (
@@ -125,13 +125,161 @@ class ExplanationGenerator:
                 f"this {color} {product_type}. Only describe features that are visually confirmed.\n\n"
                 f"Respond with ONLY the corrected recommendation, nothing else."
             )
-            
+
             result = self._call_llm(prompt)
             if result:
                 return result
-        
+
         # Fallback to mock template
         return f"Correcting my previous statement: based on verified visual evidence, this is a {color} {product_type}."
+
+    # ------------------------------------------------------------------
+    # NOVELTY 1: LLM Query Expansion
+    # ------------------------------------------------------------------
+    def expand_query(self, query: str) -> list:
+        """
+        Generates 3 semantic variants of the search query for multi-vector CLIP retrieval.
+        Returns a list containing the original query plus up to 3 LLM-generated variants.
+        Paper: RAG-VisualRec — enriching sparse signals into richer textual representations.
+        """
+        if not self.is_available or not query:
+            return [query]
+
+        prompt = (
+            f"You are a fashion search expert. Generate exactly 3 alternative search phrases "
+            f"for the same fashion item described below.\n"
+            f"Original: '{query}'\n"
+            f"Rules:\n"
+            f"- Each phrase must describe the same item from a different vocabulary angle\n"
+            f"- Keep each phrase under 8 words\n"
+            f"- Use varied fashion terminology (fabric, occasion, style, silhouette)\n"
+            f"Output ONLY the 3 phrases, one per line, no numbers, no explanation."
+        )
+
+        result = self._call_llm(prompt, max_tokens=80, temperature=0.3)
+        if not result:
+            return [query]
+
+        variants = [line.strip() for line in result.strip().split('\n') if line.strip()][:3]
+        print(f"   [Query Expansion] '{query}' → {len(variants)} variants: {variants}")
+        return [query] + variants
+
+    # ------------------------------------------------------------------
+    # NOVELTY 2: LLM Cross-Encoder Re-ranking
+    # ------------------------------------------------------------------
+    def rerank_candidates(self, user_message: str, candidates: list,
+                          soft_constraints: dict = None, purchase_hints: dict = None) -> list:
+        """
+        Two-stage re-ranking: LLM acts as a cross-encoder to score each candidate
+        against the full user context (query + style preferences + purchase history).
+        Paper: RAG-VisualRec — LLM-based re-ranking improves nDCG.
+        """
+        if not self.is_available or len(candidates) <= 2:
+            return candidates
+
+        pool = candidates[:8]
+
+        # Build context string
+        ctx_parts = [f"Customer query: '{user_message}'"]
+        if soft_constraints:
+            style_parts = [f"{k}: {v}" for k, v in soft_constraints.items() if v]
+            if style_parts:
+                ctx_parts.append(f"Style preference: {', '.join(style_parts)}")
+        if purchase_hints:
+            dc = purchase_hints.get('dominant_colour')
+            dt = purchase_hints.get('dominant_type')
+            bt = purchase_hints.get('budget_tier')
+            if dc or dt:
+                ctx_parts.append(f"Typically buys: {(dc or '')} {(dt or '')}".strip())
+            if bt:
+                ctx_parts.append(f"Budget tier: {bt}")
+
+        context = "\n".join(ctx_parts)
+
+        item_lines = []
+        for i, c in enumerate(pool, 1):
+            m = c.get('metadata', {})
+            item_lines.append(
+                f"{i}. {m.get('prod_name', '?')} | "
+                f"Colour: {m.get('colour_group_name', '?')} | "
+                f"Type: {m.get('product_type_name', '?')} | "
+                f"Dept: {m.get('department_name', '?')}"
+            )
+
+        prompt = (
+            f"You are a fashion recommendation expert. Rank these items for the customer.\n\n"
+            f"Customer context:\n{context}\n\n"
+            f"Candidates:\n" + "\n".join(item_lines) + "\n\n"
+            f"Output ONLY a comma-separated list of item numbers ranked best to worst.\n"
+            f"Example output: 3,1,5,2,4"
+        )
+
+        result = self._call_llm(prompt, max_tokens=25, temperature=0.0)
+        if not result:
+            return candidates
+
+        try:
+            ranked_idx = [
+                int(x.strip()) - 1
+                for x in result.strip().split(',')
+                if x.strip().isdigit()
+            ]
+            ranked_idx = [i for i in ranked_idx if 0 <= i < len(pool)]
+            seen = set(ranked_idx)
+            reranked = [pool[i] for i in ranked_idx]
+            reranked += [pool[i] for i in range(len(pool)) if i not in seen]
+            reranked += candidates[8:]
+            print(f"   [LLM Re-rank] Cross-encoder reordered {len(pool)} candidates")
+            return reranked
+        except Exception as e:
+            print(f"   [LLM Re-rank] Parse error: {e}. Keeping original order.")
+            return candidates
+
+    # ------------------------------------------------------------------
+    # NOVELTY 4: Proactive Self-Reflection Quality Gate
+    # ------------------------------------------------------------------
+    def self_evaluate(self, explanation: str, metadata: dict) -> tuple:
+        """
+        LLM scores its own generated explanation before ViLT verification.
+        Returns (passes: bool, feedback: str).
+        Proactively regenerates low-quality explanations before the ViLT gate.
+        Paper: MARC — reflection process as a core Agentic RAG pillar.
+        """
+        if not self.is_available:
+            return True, "Self-evaluation skipped (LLM unavailable)."
+
+        colour = metadata.get('colour_group_name', '')
+        product_type = metadata.get('product_type_name', '')
+
+        prompt = (
+            f"Evaluate this fashion recommendation explanation for quality.\n\n"
+            f"Verified item facts: {colour} {product_type}\n"
+            f"Explanation to evaluate: \"{explanation}\"\n\n"
+            f"Score 1-10 based on: factual consistency with item facts, clarity, helpfulness.\n"
+            f"Be strict — score below 6 if the explanation contradicts or ignores the item facts.\n"
+            f"Output format (two lines only):\n"
+            f"SCORE: <number>\n"
+            f"FEEDBACK: <one sentence>"
+        )
+
+        result = self._call_llm(prompt, max_tokens=60, temperature=0.0)
+        if not result:
+            return True, "Self-evaluation inconclusive. Passing."
+
+        try:
+            lines = result.strip().split('\n')
+            score_line = next((l for l in lines if l.upper().startswith('SCORE:')), None)
+            feedback_line = next((l for l in lines if l.upper().startswith('FEEDBACK:')), None)
+
+            score = int(score_line.split(':', 1)[1].strip()) if score_line else 7
+            feedback = feedback_line.split(':', 1)[1].strip() if feedback_line else "Quality acceptable."
+
+            passes = score >= 6
+            print(f"   [Self-Reflect] Score: {score}/10 — {'PASS' if passes else 'FAIL → proactive regeneration'}")
+            return passes, feedback
+        except Exception:
+            return True, "Self-evaluation parse error. Passing."
+
 
 # Singleton
 llm_generator = ExplanationGenerator()
