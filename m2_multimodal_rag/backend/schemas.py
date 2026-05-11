@@ -13,9 +13,11 @@ class BoostTemplate(BaseModel):
     weight: float
 
 class CatalogSearchPayload(BaseModel):
-    filters: Dict[str, str] = Field(default_factory=dict)
+    filters: Dict[str, Any] = Field(default_factory=dict)
     preference_boosts: List[BoostTemplate] = Field(default_factory=list)
     penalties: Dict[str, List[str]] = Field(default_factory=dict)
+    soft_constraints: Dict[str, Any] = Field(default_factory=dict)
+    purchase_history_hints: Dict[str, Any] = Field(default_factory=dict)
 
 class AttributeLookupPayload(BaseModel):
     article_id: str
