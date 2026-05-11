@@ -68,15 +68,107 @@ class FAISSDatabase:
 
         # Launch the actual real-time FAISS RAM search
         distances, indices = self.index.search(query_vector, top_k)
-        
+
         # Yield the (article_id, score) pairs
         results = []
         for score, idx in zip(distances[0], indices[0]):
-            if idx != -1:  # FAISS returns -1 if there are fewer items than top_k 
+            if idx != -1:  # FAISS returns -1 if there are fewer items than top_k
                 article_id = self.mapping[idx]
                 results.append((str(article_id), float(score)))
-                
+
         return results
+
+    def get_item_vector(self, article_id: str) -> np.ndarray:
+        """
+        NOVELTY 3 (MMR helper): Reconstructs the stored 512-D CLIP vector for a
+        given article from the FAISS index.  Works for flat index types (IndexFlatIP).
+        Returns None on failure so MMR can fall back to attribute-based similarity.
+        """
+        if not self.database_ready:
+            return None
+        try:
+            idx = self.mapping.index(article_id)
+            vec = self.index.reconstruct(idx)
+            return vec.reshape(1, -1).astype('float32')
+        except Exception:
+            return None
+
+    def mmr_select(self, candidates: list, query_vector: np.ndarray,
+                   top_k: int = 2, lambda_param: float = 0.7) -> list:
+        """
+        NOVELTY 3: Maximal Marginal Relevance (MMR) diversity-aware selection.
+
+        Selects top_k items that maximise both relevance to the query AND
+        diversity from each other, using the formula:
+
+            MMR(i) = λ × relevance(i) − (1−λ) × max_sim(i, already_selected)
+
+        Similarity is computed from reconstructed FAISS item vectors (cosine),
+        with a metadata-attribute fallback when vector reconstruction fails.
+        Paper: Gen-RecSys — diversity as an open challenge in recommendation.
+        """
+        if len(candidates) <= top_k:
+            return candidates
+
+        # Pre-fetch item CLIP vectors for pairwise similarity computation
+        item_vectors = {c['article_id']: self.get_item_vector(c['article_id']) for c in candidates}
+
+        selected = []
+        remaining = list(candidates)
+
+        for _ in range(top_k):
+            if not remaining:
+                break
+
+            best_item = None
+            best_mmr_score = float('-inf')
+
+            for candidate in remaining:
+                aid = candidate['article_id']
+                relevance = candidate['final_score']
+
+                if not selected:
+                    mmr_score = relevance
+                else:
+                    vec_i = item_vectors.get(aid)
+                    max_sim = 0.0
+
+                    for sel in selected:
+                        vec_s = item_vectors.get(sel['article_id'])
+
+                        if vec_i is not None and vec_s is not None:
+                            # True cosine similarity between stored CLIP vectors
+                            dot = float(np.dot(vec_i.flatten(), vec_s.flatten()))
+                            norm_i = float(np.linalg.norm(vec_i))
+                            norm_s = float(np.linalg.norm(vec_s))
+                            sim = dot / (norm_i * norm_s + 1e-8)
+                        else:
+                            # Fallback: attribute overlap as diversity proxy
+                            m_i = candidate.get('metadata', {})
+                            m_s = sel.get('metadata', {})
+                            attrs = ['colour_group_name', 'product_type_name',
+                                     'department_name', 'graphical_appearance_name']
+                            sim = sum(
+                                1 for a in attrs
+                                if str(m_i.get(a, '')).lower() == str(m_s.get(a, '')).lower()
+                            ) / len(attrs)
+
+                        max_sim = max(max_sim, sim)
+
+                    mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
+
+                if mmr_score > best_mmr_score:
+                    best_mmr_score = mmr_score
+                    best_item = candidate
+
+            if best_item:
+                selected.append(best_item)
+                remaining.remove(best_item)
+                print(f"   [MMR] Picked {best_item['article_id']} "
+                      f"(relevance={best_item['final_score']:.4f}, MMR={best_mmr_score:.4f})")
+
+        return selected
+
 
 # Singleton access point for entire app
 faiss_db = FAISSDatabase()

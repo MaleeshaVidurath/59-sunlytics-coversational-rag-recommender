@@ -21,6 +21,8 @@ from m2_multimodal_rag.llm_generator import llm_generator
 from m2_multimodal_rag.clip_embeddings import clip_encoder
 from m2_multimodal_rag.faiss_index import faiss_db
 from m2_multimodal_rag.regeneration_loop import generator_loop
+from m2_multimodal_rag.cross_encoder_reranker import cross_encoder_reranker
+from m2_multimodal_rag.diversity_bandit import diversity_bandit
 
 
 # =====================================================================
@@ -74,13 +76,29 @@ def _call_llm(prompt: str) -> str | None:
 # =====================================================================
 def handle_catalog_search(retrieval_input: dict) -> dict:
     """
-    Searches the product catalog using a hybrid approach:
-    1. Use CLIP/FAISS vector search with the user's message (larger top_k)
-    2. Post-filter results using structured 'filters' (hard constraints)
-    3. Re-rank using 'preference_boosts' (soft weights)
-    4. Apply 'penalties' (demote disliked attributes)
-    5. Exclude 'exclude_ids' (already rejected items)
-    6. Return top 2 items with verified explanations
+    Searches the product catalog using a 6-phase enhanced pipeline:
+
+    Phase 1 — NOVELTY 1 : LLM Query Expansion + Multi-Vector CLIP Ensemble
+               Groq expands the query into 3 semantic variants; all variants
+               are CLIP-encoded and their 512-D vectors averaged → richer recall.
+
+    Phase 2  — Hard filter + boost / penalty / purchase_history scoring.
+               Collaborative signal from 185,037 real transactions (v2.0).
+
+    Phase 3  — Deep Learning: Cross-Encoder Neural Re-ranking (MiniLM-BERT)
+               Jointly encodes (query, item) pairs via cross-attention for
+               precise neural relevance scoring — Stage 2 of two-stage retrieval.
+
+    Phase 4  — NOVELTY 2: LLM Semantic Re-ranking
+               Groq re-scores top-8 neural candidates with full session context
+               (query + soft_constraints + purchase_history_hints).
+
+    Phase 5  — Reinforcement Learning: Thompson Sampling Diversity Bandit + MMR
+               λ is sampled from Beta(α, β) updated by session feedback signals,
+               then used in MMR for diversity-aware final selection.
+
+    Phase 6  — Verified explanation generation (regeneration loop with
+               NOVELTY 4 self-reflection gate inside).
     """
     payload = retrieval_input.get("payload", {})
     user_message = retrieval_input.get("user_message", "")
@@ -88,25 +106,32 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
     filters = payload.get("filters", {})
     boosts = payload.get("preference_boosts", [])
     penalties = payload.get("penalties", {})
+    soft_constraints = payload.get("soft_constraints", {})
+    purchase_hints = payload.get("purchase_history_hints", {})
 
     print(f"  [catalog_search] Filters: {filters}")
-    print(f"  [catalog_search] Boosts: {boosts}")
-    print(f"  [catalog_search] Penalties: {penalties}")
+    print(f"  [catalog_search] Soft constraints: {soft_constraints}")
+    print(f"  [catalog_search] Purchase hints — dominant: "
+          f"{purchase_hints.get('dominant_colour')}/{purchase_hints.get('dominant_type')}, "
+          f"budget: {purchase_hints.get('budget_tier')}")
     print(f"  [catalog_search] Exclude IDs: {exclude_ids}")
 
     # ------------------------------------------------------------------
-    # PHASE 1: CLIP/FAISS Vector Search (broader net)
+    # PHASE 1 — NOVELTY 1: LLM Query Expansion + Multi-Vector CLIP Ensemble
     # ------------------------------------------------------------------
-    # Build a search string from the user message + filter values for CLIP
     filter_terms = " ".join(str(v) for v in filters.values() if not isinstance(v, (int, float)))
-    search_text = f"{user_message} {filter_terms}".strip()
-    
-    if not search_text:
-        search_text = " ".join(str(v) for v in filters.values())
+    soft_terms = " ".join(str(v) for v in soft_constraints.values() if v)
+    base_search_text = f"{user_message} {filter_terms} {soft_terms}".strip()
 
-    print(f"  [catalog_search] CLIP search text: '{search_text}'")
+    if not base_search_text:
+        base_search_text = " ".join(str(v) for v in filters.values())
 
-    query_vector = clip_encoder.encode_text(search_text)
+    print(f"  [catalog_search] Base search text: '{base_search_text}'")
+
+    # Expand query into semantic variants via LLM, then encode as ensemble
+    expanded_queries = llm_generator.expand_query(base_search_text)
+    query_vector = clip_encoder.encode_expanded(expanded_queries)
+
     if query_vector is None:
         return {
             "action": "catalog_search",
@@ -116,7 +141,7 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
             "error": "CLIP encoding failed",
         }
 
-    # Retrieve a larger candidate pool for post-filtering
+    # Retrieve a broad candidate pool for downstream filtering
     candidates = faiss_db.search(query_vector, top_k=50)
 
     if not candidates:
@@ -129,17 +154,15 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
         }
 
     # ------------------------------------------------------------------
-    # PHASE 2: Post-filter using structured filters (hard constraints)
+    # PHASE 2 — Hard filter + scoring (boost / penalty / purchase history)
     # ------------------------------------------------------------------
     articles_df = data_loader.load_articles()
     filtered_results = []
 
     for article_id, faiss_score in candidates:
-        # Skip excluded items
         if article_id in exclude_ids or article_id.lstrip('0') in exclude_ids:
             continue
 
-        # Fetch article metadata
         try:
             article_row = articles_df[articles_df['article_id'] == int(article_id)]
         except (ValueError, TypeError):
@@ -150,17 +173,15 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
 
         metadata = article_row.iloc[0].to_dict()
 
-        # Apply hard filter constraints
+        # Hard filter constraints — all must pass
         passes_filters = True
         for filter_key, filter_value in filters.items():
             if filter_key == "price_max":
-                article_price = metadata.get("price", float('inf'))
-                if article_price > filter_value:
+                if metadata.get("price", float('inf')) > filter_value:
                     passes_filters = False
                     break
             elif filter_key == "price_min":
-                article_price = metadata.get("price", 0)
-                if article_price < filter_value:
+                if metadata.get("price", 0) < filter_value:
                     passes_filters = False
                     break
             else:
@@ -173,15 +194,15 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
         if not passes_filters:
             continue
 
-        # Apply penalty check (demote but don't hard-exclude)
+        # Penalty score — demote disliked attributes
         penalty_score = 0.0
         for penalty_key, penalty_values in penalties.items():
             article_val = str(metadata.get(penalty_key, "")).strip().lower()
             for pv in penalty_values:
                 if article_val == str(pv).strip().lower():
-                    penalty_score += 0.3  # Significant demotion
+                    penalty_score += 0.3
 
-        # Calculate boost score
+        # Preference boost score — long-term attribute weights
         boost_score = 0.0
         for boost in boosts:
             attr = boost.get("attribute", "")
@@ -191,8 +212,28 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
             if article_val == value:
                 boost_score += weight
 
-        # Combined score: FAISS similarity + boost - penalty
-        final_score = faiss_score + boost_score - penalty_score
+        # Purchase history collaborative score (v2.0 hints)
+        history_score = 0.0
+        if purchase_hints:
+            item_colour = str(metadata.get('colour_group_name', '')).strip()
+            item_type = str(metadata.get('product_type_name', '')).strip()
+            item_price = float(metadata.get('price') or 0)
+
+            top_colours = purchase_hints.get('top_colours') or []
+            if item_colour in top_colours:
+                rank = top_colours.index(item_colour)
+                history_score += 0.12 * (1 - rank / max(len(top_colours), 1))
+
+            top_types = purchase_hints.get('top_product_types') or []
+            if item_type in top_types:
+                history_score += 0.08
+
+            price_range = purchase_hints.get('preferred_price_range')
+            if price_range and len(price_range) == 2:
+                if price_range[0] <= item_price <= price_range[1]:
+                    history_score += 0.08
+
+        final_score = faiss_score + boost_score - penalty_score + history_score
 
         filtered_results.append({
             "article_id": article_id,
@@ -201,39 +242,88 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
             "final_score": final_score,
         })
 
-    # Sort by final_score descending
     filtered_results.sort(key=lambda x: x["final_score"], reverse=True)
 
-    # Take top 2 as per the spec
-    top_results = filtered_results[:2]
-
-    if not top_results:
-        # Fallback: if hard filters eliminated everything, return top FAISS results
+    if not filtered_results:
         print("  [catalog_search] Hard filters eliminated all candidates. Falling back to top FAISS results.")
-        fallback_results = []
-        for article_id, faiss_score in candidates[:2]:
+        for article_id, faiss_score in candidates[:10]:
             if article_id not in exclude_ids:
                 meta = _fetch_article(article_id)
                 if meta:
-                    fallback_results.append({
+                    filtered_results.append({
                         "article_id": article_id,
                         "metadata": meta,
                         "faiss_score": faiss_score,
                         "final_score": faiss_score,
                     })
-        top_results = fallback_results
 
     # ------------------------------------------------------------------
-    # PHASE 3: Generate verified explanations for the top items
+    # PHASE 3 — Cross-Encoder Neural Re-ranking (Deep Learning)
+    # MiniLM-BERT jointly encodes (query, item) pairs via cross-attention —
+    # far more expressive than bi-encoder cosine similarity alone.
+    # This is Stage 2 of the bi-encoder → cross-encoder two-stage pipeline.
+    # ------------------------------------------------------------------
+    print(f"  [catalog_search] Neural cross-encoder scoring "
+          f"top-{min(len(filtered_results), 20)} candidates...")
+    neural_reranked = cross_encoder_reranker.rerank(
+        query=base_search_text,
+        candidates=filtered_results,
+        top_k=20,
+    )
+
+    # ------------------------------------------------------------------
+    # PHASE 4 — NOVELTY 2: LLM Semantic Re-ranking
+    # LLM acts as a final semantic judge on the top-8 neural candidates,
+    # incorporating soft_constraints and purchase_history context that the
+    # cross-encoder cannot see.
+    # ------------------------------------------------------------------
+    print(f"  [catalog_search] LLM semantic re-ranking top-8 from neural stage...")
+    reranked_results = llm_generator.rerank_candidates(
+        user_message=user_message,
+        candidates=neural_reranked,
+        soft_constraints=soft_constraints,
+        purchase_hints=purchase_hints,
+    )
+
+    # ------------------------------------------------------------------
+    # PHASE 5 — NOVELTY 3: Thompson Sampling Bandit + MMR
+    # Derive implicit feedback signals from session context:
+    #   exclude_ids → user rejected items → wants MORE diversity → β increases
+    #   items_in_context → user kept items  → wants MORE relevance → α increases
+    # Thompson Sampling draws λ from Beta(α, β) — exploration-exploitation
+    # over the diversity-relevance tradeoff rather than a fixed λ=0.7.
+    # ------------------------------------------------------------------
+    exclude_count = len(exclude_ids)
+    items_ctx = retrieval_input.get("items_in_context") or {}
+    retained_count = sum(1 for k in ("item_a", "item_b") if items_ctx.get(k))
+
+    adaptive_lambda = diversity_bandit.sample_lambda(
+        exclude_count=exclude_count,
+        retained_count=retained_count,
+    )
+
+    print(f"  [catalog_search] MMR with Thompson Sampling λ={adaptive_lambda:.3f}...")
+    top_results = faiss_db.mmr_select(
+        candidates=reranked_results,
+        query_vector=query_vector,
+        top_k=2,
+        lambda_param=adaptive_lambda,
+    )
+
+    if not top_results:
+        top_results = reranked_results[:2]
+
+    # ------------------------------------------------------------------
+    # PHASE 5 — Verified explanation generation
+    # (regeneration_loop now includes the NOVELTY 4 self-reflection gate)
     # ------------------------------------------------------------------
     response_items = []
     for result in top_results:
         aid = result["article_id"]
         meta = result["metadata"]
 
-        # Use the regeneration loop for verified explanation
         explanation = generator_loop.generate_faithful_explanation(article_id=aid)
-        
+
         item_response = _format_article_for_response(meta)
         item_response["explanation"] = explanation
         item_response["score"] = result["final_score"]
