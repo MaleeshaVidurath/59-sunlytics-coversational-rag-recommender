@@ -278,8 +278,18 @@ _BLOCKLIST_PATTERNS = [
     # Politics / geography
     r'\bpresident\b', r'\belection\b', r'\bpolitics\b', r'\bgovernment\b',
     r'\bcapital city\b',
+    # Food and drink — FIX: was missing entirely from blocklist patterns
+    # Stage 0 only caught single-word exact matches ("food" alone).
+    # These patterns now catch "I need food", "order me pizza", "I want coffee" etc.
+    r'\bfood\b', r'\beat\b', r'\beating\b', r'\bhungry\b',
+    r'\bmeal\b', r'\blunch\b', r'\bdinner\b', r'\bbreakfast\b', r'\bsnack\b',
+    r'\bdrink\b', r'\bbeverage\b', r'\bcafe\b', r'\bcanteen\b',
+    r'\bpizza\b', r'\bburger\b', r'\bcoffee\b', r'\btea\b',
+    r'\bsushi\b', r'\bpasta\b', r'\bsoup\b', r'\bcake\b', r'\bwine\b', r'\bbeer\b',
+    r'\border food\b', r'\bfood delivery\b', r'\btakeaway\b', r'\btakeout\b',
+    r'\brestaurant\b', r'\bmenu\b', r'\brecipe\b',
     # Cooking
-    r'\brecipe\b', r'\bcooking\b', r'\bbaking\b', r'\bingredients\b',
+    r'\bcooking\b', r'\bbaking\b', r'\bingredients\b',
     # Programming / homework
     r'\bhomework\b', r'\bprogramming\b', r'\balgorithm\b', r'\bdebugging\b',
     r'\bwrite code\b', r'\bfix bug\b', r'\bpython error\b',
@@ -367,6 +377,12 @@ _OFF_TOPIC_ANCHOR_POOL = [
 _SEMANTIC_FASHION_MIN = 0.18   # below this → off-topic regardless of margin
 _SEMANTIC_MARGIN      = 0.10   # off-topic must beat fashion by this to reject
 _AMBIGUITY_HIGH       = 0.28   # above this → confident fashion, skip Groq
+# FIX: minimum margin fashion must have OVER off-topic to be accepted at Stage 3.
+# Old behaviour: any fashion_score > off_topic_score was accepted (margin=0.001 was enough).
+# "I need food" had margin=0.033 — too thin, basically noise — but still passed.
+# New behaviour: fashion must lead by at least 0.08 to be confidently accepted.
+# Scores within 0.08 of each other are genuinely ambiguous → escalate to Stage 4 Groq.
+_SEMANTIC_FASHION_WIN_MARGIN = 0.08
 
 
 def _semantic_scores(message: str) -> tuple:
@@ -454,11 +470,28 @@ async def is_fashion_relevant_async(
     msg = message.lower().strip()
 
     # ── Stage 0: Exact word blocklist (fastest, no model needed) ───────────
-    # Catches single/double non-fashion words that fool semantic scoring
-    # because of incidental overlap (e.g. 'washroom' ~ 'machine washable').
-    if msg in _EXACT_WORD_BLOCKLIST:
-        print(f"[FashionGuard] Stage0-exact-block: '{msg}'")
+    # FIX: Check INDIVIDUAL WORDS in the message, not the full message string.
+    # Old behaviour: only "food" (alone) was blocked.
+    #                "i need food" slipped through because it != "food".
+    # New behaviour: any message CONTAINING a blocklist word is blocked.
+    #                "i need food" → {"i","need","food"} ∩ blocklist = {"food"} → blocked.
+    #                "get me pizza" → blocked. "order sushi" → blocked.
+    # Exception: skip word-level check when continuation history exists
+    # so that "ok", "yes" etc. (which overlap with transport/other words)
+    # are correctly allowed as continuation phrases in Stage 1.
+    _msg_words = set(msg.split())
+    _blocked_words = _msg_words & _EXACT_WORD_BLOCKLIST
+    if _blocked_words and not history:
+        # No history — block immediately
+        print(f"[FashionGuard] Stage0-word-block: '{msg}' matched {_blocked_words}")
         return False, 0.0, "stage0_exact_block"
+    elif _blocked_words and history:
+        # Has history — only block if no continuation phrase present
+        # (prevents "ok food" type edge cases in active conversations)
+        _has_continuation = any(p in msg for p in _CONTINUATION_PHRASES)
+        if not _has_continuation:
+            print(f"[FashionGuard] Stage0-word-block (history): '{msg}' matched {_blocked_words}")
+            return False, 0.0, "stage0_exact_block"
 
     # ── Stage 1: Conversational bypass (history-aware) ────────────────────
     # If history exists AND message contains a continuation phrase,
@@ -497,6 +530,16 @@ async def is_fashion_relevant_async(
     if f_score >= _AMBIGUITY_HIGH:
         return True, f_score, "stage3_semantic"
 
+    # FIX: fashion must lead off-topic by at least _SEMANTIC_FASHION_WIN_MARGIN.
+    # Previously any f_score > o_score was accepted — margin=0.033 slipped through.
+    # Now: margin < 0.08 → genuinely ambiguous → escalate to Stage 4 Groq.
+    if (f_score - o_score) < _SEMANTIC_FASHION_WIN_MARGIN:
+        print(
+            f"[FashionGuard] Stage3-thin-margin: f={f_score:.3f} o={o_score:.3f} "
+            f"margin={f_score - o_score:.3f} < {_SEMANTIC_FASHION_WIN_MARGIN} → escalating to Groq"
+        )
+        # Fall through to Stage 4 Groq arbitration
+
     # ── Stage 4: Groq LLM for genuinely ambiguous middle zone ─────────────
     print(f"[FashionGuard] Stage4-Groq: f={f_score:.3f} o={o_score:.3f} msg='{message[:60]}'")
     is_rel, conf = await _groq_relevance_check(message)
@@ -513,9 +556,11 @@ def is_fashion_relevant(message: str) -> tuple:
     """
     msg = message.lower().strip()
 
-    # Stage 0: Exact word blocklist
-    if msg in _EXACT_WORD_BLOCKLIST:
-        print(f"[FashionGuard] Stage0-exact-block: '{msg}'")
+    # Stage 0: word-level blocklist (sync version)
+    _msg_words = set(msg.split())
+    _blocked_words = _msg_words & _EXACT_WORD_BLOCKLIST
+    if _blocked_words:
+        print(f"[FashionGuard] Stage0-word-block: '{msg}' matched {_blocked_words}")
         return False, 0.0
 
     # Stage 2a: allowlist (works for any length including single words)
