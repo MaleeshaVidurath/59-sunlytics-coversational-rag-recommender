@@ -108,11 +108,12 @@ async def get_session_history(session_id: str, user_id: str = Query(...)):
     for t in turns:
         classification = t.get("classification") or {}
         messages.append({
-            "turn_id":    t.get("turn_id", ""),
-            "role":       t.get("role", ""),
-            "content":    t.get("content", ""),
-            "timestamp":  str(t.get("timestamp", t.get("created_at", ""))),
-            "label":      classification.get("label", "") if classification else "",
+            "turn_id":           t.get("turn_id", ""),
+            "role":              t.get("role", ""),
+            "content":           t.get("content", ""),
+            "timestamp":         str(t.get("timestamp", t.get("created_at", ""))),
+            "label":             classification.get("label", "") if classification else "",
+            "recommendation_id": t.get("recommendation_id", None),
         })
 
     return {
@@ -140,6 +141,20 @@ async def delete_session(session_id: str, user_id: str = Query(...)):
     )
     if not doc:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # ── Collect session outcome RL signal BEFORE deleting ─────────────────
+    # Must run before delete — reads the full session from MongoDB.
+    try:
+        from memory.core.rl_signal_collector import get_rl_collector
+        import asyncio as _aio
+        _rl = get_rl_collector()
+        _aio.ensure_future(_rl.collect_session_outcome(
+            session_id=session_id,
+            user_id=user_id,
+            db=db,
+        ))
+    except Exception as _rl_err:
+        print(f"[Sessions] RL session outcome warning (non-fatal): {_rl_err}")
 
     # Delete from all MongoDB collections
     await db.sessions.delete_one({"session_id": session_id})

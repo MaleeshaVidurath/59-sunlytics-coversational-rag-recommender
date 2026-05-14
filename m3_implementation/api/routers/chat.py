@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from api.dependencies import get_memory_pipeline, get_rag_pipeline
+from memory.core.rl_signal_collector import get_rl_collector, LABEL_NAME_TO_ID
 
 
 # ── Fire-and-forget: send pipeline_output to friend modules ───────────────────
@@ -190,6 +191,31 @@ async def chat(req: ChatRequest):
         _asyncio.ensure_future(_fire_and_forget(_M2_URL, pipeline_output, "M2 Multimodal RAG"))
         _asyncio.ensure_future(_fire_and_forget(_M1_URL, pipeline_output, "M1 Graph RAG"))
 
+        # ── Store classifier_input in the turn document ───────────────────
+        # Stores the [SEP]-joined DistilBERT input so rl_routes.py can
+        # retrieve it when user clicks 👍 or 👎.
+        # We store on the USER turn using pipeline_output turn_id.
+        # We also patch the recommendation document with the user_turn_id
+        # so rl_routes.py can find it via recommendation_id → user_turn_id.
+        _user_turn_id     = pipeline_output.get("turn_id", "")
+        _classifier_input = pipeline_output.get("classifier_input", "")
+        if _user_turn_id and _classifier_input:
+            try:
+                from memory.db.mongo import get_db as _get_db_ci
+                _db_ci = _get_db_ci()
+                # Store classifier_input on the user turn
+                await _db_ci.turns.update_one(
+                    {"turn_id": _user_turn_id},
+                    {"$set": {"classifier_input": _classifier_input}}
+                )
+                # Also update embedded turns in session document
+                await _db_ci.sessions.update_one(
+                    {"turns.turn_id": _user_turn_id},
+                    {"$set": {"turns.$.classifier_input": _classifier_input}}
+                )
+            except Exception as _ci_err:
+                print(f"[CHAT] classifier_input store warning (non-fatal): {_ci_err}")
+
         print(f"[CHAT] ─── Step 2: calling rag.process...")
         # Step 2: Text RAG pipeline (includes hallucination + contradiction)
         rag_result = await rag.process(
@@ -204,6 +230,37 @@ async def chat(req: ChatRequest):
         print(f"[CHAT] action={rag_result.get('action')} items={len(rag_result.get('items_recommended',[]))} hall={rag_result.get('hallucination_flag')} contra={rag_result.get('contradiction_found')}")
         for _itm in rag_result.get("items_recommended",[]):
             print(f"[CHAT] ITEM: {_itm.get('article_id','?')} | {str(_itm.get('name','?'))[:30]} | {_itm.get('colour','?')} | {_itm.get('price','?')}")
+
+        # ── Retrieve recommendation_id and patch user_turn_id ─────────────
+        # store_response() saves recommendation linked to the BOT turn.
+        # We also patch user_turn_id onto the recommendation so that
+        # rl_routes.py can find the user turn (with classifier_input)
+        # when the user clicks 👍 or 👎.
+        _rec_id = None
+        if rag_result.get("action") == "catalog_search" and rag_result.get("items_recommended"):
+            try:
+                from memory.db.mongo import get_db as _get_db_inner
+                _db_inner = _get_db_inner()
+                _latest_rec = await _db_inner.recommendations.find_one(
+                    {
+                        "session_id": pipeline_output.get("session_id", ""),
+                        "user_id":    pipeline_output.get("user_id", ""),
+                    },
+                    sort=[("created_at", -1)],
+                )
+                if _latest_rec:
+                    _rec_id = _latest_rec.get("recommendation_id")
+                    # Patch user_turn_id onto recommendation document
+                    # so rl_routes.py can find classifier_input via:
+                    # recommendation_id → user_turn_id → turn.classifier_input
+                    _user_turn_id_for_rec = pipeline_output.get("turn_id", "")
+                    if _user_turn_id_for_rec and _rec_id:
+                        await _db_inner.recommendations.update_one(
+                            {"recommendation_id": _rec_id},
+                            {"$set": {"user_turn_id": _user_turn_id_for_rec}}
+                        )
+            except Exception as _rec_err:
+                print(f"[CHAT] recommendation_id lookup warning (non-fatal): {_rec_err}")
         # Extract items for product cards
         items = []
         for item in rag_result.get("items_recommended", []):
@@ -219,6 +276,55 @@ async def chat(req: ChatRequest):
                 })
 
         print(f"[CHAT] ─── Returning final response to frontend")
+
+        # ── Collect implicit RL signal (next-turn behaviour) ──────────────
+        # This fires silently — never affects the response to the user.
+        # Looks at what label the user just sent vs what the PREVIOUS turn predicted.
+        # Example: if last turn was REFINEMENT and this turn is SELECTION_REFERENCE
+        # → the refinement worked → reward +0.7 stored in rl_experiences collection.
+        try:
+            from memory.db.mongo import get_db as _get_db
+            _db  = _get_db()
+            _rl  = get_rl_collector()
+
+            _session_id = pipeline_output.get("session_id", "")
+            _user_id    = pipeline_output.get("user_id", "")
+            _cur_label  = pipeline_output.get("label", "")
+
+            # Turns are stored embedded in the session document (not in a
+            # separate turns collection) — load from db.sessions directly.
+            _sess_doc  = await _db.sessions.find_one({"session_id": _session_id})
+            _user_turns = []
+            if _sess_doc:
+                _user_turns = [
+                    t for t in _sess_doc.get("turns", [])
+                    if t.get("role") == "user"
+                ]
+                # list is chronological (oldest first); we need last 2
+
+            if len(_user_turns) >= 2:
+                _prev_turn = _user_turns[-2]   # second-to-last user turn
+                _prev_cls  = _prev_turn.get("classification") or {}
+                _prev_lbl  = _prev_cls.get("label", "")
+                if _prev_lbl:
+                    import asyncio as _aio
+                    _aio.ensure_future(_rl.collect_implicit_signal(
+                        session_id=      _session_id,
+                        user_id=         _user_id,
+                        prev_turn_id=    _prev_turn.get("turn_id", ""),
+                        prev_label=      _prev_lbl,
+                        prev_input_text= _prev_turn.get("classifier_input", "") or _prev_turn.get("content", ""),
+                        prev_label_id=   LABEL_NAME_TO_ID.get(_prev_lbl, 0),
+                        prev_strategy=   _prev_cls.get("retrieval_strategy", "FULL"),
+                        prev_confidence= _prev_cls.get("confidence", 0.0),
+                        next_label=      _cur_label,
+                        db=              _db,
+                    ))
+                    print(f"[CHAT] RL implicit: {_prev_lbl}->{_cur_label} queued for session {_session_id[:12]}")
+        except Exception as _rl_err:
+            # RL signal collection NEVER breaks the main response
+            print(f"[CHAT] RL implicit signal warning (non-fatal): {_rl_err}")
+
         return {
             "response_text":       rag_result.get("response_text", ""),
             "session_id":          pipeline_output.get("session_id", ""),
@@ -236,6 +342,10 @@ async def chat(req: ChatRequest):
             "contradiction_count": rag_result.get("contradiction_count", 0),
             "contradictions":      rag_result.get("contradictions", []),
             "cse":                 pipeline_output.get("cse", {}),
+            # ── NEW: recommendation_id for RL explicit feedback ────────────
+            # Frontend uses this to submit 👍/👎 via POST /api/rl/feedback
+            "recommendation_id":   _rec_id,
+            "turn_id":             pipeline_output.get("turn_id", ""),
         }
 
     except Exception as e:

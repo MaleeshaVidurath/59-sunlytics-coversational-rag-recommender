@@ -161,6 +161,22 @@ class ContextSufficiencyEvaluator:
         else:
             tier = "FULL"
 
+        # ── Enforce minimum PARTIAL for labels that need item data ────────
+        # NO retrieval is only valid for CHITCHAT and FEEDBACK — pure dialogue
+        # turns that need no product information at all.
+        # SELECTION_REFERENCE / ATTRIBUTE_QUESTION / EXPLANATION_WHY / COMPARISON
+        # always require at least a bounded DB lookup even when the item is
+        # already identified in session context (we still need the full description,
+        # material, price etc. which are not stored in Redis/MongoDB session state).
+        _NEEDS_MIN_PARTIAL = {
+            "SELECTION_REFERENCE", "ATTRIBUTE_QUESTION",
+            "EXPLANATION_WHY",     "COMPARISON",
+        }
+        if label in _NEEDS_MIN_PARTIAL and tier == "NO":
+            tier = "PARTIAL"
+            print(f"[CSE] MIN-TIER enforced: NO → PARTIAL "
+                  f"(label={label} always needs item lookup)")
+
         override = (tier != prior_strategy)
         rationale = self._build_rationale(
             label, tier, prior_strategy, score, d1, d2, d3, d4, d5

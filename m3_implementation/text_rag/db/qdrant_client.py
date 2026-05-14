@@ -44,7 +44,7 @@ def get_qdrant():
     global _qdrant_client
     if _qdrant_client is None:
         from qdrant_client import QdrantClient
-        _qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        _qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, check_compatibility=False)
         print(f"[Qdrant] Connected to {QDRANT_HOST}:{QDRANT_PORT}")
     return _qdrant_client
 
