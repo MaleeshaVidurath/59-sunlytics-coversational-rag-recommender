@@ -267,6 +267,13 @@ class MemoryPipeline:
             print("\n" + "="*60)
             print(f"[DBG-1] DISTILBERT: label={label} conf={confidence:.1%} strategy={retrieval_strategy}")
             print(f"[DBG-1] MSG: '{message[:60]}'")
+        else:
+            # No pre-classifier match and no DistilBERT predictor loaded — rule-based fallback
+            label, retrieval_strategy = self._fallback_classify(message, history)
+            confidence  = 0.0
+            used_rules  = True
+            print(f"[PIPELINE-4b] FALLBACK: label={label} strategy={retrieval_strategy}")
+            print(f"[DBG-1] MSG: '{message[:60]}'")
 
         # ── Step 4c: Product keyword override ───────────────────────────────────
         # DistilBERT misclassifies short product-keyword messages as CHITCHAT/FEEDBACK.
@@ -353,12 +360,6 @@ class MemoryPipeline:
                 retrieval_strategy = "FULL"
                 confidence         = 0.80
                 used_rules         = True
-
-        else:
-            label, retrieval_strategy = self._fallback_classify(message, history)
-            confidence  = 0.0
-            used_rules  = True
-
 
         # ── Step 4d: Context Sufficiency Evaluation (CSE) ──────────────────────
         # Applies the formal information-theoretic tier assignment from

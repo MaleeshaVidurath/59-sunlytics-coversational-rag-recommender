@@ -29,6 +29,7 @@ from text_rag.db.qdrant_client   import get_qdrant
 
 import api.dependencies as deps
 from api.routers import auth, chat, sessions
+from memory.core.rl_signal_collector import get_rl_collector
 
 
 @asynccontextmanager
@@ -41,6 +42,17 @@ async def lifespan(app: FastAPI):
     await connect_to_redis()
     await create_schema()
     get_qdrant()   # verify Qdrant connection
+
+    # Create RL experiences index (safe to run every startup)
+    try:
+        from memory.db.mongo import get_db
+        db = get_db()
+        await db.rl_experiences.create_index("session_id")
+        await db.rl_experiences.create_index("reward_source")
+        await db.rl_experiences.create_index([("user_id", 1), ("created_at", -1)])
+        print("[API] RL experiences indexes created/verified.")
+    except Exception as e:
+        print(f"[API] RL index creation warning (non-fatal): {e}")
 
     # Initialise pipelines (loads DistilBERT, NLI models)
     await deps.init_pipelines()
@@ -80,6 +92,10 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(sessions.router)
+
+# RL signal collection routes
+from memory.core.rl_routes import router as rl_router
+app.include_router(rl_router)
 
 
 @app.get("/api/health")

@@ -50,6 +50,25 @@ async function apiNewSession(userId) {
   if (!r.ok) console.warn("Could not clear session pointer");
 }
 
+async function apiSubmitFeedback({ sessionId, userId, recommendationId, turnId, rating, articleIds }) {
+  try {
+    await fetch(`${BASE}/api/rl/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id:        sessionId,
+        user_id:           userId,
+        recommendation_id: recommendationId || "",
+        turn_id:           turnId || "",
+        rating,
+        article_ids:       articleIds || [],
+      }),
+    });
+  } catch (e) {
+    console.warn("RL feedback submission failed:", e);
+  }
+}
+
 const C = {
   bg: "#0f0f0f", sidebar: "#161616", card: "#1c1c1c",
   border: "#2a2a2a", accent: "#c9a96e", accentDim: "#8a6f3e",
@@ -140,7 +159,56 @@ function MetaBadge({ label, confidence, hallucination, contradiction }) {
   );
 }
 
-function Message({ msg }) {
+function FeedbackButtons({ msg, onFeedback }) {
+  if (!msg.recommendation_id) return null;
+
+  const given = msg.feedbackGiven;
+
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:8 }}>
+      <span style={{ fontSize:10, color:"#555", marginRight:2 }}>Was this helpful?</span>
+      <button
+        onClick={() => !given && onFeedback(msg, "up")}
+        title="Good recommendation"
+        style={{
+          background: given === "up" ? "#1e3a2f" : "#1a1a1a",
+          border: `1px solid ${given === "up" ? "#2d5a3d" : "#333"}`,
+          borderRadius: 8,
+          padding: "3px 10px",
+          cursor: given ? "default" : "pointer",
+          color: given === "up" ? "#7ec87e" : "#555",
+          fontSize: 14,
+          transition: "all 0.15s",
+          opacity: given && given !== "up" ? 0.35 : 1,
+        }}>
+        👍
+      </button>
+      <button
+        onClick={() => !given && onFeedback(msg, "down")}
+        title="Could be better"
+        style={{
+          background: given === "down" ? "#3a1e1e" : "#1a1a1a",
+          border: `1px solid ${given === "down" ? "#5a2d2d" : "#333"}`,
+          borderRadius: 8,
+          padding: "3px 10px",
+          cursor: given ? "default" : "pointer",
+          color: given === "down" ? "#f87171" : "#555",
+          fontSize: 14,
+          transition: "all 0.15s",
+          opacity: given && given !== "down" ? 0.35 : 1,
+        }}>
+        👎
+      </button>
+      {given && (
+        <span style={{ fontSize:10, color: given === "up" ? "#7ec87e" : "#f87171" }}>
+          {given === "up" ? "Thanks for your feedback!" : "We'll improve!"}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function Message({ msg, onFeedback }) {
   const isUser = msg.role === "user";
   return (
     <div style={{ display:"flex", justifyContent:isUser?"flex-end":"flex-start",
@@ -168,6 +236,9 @@ function Message({ msg }) {
           <MetaBadge label={msg.label} confidence={msg.confidence||0}
             hallucination={msg.hallucination_flag}
             contradiction={msg.contradiction_found} />
+        )}
+        {!isUser && (
+          <FeedbackButtons msg={msg} onFeedback={onFeedback} />
         )}
         <div style={{ fontSize:10, color:C.textMuted, marginTop:4,
           textAlign:isUser?"right":"left" }}>
@@ -370,6 +441,22 @@ function ChatPage({ user, onLogout }) {
     } catch(e) { console.error("delete failed", e); }
   }
 
+  async function handleFeedback(msg, rating) {
+    // Optimistically update UI immediately
+    setMessages(prev => prev.map(m =>
+      m.id === msg.id ? { ...m, feedbackGiven: rating } : m
+    ));
+    // Send to backend for RL signal collection
+    await apiSubmitFeedback({
+      sessionId:        msg.session_id || activeSession,
+      userId:           user.user_id,
+      recommendationId: msg.recommendation_id,
+      turnId:           msg.turn_id,
+      rating,
+      articleIds:       (msg.items || []).map(i => i.article_id).filter(Boolean),
+    });
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || sending) return;
@@ -403,6 +490,10 @@ function ChatPage({ user, onLogout }) {
         items: res.items_recommended || [],
         hallucination_flag: res.hallucination_flag,
         contradiction_found: res.contradiction_found,
+        recommendation_id: res.recommendation_id || null,
+        turn_id: res.turn_id || null,
+        session_id: res.session_id || null,
+        feedbackGiven: null,  // null | "up" | "down"
       };
       setMessages(prev => [...prev, botMsg]);
 
@@ -533,7 +624,7 @@ function ChatPage({ user, onLogout }) {
             </div>
           ) : (
             <>
-              {messages.map(msg => <Message key={msg.id} msg={msg} />)}
+              {messages.map(msg => <Message key={msg.id} msg={msg} onFeedback={handleFeedback} />)}
               {sending && <TypingIndicator />}
               <div ref={messagesEndRef} />
             </>
