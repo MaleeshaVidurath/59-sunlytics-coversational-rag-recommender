@@ -179,13 +179,13 @@ async def chat(req: ChatRequest):
         print(f"[CHAT] purchase_hints_present={bool(_payload_dbg.get('purchase_history_hints'))}")
         _cse = pipeline_output.get("cse", {})
         if _cse:
-            print(f"[CHAT] CSE: score={_cse.get('sufficiency_score','?'):.4f} "
-                  f"tier={_cse.get('tier','?')} override={_cse.get('override','?')}")
-            print(f"[CHAT] CSE: D1_ref={_cse.get('d1_referent','?'):.2f} "
-                  f"D2_pred={_cse.get('d2_predicate','?'):.2f} "
-                  f"D3_cat={_cse.get('d3_catalog_needed','?'):.2f} "
-                  f"D4_param={_cse.get('d4_parametric','?'):.2f} "
-                  f"D5_known={_cse.get('d5_item_set_known','?'):.2f}")
+            print(f"[CHAT] CSE: score={_cse.get('score', 0.0):.4f} "
+                  f"tier={_cse.get('tier','?')} override={_cse.get('override','?')} "
+                  f"full_sub={_cse.get('full_subtype')} partial_sub={_cse.get('partial_subtype')}")
+            print(f"[CHAT] CSE: D_self={_cse.get('d_self_sufficient', 0.0):.2f} "
+                  f"D_items={_cse.get('d_items_available', 0.0):.2f} "
+                  f"D_recency={_cse.get('d_info_recency', 0.0):.2f} "
+                  f"D_completeness={_cse.get('d_info_completeness', 0.0):.2f}")
         # ── Fire and forget: send to friend modules ────────────────────────
         import asyncio as _asyncio
         _asyncio.ensure_future(_fire_and_forget(_M2_URL, pipeline_output, "M2 Multimodal RAG"))

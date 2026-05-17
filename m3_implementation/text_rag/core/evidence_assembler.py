@@ -173,17 +173,7 @@ class EvidenceAssembler:
         user_message   = ri.get("user_message", "")
 
         # Step 1: Semantic search in Qdrant
-        # Build semantic query from user message + filter values
-        semantic_query = user_message
-        if filters.get("colour_group_name"):
-            semantic_query += f" {filters['colour_group_name']}"
-        if filters.get("product_type_name"):
-            semantic_query += f" {filters['product_type_name']}"
-        if soft_constraints.get("style"):
-            semantic_query += f" {soft_constraints['style']}"
-        if soft_constraints.get("occasion"):
-            semantic_query += f" {soft_constraints['occasion']}"
-
+        semantic_query = self._build_semantic_query(user_message, filters, soft_constraints)
         qdrant_results = semantic_search(
             query=semantic_query,
             filters=filters,
@@ -233,6 +223,15 @@ class EvidenceAssembler:
             if aid not in seen_ids:
                 seen_ids.add(aid)
                 merged.append(art)
+
+        # Strip excluded IDs before selection — Qdrant's HasId filter can silently
+        # fail on some client versions, so enforce the exclusion here as a hard gate.
+        if exclude_ids:
+            exclude_set = {str(x) for x in exclude_ids if x}
+            before = len(merged)
+            merged = [a for a in merged if str(a.get("article_id", "")) not in exclude_set]
+            print(f"[ASSEMBLER-CATALOG] post-merge exclude filter: {before} → {len(merged)} items "
+                  f"(removed {before - len(merged)} excluded)")
 
         # Apply colour diversity for multi-item requests
         if requested_qty > 2:
@@ -438,6 +437,20 @@ class EvidenceAssembler:
         }
 
     # ── no retrieval (FEEDBACK / CHITCHAT) ────────────────────────────────────
+
+    @staticmethod
+    def _build_semantic_query(user_message: str, filters: dict, soft_constraints: dict) -> str:
+        """Appends key filter/constraint terms to the base message for Qdrant embedding."""
+        parts = [user_message]
+        for key in ("colour_group_name", "product_type_name"):
+            val = filters.get(key)
+            if val:
+                parts.append(val)
+        for key in ("style", "occasion"):
+            val = soft_constraints.get(key)
+            if val:
+                parts.append(val)
+        return " ".join(parts)
 
     async def _assemble_no_retrieval(self, mc: dict) -> dict:
         """For FEEDBACK and CHITCHAT — uses only memory_context."""

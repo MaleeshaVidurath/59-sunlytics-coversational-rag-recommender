@@ -371,7 +371,7 @@ class MemoryPipeline:
         #   D2: specific predicate/attribute already in state?
         #   D3: ANN catalog search required?
         #   D4: parametric LLM knowledge sufficient?
-        #   D5: candidate item set already known?
+        #   D5: candidate item set already known? 
         #
         # tier(q, C) = NO      if S >= 0.85  (parametrically sufficient)
         #            = PARTIAL  if S >= 0.70  (context sufficient, bounded lookup)
@@ -392,11 +392,12 @@ class MemoryPipeline:
             _ds_dict = {}
 
         _cse = get_cse()
-        _cse_result = _cse.evaluate(
+        _cse_result = await _cse.evaluate(
             label=label,
             message=message,
             dialogue_state=_ds_dict,
             history=history,
+            session_id=active_session_id,
             confidence=confidence,
         )
 
@@ -404,8 +405,9 @@ class MemoryPipeline:
         _prior_strategy = retrieval_strategy
         retrieval_strategy = _cse_result.tier
 
-        print(f"[CSE] sufficiency_score={_cse_result.sufficiency_score:.4f} "
-              f"tier={_cse_result.tier} override={_cse_result.override}")
+        print(f"[CSE] score={_cse_result.score:.4f} "
+              f"tier={_cse_result.tier} override={_cse_result.override} "
+              f"full_sub={_cse_result.full_subtype} partial_sub={_cse_result.partial_subtype}")
         if _cse_result.override:
             print(f"[CSE] *** STRATEGY OVERRIDE: "
                   f"{_prior_strategy} → {retrieval_strategy} ***")
@@ -447,6 +449,18 @@ class MemoryPipeline:
             entities=entities
         )
 
+        # ── Merge CSE excluded_ids into retrieval_input ────────────────────
+        # For INITIAL_REQUEST FULL_WITH_EXCLUSIONS: article_ids from similar
+        # prior questions in this session are added to exclude_ids so the
+        # retrieval engine does not repeat already-seen products.
+        if _cse_result.excluded_ids and enriched.get("retrieval_input"):
+            _existing_excl = enriched["retrieval_input"].get("exclude_ids") or []
+            enriched["retrieval_input"]["exclude_ids"] = list(
+                set(_existing_excl + _cse_result.excluded_ids)
+            )
+            print(f"[PIPELINE] Merged {len(_cse_result.excluded_ids)} "
+                  f"CSE excluded_ids into retrieval_input")
+
         # ── Return clean, standardised output ─────────────────────────────
         # No duplication — every key appears exactly once.
         # retrieval_input is the single thing your RAG system reads.
@@ -476,18 +490,20 @@ class MemoryPipeline:
             "side_effects": enriched.get("side_effects", []),
 
             # Context Sufficiency Evaluation result — scientific tier justification
-            # Dimensions: D1(referent) D2(predicate) D3(catalog) D4(parametric) D5(known)
+            # Dimensions: D_self D_items D_recency D_completeness
             "cse": {
-                "sufficiency_score": _cse_result.sufficiency_score,
-                "tier":              _cse_result.tier,
-                "prior_strategy":    _cse_result.prior_strategy,
-                "override":          _cse_result.override,
-                "d1_referent":       _cse_result.d1_referent,
-                "d2_predicate":      _cse_result.d2_predicate,
-                "d3_catalog_needed": _cse_result.d3_catalog_needed,
-                "d4_parametric":     _cse_result.d4_parametric,
-                "d5_item_set_known": _cse_result.d5_item_set_known,
-                "rationale":         _cse_result.rationale,
+                "score":               _cse_result.score,
+                "tier":                _cse_result.tier,
+                "prior_strategy":      _cse_result.prior_strategy,
+                "override":            _cse_result.override,
+                "full_subtype":        _cse_result.full_subtype,
+                "partial_subtype":     _cse_result.partial_subtype,
+                "excluded_ids":        _cse_result.excluded_ids,
+                "d_self_sufficient":   _cse_result.d_self_sufficient,
+                "d_items_available":   _cse_result.d_items_available,
+                "d_info_recency":      _cse_result.d_info_recency,
+                "d_info_completeness": _cse_result.d_info_completeness,
+                "rationale":           _cse_result.rationale,
             },
             "_debug_enriched": enriched,  # temp debug key
 
