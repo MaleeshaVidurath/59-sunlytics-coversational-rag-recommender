@@ -285,6 +285,72 @@ def _classify_feedback_sentiment(message: str) -> float:
     return 0.3
 
 
+# ── Price ceiling resolver for "cheaper than X" refinements ─────────────────
+# When the user says "cheaper" or "less expensive", the LLM entity extractor
+# guesses a price_max from general knowledge and gets it wrong.
+# This resolver reads the *actual price* of the named (or current) item from
+# context and sets price_max to strictly below that price.
+
+_CHEAPER_KEYWORDS = frozenset([
+    "cheaper", "less expensive", "more affordable", "lower price",
+    "cheaper than", "not as expensive", "cost less", "budget option",
+    "something cheaper", "a cheaper one",
+])
+
+
+def _resolve_cheaper_price(
+    message: str,
+    constraints: dict,
+    item_a,
+    item_b,
+) -> dict:
+    """
+    Override price_max when the user asks for something cheaper.
+    Reads the real price from context items instead of trusting the LLM guess.
+
+    Priority:
+      1. If a specific item name is mentioned → use that item's price
+      2. Otherwise → use the minimum price among context items
+    Sets price_max = reference_price - 0.01 (strictly cheaper).
+    """
+    msg_lower = message.lower()
+    if not any(kw in msg_lower for kw in _CHEAPER_KEYWORDS):
+        return constraints
+
+    # Collect (item, price) pairs that have a known price
+    items_with_price = []
+    for item in (item_a, item_b):
+        if item is None:
+            continue
+        price = getattr(item, "price", None)
+        if price is None and hasattr(item, "model_dump"):
+            price = item.model_dump().get("price")
+        if price:
+            items_with_price.append((item, float(price)))
+
+    if not items_with_price:
+        return constraints  # no known prices — keep LLM value
+
+    # Check whether a specific item is named in the message
+    msg_words = set(msg_lower.split())
+    reference_price = None
+    for item, price in items_with_price:
+        name_words = (item.prod_name or "").lower().split()
+        if any(w in msg_words for w in name_words if len(w) > 3):
+            reference_price = price
+            print(f"[ENRICH-REFINE] price_max override: '{item.prod_name}' "
+                  f"(£{price:.2f}) named in message")
+            break
+
+    if reference_price is None:
+        reference_price = min(price for _, price in items_with_price)
+        print(f"[ENRICH-REFINE] price_max override: using min context price £{reference_price:.2f}")
+
+    price_max = round(reference_price - 0.01, 2)
+    print(f"[ENRICH-REFINE] price_max: LLM={constraints.get('price_max')} → context-derived={price_max}")
+    return {**constraints, "price_max": price_max}
+
+
 # ── Item reference resolver ───────────────────────────────────────────────────
 
 def _resolve_item_reference(
@@ -568,11 +634,22 @@ class EnrichmentLayer:
 
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
 
+        # Extract items first so we can use their prices for constraint resolution
+        current_items = state.currently_discussing
+        item_a = current_items.get("item_a")
+        item_b = current_items.get("item_b")
+
         # New constraints from this message, merged on top of existing ones
         new_constraints = {
             k: v for k, v in entities.items()
             if k not in ("style", "occasion") and v is not None
         }
+
+        # Override LLM-guessed price_max when user says "cheaper [than X]"
+        new_constraints = _resolve_cheaper_price(
+            current_message, new_constraints, item_a, item_b
+        )
+
         merged_constraints = {**state.hard_constraints, **new_constraints}
 
         if new_constraints:
@@ -598,10 +675,6 @@ class EnrichmentLayer:
         memory_ctx = await self._base_memory_context(user_id, state)
         memory_ctx["previous_constraints"] = state.hard_constraints
         memory_ctx["new_changes"]          = new_constraints
-
-        current_items = state.currently_discussing
-        item_a = current_items.get("item_a")
-        item_b = current_items.get("item_b")
 
         return {
             "label":              "REFINEMENT",
@@ -728,42 +801,37 @@ class EnrichmentLayer:
         item_b = current_items.get("item_b")
 
         # ── Identify which specific item user is asking about ──────────────
-        target_item = item_a  # default: first item
+        # Resolution order (first match wins — no fallback overrides):
+        #   1. Explicit ordinal ref ("first", "option 1") → item_a
+        #   2. Explicit ordinal ref ("second", "option 2") → item_b
+        #   3. item_b name word match → item_b   (checked before item_a so
+        #      shared words like "short"/"shorts" don't cause item_a to win)
+        #   4. item_a name word match → item_a
+        #   5. Default → item_a
+        #
+        # Uses WORD-SET matching (msg split into words) so "short" does NOT
+        # match inside "shorts" the way a substring check would.
         msg_lower = current_message.lower()
+        msg_words = set(msg_lower.split())
 
-        # Check if user mentioned item_b by name or reference
-        if item_b:
-            item_b_name = (item_b.prod_name or "").lower()
-            # Direct name match — user typed part of item_b's name
-            if item_b_name and any(
-                word in msg_lower
-                for word in item_b_name.split()
-                if len(word) > 3  # skip short words like "the", "a"
-            ):
-                target_item = item_b
+        def _name_match(item) -> bool:
+            if not item:
+                return False
+            name = (item.prod_name or "").lower()
+            return any(w in msg_words for w in name.split() if len(w) > 3)
 
-            # Reference by position: "second", "option 2", "2nd"
-            elif any(ref in msg_lower for ref in [
-                "second", "option 2", "2nd", "number 2", "the other",
-                "latter", "last one", "#2"
-            ]):
-                target_item = item_b
-
-        # Check if user mentioned item_a by name explicitly
-        if item_a:
-            item_a_name = (item_a.prod_name or "").lower()
-            if item_a_name and any(
-                word in msg_lower
-                for word in item_a_name.split()
-                if len(word) > 3
-            ):
-                target_item = item_a
-
-        # Reference by position: "first", "option 1", "1st"
-        if any(ref in msg_lower for ref in [
-            "first", "option 1", "1st", "number 1", "#1"
-        ]):
+        if any(ref in msg_lower for ref in ["first", "option 1", "1st", "number 1", "#1"]):
             target_item = item_a
+        elif any(ref in msg_lower for ref in [
+            "second", "option 2", "2nd", "number 2", "the other", "latter", "last one", "#2"
+        ]):
+            target_item = item_b
+        elif _name_match(item_b):
+            target_item = item_b
+        elif _name_match(item_a):
+            target_item = item_a
+        else:
+            target_item = item_a  # default: first item
 
         # ── Fetch stored explanation for target item ───────────────────────
         existing_explanation = None

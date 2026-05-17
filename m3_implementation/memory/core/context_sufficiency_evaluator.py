@@ -1,7 +1,7 @@
 # m3_implementation/memory/core/context_sufficiency_evaluator.py
 #
 # ═══════════════════════════════════════════════════════════════════════════════
-# CONTEXT SUFFICIENCY EVALUATOR (CSE)
+# CONTEXT SUFFICIENCY EVALUATOR (CSE) — v2
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # Scientific basis:
@@ -10,422 +10,864 @@
 #   - Jeong et al. "Adaptive-RAG" (NAACL 2024)
 #   - Wang et al. "RAGate: Adaptive RAG for Conversational Systems" (NAACL 2025)
 #
-# Formal definition (from Joren et al.):
-#   Sufficient(q, C) = 1  iff the dialogue context C already contains
-#                         the evidence needed to answer query q.
+# Three-tier decision:
+#   tier = NO       — CHITCHAT / FEEDBACK       (pure dialogue, no retrieval)
+#   tier = FULL     — INITIAL_REQUEST / REFINEMENT  (catalog ANN search needed)
+#   tier = PARTIAL  — ATTRIBUTE_QUESTION / EXPLANATION_WHY / COMPARISON /
+#                     SELECTION_REFERENCE        (bounded DB lookup using context)
 #
-# Three-tier decision rule:
-#   tier(q, C) = NO      if Sufficient(q, ∅, parametric)    [CHITCHAT, FEEDBACK]
-#   tier(q, C) = PARTIAL if Sufficient(q, C_t) = 1           [referent in context]
-#   tier(q, C) = FULL    otherwise                            [catalog search needed]
+# Sub-level routing fields (stored alongside tier, do NOT change the tier label):
 #
-# The CSE evaluates this predicate by computing a SUFFICIENCY_SCORE ∈ [0, 1]
-# across five dimensions and applying thresholds to assign the tier.
-# This produces the scientific "numbers" justifying the tier assignment.
+#   full_subtype:
+#     "FULL_STANDARD"         — fresh ANN catalog search, no prior context
+#     "FULL_WITH_EXCLUSIONS"  — ANN search + exclude already-seen article_ids
+#       Used for:
+#         INITIAL_REQUEST → similar questions found in same session
+#         REFINEMENT      → prior constraints / discussing items exist
 #
-# Five dimensions of context sufficiency (based on Jannach et al. CRS survey
-# and MSDialog intent taxonomy):
+#   partial_subtype:
+#     "PARTIAL_RECENT"   — needed context found in last 3 exchanges (Redis hot)
+#     "PARTIAL_SESSION"  — needed context found earlier in session (MongoDB)
 #
-#   D1: REFERENT_PRESENT     — are the referenced items already in C_t?
-#   D2: PREDICATE_IN_CONTEXT — is the specific attribute/fact already in C_t?
-#   D3: CATALOG_NEEDED       — does answering require a new ANN catalog search?
-#   D4: PARAMETRIC_SUFFICIENT— can the LLM answer without any retrieval?
-#   D5: ITEM_SET_UNKNOWN     — is the candidate set completely unknown to session?
+# Score dimensions (0.0–1.0, used to compute the sufficiency score):
+#   D_SELF         : LLM can answer from parametric knowledge alone
+#   D_ITEMS        : relevant items found in session context
+#   D_RECENCY      : how recent the available context is
+#   D_COMPLETENESS : how complete the available information is
 #
-# The SUFFICIENCY_SCORE is:
-#   S = w1·D1 + w2·D2 + w3·(1-D3) + w4·D4 + w5·(1-D5)
-#   (higher = more context-sufficient = lower retrieval tier)
+# Score formula (for PARTIAL labels only):
+#   S = 0.40·D_ITEMS + 0.35·D_RECENCY + 0.25·D_COMPLETENESS
 #
+# For CHITCHAT/FEEDBACK and INITIAL_REQUEST/REFINEMENT the tier is forced
+# — score is still computed for transparency but does not drive the decision.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 from __future__ import annotations
 import os
 import sys
+import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
+# ── Similarity threshold for duplicate question detection ──────────────────────
+# Two INITIAL_REQUEST messages with cosine similarity >= this are considered
+# semantically equivalent — recommendations from the prior one are excluded.
+_SIMILAR_QUESTION_THRESHOLD = 0.75
 
-# ── Weights for the sufficiency score ─────────────────────────────────────────
-# Based on Joren et al.'s ablation showing referent presence is the strongest
-# predictor of context sufficiency in retrieval-augmented dialogue.
-_W1_REFERENT    = 0.35   # referent (items) in context — most important
-_W2_PREDICATE   = 0.20   # predicate/attribute already in dialogue state
-_W3_NO_CATALOG  = 0.20   # no new ANN search needed
-_W4_PARAMETRIC  = 0.15   # LLM can answer from common knowledge alone
-_W5_KNOWN_SET   = 0.10   # candidate set is known from previous turn
 
-# ── Thresholds ─────────────────────────────────────────────────────────────────
-# Derived from RAGate calibration studies:
-# S >= 0.70 → PARTIAL (context sufficient, bounded lookup only)
-# S >= 0.85 → NO      (parametrically sufficient, no retrieval at all)
-# S <  0.70 → FULL    (catalog search required)
-_PARTIAL_THRESHOLD = 0.70
-_NO_THRESHOLD      = 0.85
+def _cosine(a, b) -> float:
+    a, b = np.array(a, dtype=float), np.array(b, dtype=float)
+    d = np.linalg.norm(a) * np.linalg.norm(b)
+    return float(np.dot(a, b) / d) if d > 0 else 0.0
+
+
+def _get_embed_model():
+    """Reuses the all-MiniLM-L6-v2 singleton from entity_extractor (avoids loading twice)."""
+    try:
+        from memory.core.entity_extractor import _get_model
+        return _get_model()
+    except Exception:
+        return None
 
 
 @dataclass
 class SufficiencyResult:
     """
-    The output of the Context Sufficiency Evaluator.
+    Output of the Context Sufficiency Evaluator.
 
-    Attributes:
-        tier              : final retrieval tier — FULL / PARTIAL / NO
-        sufficiency_score : aggregate score 0.0-1.0 (higher = more sufficient)
-        d1_referent       : D1 — items referenced by user are in context
-        d2_predicate      : D2 — specific attribute/fact already in state
-        d3_catalog_needed : D3 — ANN catalog search is required
-        d4_parametric     : D4 — LLM can answer without retrieval
-        d5_item_set_known : D5 — candidate set known from prior turn
-        label             : DistilBERT label that triggered the evaluation
-        override          : whether the CSE changed the DistilBERT strategy
-        prior_strategy    : what DistilBERT originally assigned
-        rationale         : human-readable explanation of the decision
+    Core fields:
+        tier              : retrieval tier — FULL | PARTIAL | NO
+        score             : sufficiency score 0.0–1.0
+        label             : DistilBERT label for this turn
+        prior_strategy    : original DistilBERT default strategy
+        override          : whether CSE changed the strategy
+        rationale         : human-readable scientific explanation
+
+    Sub-level routing fields (do NOT change the main tier):
+        full_subtype      : "FULL_STANDARD" | "FULL_WITH_EXCLUSIONS"
+        partial_subtype   : "PARTIAL_RECENT" | "PARTIAL_SESSION"
+        excluded_ids      : article_ids to exclude (from similar prior questions)
+
+    Dimension scores (transparency / explainability):
+        d_self_sufficient : parametric LLM knowledge sufficient
+        d_items_available : relevant items found in session context
+        d_info_recency    : recency of available context (1.0 = very recent)
+        d_info_completeness: completeness of available information
     """
-    tier:              str
-    sufficiency_score: float
-    d1_referent:       float
-    d2_predicate:      float
-    d3_catalog_needed: float
-    d4_parametric:     float
-    d5_item_set_known: float
-    label:             str
-    override:          bool
-    prior_strategy:    str
-    rationale:         str = ""
+    tier:               str
+    score:              float
+    label:              str
+    prior_strategy:     str
+    override:           bool
+    rationale:          str = ""
+
+    full_subtype:         Optional[str] = None
+    partial_subtype:      Optional[str] = None
+    excluded_ids:         list = field(default_factory=list)
+
+    d_self_sufficient:    float = 0.0
+    d_items_available:    float = 0.0
+    d_info_recency:       float = 0.0
+    d_info_completeness:  float = 0.0
 
 
 class ContextSufficiencyEvaluator:
     """
-    Evaluates Sufficient(q, C) for a given user turn and dialogue context.
+    Evaluates Sufficient(q, C) for each user turn.
 
-    This is the scientific component that justifies FULL/PARTIAL/NO tier
-    assignment. Rather than relying on a hardcoded label→tier mapping,
-    the CSE computes a measurable SUFFICIENCY_SCORE across 5 dimensions
-    and applies calibrated thresholds.
+    Connects to Redis (hot session cache, last 10 turns) and MongoDB
+    (full session history) to measure how much relevant context already
+    exists, then assigns the appropriate retrieval tier and sub-level.
 
-    Grounded in:
-    - Joren et al. ICLR 2025 — Sufficient Context predicate
-    - Jeong et al. NAACL 2024 — Adaptive-RAG 3-tier policy
-    - Wang et al. NAACL 2025 — RAGate per-turn retrieval gate
-    - MSDialog intent taxonomy — retrieval vs non-retrieval dialogue acts
+    The evaluate() method is async because it queries Redis and MongoDB.
+
+    Usage:
+        cse = get_cse()
+        result = await cse.evaluate(
+            label="ATTRIBUTE_QUESTION",
+            message="What material is it?",
+            dialogue_state=state_dict,
+            history=history_list,
+            session_id="sess_abc123",
+        )
+        # result.tier          → "PARTIAL"
+        # result.partial_subtype → "PARTIAL_RECENT"
+        # result.score         → 0.75
     """
 
-    def evaluate(
-        self,
-        label:             str,
-        message:           str,
-        dialogue_state:    dict,
-        history:           list[dict],
-        confidence:        float = 0.0,
-    ) -> SufficiencyResult:
-        """
-        Evaluate context sufficiency and assign retrieval tier.
-
-        Args:
-            label          : DistilBERT label for this turn
-            message        : user's current message
-            dialogue_state : current session dialogue state (hard_constraints,
-                             currently_discussing, preference_profile etc.)
-            history        : recent turn history (role + content dicts)
-            confidence     : DistilBERT confidence score
-
-        Returns:
-            SufficiencyResult with tier, score, and per-dimension breakdown
-        """
-        prior_strategy = self._label_to_default_strategy(label)
-
-        # ── Compute 5 dimensions ───────────────────────────────────────────
-        d1 = self._d1_referent_present(label, dialogue_state, history)
-        d2 = self._d2_predicate_in_context(label, message, dialogue_state)
-        d3 = self._d3_catalog_needed(label, dialogue_state)
-        d4 = self._d4_parametric_sufficient(label, history)
-        d5 = self._d5_item_set_known(dialogue_state, history)
-
-        # ── Compute aggregate sufficiency score ───────────────────────────
-        score = (
-            _W1_REFERENT   * d1 +
-            _W2_PREDICATE  * d2 +
-            _W3_NO_CATALOG * (1.0 - d3) +
-            _W4_PARAMETRIC * d4 +
-            _W5_KNOWN_SET  * d5
-        )
-        score = round(min(1.0, max(0.0, score)), 4)
-
-        # ── Apply threshold to assign tier ────────────────────────────────
-        if score >= _NO_THRESHOLD:
-            tier = "NO"
-        elif score >= _PARTIAL_THRESHOLD:
-            tier = "PARTIAL"
-        else:
-            tier = "FULL"
-
-        # ── Enforce minimum PARTIAL for labels that need item data ────────
-        # NO retrieval is only valid for CHITCHAT and FEEDBACK — pure dialogue
-        # turns that need no product information at all.
-        # SELECTION_REFERENCE / ATTRIBUTE_QUESTION / EXPLANATION_WHY / COMPARISON
-        # always require at least a bounded DB lookup even when the item is
-        # already identified in session context (we still need the full description,
-        # material, price etc. which are not stored in Redis/MongoDB session state).
-        _NEEDS_MIN_PARTIAL = {
-            "SELECTION_REFERENCE", "ATTRIBUTE_QUESTION",
-            "EXPLANATION_WHY",     "COMPARISON",
-        }
-        if label in _NEEDS_MIN_PARTIAL and tier == "NO":
-            tier = "PARTIAL"
-            print(f"[CSE] MIN-TIER enforced: NO → PARTIAL "
-                  f"(label={label} always needs item lookup)")
-
-        override = (tier != prior_strategy)
-        rationale = self._build_rationale(
-            label, tier, prior_strategy, score, d1, d2, d3, d4, d5
-        )
-
-        print(f"[CSE] ━━━ Context Sufficiency Evaluation ━━━")
-        print(f"[CSE] label={label} prior_strategy={prior_strategy}")
-        print(f"[CSE] D1_referent={d1:.2f} D2_predicate={d2:.2f} "
-              f"D3_catalog={d3:.2f} D4_param={d4:.2f} D5_known={d5:.2f}")
-        print(f"[CSE] sufficiency_score={score:.4f} "
-              f"(PARTIAL≥{_PARTIAL_THRESHOLD} NO≥{_NO_THRESHOLD})")
-        print(f"[CSE] → tier={tier} override={override}")
-        if override:
-            print(f"[CSE] OVERRIDE: {prior_strategy} → {tier} "
-                  f"(score={score:.4f})")
-        print(f"[CSE] rationale: {rationale}")
-
-        return SufficiencyResult(
-            tier=tier,
-            sufficiency_score=score,
-            d1_referent=d1,
-            d2_predicate=d2,
-            d3_catalog_needed=d3,
-            d4_parametric=d4,
-            d5_item_set_known=d5,
-            label=label,
-            override=override,
-            prior_strategy=prior_strategy,
-            rationale=rationale,
-        )
-
-    # ── Dimension evaluators ───────────────────────────────────────────────────
-
-    def _d1_referent_present(
-        self,
-        label:          str,
-        dialogue_state: dict,
-        history:        list[dict],
-    ) -> float:
-        """
-        D1: Are items referenced by the user already present in the dialogue
-        context? A score of 1.0 means the referent is unambiguously in C_t.
-
-        Scientific basis: Joren et al. ICLR 2025 — "sufficient context"
-        requires the referent entity to be established in context.
-        Self-multi-RAG Roy et al. 2024 — follow-up questions referring to
-        previously retrieved items do not need fresh retrieval.
-        """
-        # CHITCHAT/FEEDBACK never reference catalog items
-        if label in ("CHITCHAT", "FEEDBACK"):
-            return 1.0  # trivially sufficient — no referent needed
-
-        # For query labels (ATTRIBUTE_QUESTION, EXPLANATION_WHY, COMPARISON,
-        # SELECTION_REFERENCE), check if items are in context
-        if label in ("ATTRIBUTE_QUESTION", "EXPLANATION_WHY",
-                     "COMPARISON", "SELECTION_REFERENCE"):
-            discussing = dialogue_state.get("currently_discussing", {})
-            item_a = discussing.get("item_a")
-            item_b = discussing.get("item_b")
-            if item_a or item_b:
-                return 1.0   # referent is fully established
-            # Fallback: check if recent bot turn mentioned items
-            for turn in reversed(history[-4:]):
-                if turn.get("role") == "bot":
-                    content = turn.get("content", "").lower()
-                    if any(kw in content for kw in
-                           ["option 1", "option 2", "£", "found", "here are"]):
-                        return 0.8   # likely referent in recent history
-            return 0.2   # no referent found — borderline
-
-        # For INITIAL_REQUEST and REFINEMENT, the candidate set is NOT yet
-        # established (INITIAL) or may need full re-ranking (REFINEMENT)
-        if label == "INITIAL_REQUEST":
-            return 0.0   # candidate set is completely unknown
-
-        if label == "REFINEMENT":
-            # Refinement re-uses prior constraints but re-ranks the catalog
-            hard = dialogue_state.get("hard_constraints", {})
-            if hard:
-                return 0.3   # some constraints known, but new search needed
-            return 0.1
-
-        return 0.5
-
-    def _d2_predicate_in_context(
+    async def evaluate(
         self,
         label:          str,
         message:        str,
         dialogue_state: dict,
-    ) -> float:
+        history:        list[dict],
+        session_id:     str,
+        confidence:     float = 0.0,
+    ) -> SufficiencyResult:
         """
-        D2: Is the specific predicate (attribute, fact) being asked about
-        already present in the dialogue state?
+        Assign retrieval tier and sub-level for a single user turn.
 
-        E.g., if user asks "what colour is it?" and colour is already stored
-        in the session state for item_a, D2 = 1.0 (no lookup needed).
+        Args:
+            label          : DistilBERT label for this turn
+            message        : user's current message text
+            dialogue_state : current session DialogueState as a plain dict
+                             (from get_dialogue_state().model_dump())
+            history        : last 3 exchanges from Redis
+                             format: [{"role": "user"/"bot", "content": "..."}]
+            session_id     : active session ID
+            confidence     : DistilBERT confidence score
+
+        Returns:
+            SufficiencyResult — tier + sub-level + score + dimensions
         """
+        prior_strategy = self._label_to_default_strategy(label)
+
+        # ── Route to the correct evaluator based on label group ────────────
+
         if label in ("CHITCHAT", "FEEDBACK"):
-            return 1.0
+            result = self._eval_dialogue(label, prior_strategy)
 
-        if label == "ATTRIBUTE_QUESTION":
-            msg_lower = message.lower()
-            # Check if attribute being asked about is already in dialogue state
-            discussing = dialogue_state.get("currently_discussing", {})
-            for slot in ["item_a", "item_b"]:
-                item = discussing.get(slot, {})
-                if not item:
-                    continue
-                # Price already known
-                if any(w in msg_lower for w in ["price", "cost", "how much", "£"]):
-                    if item.get("price"):
-                        return 0.9
-                # Colour already known
-                if any(w in msg_lower for w in ["colour", "color"]):
-                    if item.get("colour_group_name"):
-                        return 0.9
-                # Type already known
-                if any(w in msg_lower for w in ["type", "kind", "category"]):
-                    if item.get("product_type_name"):
-                        return 0.9
-                # Material not usually in session state — needs DB lookup
-                if any(w in msg_lower for w in
-                       ["material", "fabric", "made of", "made from"]):
-                    return 0.3   # needs external attribute lookup
-            return 0.5
+        elif label == "INITIAL_REQUEST":
+            result = await self._eval_initial_request(
+                message, session_id, prior_strategy
+            )
 
-        if label in ("EXPLANATION_WHY", "COMPARISON"):
-            # Preferences are in session state (sufficient to explain why)
-            prefs = dialogue_state.get("preference_profile", {})
-            if prefs:
-                return 0.8   # explanation can be derived from known prefs
-            return 0.5
+        elif label == "REFINEMENT":
+            result = await self._eval_refinement(
+                dialogue_state, history, session_id, prior_strategy
+            )
 
-        if label == "SELECTION_REFERENCE":
-            # User refers to "the first one", "option 2" — fully in state
-            return 1.0
+        else:
+            # ATTRIBUTE_QUESTION / EXPLANATION_WHY / COMPARISON / SELECTION_REFERENCE
+            result = await self._eval_item_reference(
+                label, message, dialogue_state, history, session_id, prior_strategy
+            )
 
-        # INITIAL_REQUEST / REFINEMENT — predicate is the search query itself
-        return 0.0
+        # ── Debug logging ─────────────────────────────────────────────────
+        print(f"[CSE] ━━━ Context Sufficiency Evaluation ━━━")
+        print(f"[CSE] label={label}  prior_strategy={prior_strategy}")
+        print(f"[CSE] score={result.score:.4f}  tier={result.tier}  "
+              f"full_sub={result.full_subtype}  partial_sub={result.partial_subtype}")
+        print(f"[CSE] D: self={result.d_self_sufficient:.2f}  "
+              f"items={result.d_items_available:.2f}  "
+              f"recency={result.d_info_recency:.2f}  "
+              f"completeness={result.d_info_completeness:.2f}")
+        if result.excluded_ids:
+            print(f"[CSE] excluded_ids ({len(result.excluded_ids)}): "
+                  f"{result.excluded_ids[:5]}"
+                  f"{'...' if len(result.excluded_ids) > 5 else ''}")
+        if result.override:
+            print(f"[CSE] OVERRIDE: {prior_strategy} → {result.tier}")
+        print(f"[CSE] rationale: {result.rationale}")
 
-    def _d3_catalog_needed(
+        return result
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Label-group evaluators
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _eval_dialogue(self, label: str, prior_strategy: str) -> SufficiencyResult:
+        """
+        CHITCHAT / FEEDBACK — pure dialogue management, no retrieval needed.
+        LLM answers entirely from parametric knowledge (greeting, acknowledge,
+        sentiment reaction). I(A;K|q,C) ≈ 0 — catalog adds nothing.
+        """
+        score = 0.95 if label == "CHITCHAT" else 0.90
+        print(f"[CSE-DIALOGUE] label={label}  score={score}  → tier=NO  (no retrieval needed)")
+        return SufficiencyResult(
+            tier="NO",
+            score=score,
+            label=label,
+            prior_strategy=prior_strategy,
+            override=(prior_strategy != "NO"),
+            full_subtype=None,
+            partial_subtype=None,
+            excluded_ids=[],
+            d_self_sufficient=1.0,
+            d_items_available=1.0,
+            d_info_recency=1.0,
+            d_info_completeness=1.0,
+            rationale=(
+                f"{label} → NO retrieval. S={score:.3f}. "
+                f"Pure dialogue turn — LLM answers from parametric knowledge. "
+                f"I(A;K|q,C)≈0: catalog adds no information. "
+                f"[Joren2025: Sufficient(q,∅,param)=1]"
+            ),
+        )
+
+    async def _eval_initial_request(
         self,
-        label:          str,
-        dialogue_state: dict,
-    ) -> float:
+        message:        str,
+        session_id:     str,
+        prior_strategy: str,
+    ) -> SufficiencyResult:
         """
-        D3: Does answering this turn require a new ANN search over the catalog?
-        Score of 1.0 means catalog search is definitely needed.
+        INITIAL_REQUEST — always FULL retrieval (candidate set unknown).
 
-        Scientific basis: Adaptive-RAG Jeong et al. 2024 — "no-retrieval"
-        and "single-step" vs "multi-step" are distinguished by whether
-        external knowledge retrieval is required.
+        Additionally checks whether the same or very similar question was
+        asked earlier in this session. If found, the article_ids from the
+        prior recommendation are loaded from MongoDB's recommendations
+        collection and returned as excluded_ids so the retrieval engine
+        does not repeat the same products.
+
+        Sub-level:
+          FULL_WITH_EXCLUSIONS — similar prior question found, exclude IDs
+          FULL_STANDARD        — fresh question, no exclusions
         """
-        # Pure dialogue management — no catalog needed
-        if label in ("CHITCHAT", "FEEDBACK"):
-            return 0.0
+        print(f"[CSE-INIT] checking similar prior questions in session={session_id}")
+        excluded_ids = await self._find_similar_question_exclusions(
+            current_message=message,
+            session_id=session_id,
+        )
+        full_subtype = "FULL_WITH_EXCLUSIONS" if excluded_ids else "FULL_STANDARD"
+        print(f"[CSE-INIT] full_subtype={full_subtype}  excluded_ids_count={len(excluded_ids)}")
 
-        # Direct item lookup by known ID — NOT a catalog search
-        if label in ("SELECTION_REFERENCE",):
-            return 0.1
+        return SufficiencyResult(
+            tier="FULL",
+            score=0.10,
+            label="INITIAL_REQUEST",
+            prior_strategy=prior_strategy,
+            override=(prior_strategy != "FULL"),
+            full_subtype=full_subtype,
+            partial_subtype=None,
+            excluded_ids=excluded_ids,
+            d_self_sufficient=0.0,
+            d_items_available=0.0,
+            d_info_recency=0.0,
+            d_info_completeness=0.0,
+            rationale=(
+                f"INITIAL_REQUEST → {full_subtype}. S=0.10. "
+                f"Candidate set entirely unknown — ANN catalog search required. "
+                + (f"Excluded {len(excluded_ids)} article(s) from similar prior question(s). "
+                   if excluded_ids else "")
+                + f"[Jeong2024: multi-step retrieval; Joren2025: Sufficient(q,C_t)=0]"
+            ),
+        )
 
-        # Attribute/explanation/comparison — known item, NOT a catalog search
-        if label in ("ATTRIBUTE_QUESTION", "EXPLANATION_WHY", "COMPARISON"):
-            discussing = dialogue_state.get("currently_discussing", {})
-            if discussing.get("item_a") or discussing.get("item_b"):
-                return 0.2   # only need DB lookup by ID, not ANN search
-
-        # Refinement — needs re-ranking even if constraints are known
-        if label == "REFINEMENT":
-            return 0.8
-
-        # Initial request — definitely needs full ANN catalog search
-        if label == "INITIAL_REQUEST":
-            return 1.0
-
-        return 0.5
-
-    def _d4_parametric_sufficient(
-        self,
-        label:   str,
-        history: list[dict],
-    ) -> float:
-        """
-        D4: Can the LLM answer from parametric knowledge alone (no retrieval)?
-
-        Scientific basis: Mallen et al. ACL 2023 "When Not to Trust LMs" —
-        parametric knowledge is sufficient for common-sense, social, or
-        dialogue-management responses. SKR Wang et al. 2023 operationalises
-        this as a self-knowledge classifier.
-        """
-        if label == "CHITCHAT":
-            return 1.0   # greetings, social responses — LLM handles fine
-
-        if label == "FEEDBACK":
-            return 0.95  # acknowledgements — LLM handles, just needs sentiment
-
-        if label in ("COMPARISON", "EXPLANATION_WHY"):
-            # Reasoning over already-known facts — LLM can do this if
-            # facts are in context; borderline
-            if history:
-                return 0.6
-            return 0.3
-
-        if label in ("ATTRIBUTE_QUESTION", "SELECTION_REFERENCE"):
-            # Material, specific product details — NOT in LLM training data
-            # for specific H&M catalog items
-            return 0.2
-
-        # INITIAL_REQUEST, REFINEMENT — catalog-specific, LLM cannot answer
-        return 0.0
-
-    def _d5_item_set_known(
+    async def _eval_refinement(
         self,
         dialogue_state: dict,
         history:        list[dict],
-    ) -> float:
+        session_id:     str,
+        prior_strategy: str,
+    ) -> SufficiencyResult:
         """
-        D5: Is the candidate item set already known from a previous turn?
-        Score of 1.0 means items are in context and the session remembers them.
+        REFINEMENT — always FULL retrieval, but with existing context.
 
-        Scientific basis: Self-multi-RAG Roy et al. 2024 — "follow-up questions
-        referring to responses in previous turns based on passages already
-        retrieved … it is not necessary to retrieve new passages."
+        The user is modifying their search (different colour, lower price etc.)
+        so the catalog must be re-queried. All article_ids ever recommended
+        in this session are excluded so the user always sees fresh results.
+        """
+        has_constraints = bool(dialogue_state.get("hard_constraints", {}))
+        item_a, item_b = self._discussing_items(dialogue_state)
+        has_items = bool(item_a or item_b)
+
+        print(f"[CSE-REFINE] has_constraints={has_constraints}  has_items={has_items}  "
+              f"hard_constraints={dialogue_state.get('hard_constraints', {})}")
+        print(f"[CSE-REFINE] currently_discussing: "
+              f"item_a='{item_a.get('prod_name', '—')}' (article_id={item_a.get('article_id', '—')})  "
+              f"item_b='{item_b.get('prod_name', '—')}' (article_id={item_b.get('article_id', '—')})")
+
+        # Exclude every article_id recommended so far in this session so the
+        # user never sees the same product again when they refine their search.
+        excluded_ids = await self._all_session_article_ids(session_id)
+        print(f"[CSE-REFINE] excluded_ids (all session recommendations): {excluded_ids}")
+
+        score = round(
+            0.10
+            + (0.08 if has_constraints else 0.0)
+            + (0.07 if has_items else 0.0),
+            4,
+        )
+        full_subtype = (
+            "FULL_WITH_EXCLUSIONS" if (has_items or has_constraints)
+            else "FULL_STANDARD"
+        )
+        print(f"[CSE-REFINE] full_subtype={full_subtype}  score={score}  → tier=FULL")
+
+        excl_note = f"Excluded {len(excluded_ids)} article(s) from full session history. " if excluded_ids else ""
+        return SufficiencyResult(
+            tier="FULL",
+            score=score,
+            label="REFINEMENT",
+            prior_strategy=prior_strategy,
+            override=(prior_strategy != "FULL"),
+            full_subtype=full_subtype,
+            partial_subtype=None,
+            excluded_ids=excluded_ids,
+            d_self_sufficient=0.0,
+            d_items_available=0.3 if has_items else 0.0,
+            d_info_recency=0.5 if history else 0.0,
+            d_info_completeness=0.4 if has_constraints else 0.0,
+            rationale=(
+                f"REFINEMENT → {full_subtype}. S={score:.3f}. "
+                f"Constraints={'yes' if has_constraints else 'no'}  "
+                f"items={'yes' if has_items else 'no'}. "
+                f"{excl_note}"
+                "Catalog re-search required with updated filters. "
+                "[Joren2025: Sufficient(q,C_t)=0 — new ANN search needed]"
+            ),
+        )
+
+    @staticmethod
+    def _discussing_items(dialogue_state: dict) -> tuple[dict, dict]:
+        """Returns (item_a, item_b) from currently_discussing as plain dicts."""
+        discussing = dialogue_state.get("currently_discussing", {})
+        item_a = discussing.get("item_a") or {}
+        item_b = discussing.get("item_b") or {}
+        if hasattr(item_a, "model_dump"):
+            item_a = item_a.model_dump()
+        if hasattr(item_b, "model_dump"):
+            item_b = item_b.model_dump()
+        return item_a, item_b
+
+    @staticmethod
+    def _article_ids_from_items(*items: dict) -> list[str]:
+        """Collects unique non-empty article_id strings from the given item dicts."""
+        ids: list[str] = []
+        for item in items:
+            aid = str(item.get("article_id", "")).strip()
+            if aid and aid not in ids:
+                ids.append(aid)
+        return ids
+
+    async def _eval_item_reference(
+        self,
+        label:          str,
+        message:        str,
+        dialogue_state: dict,
+        history:        list[dict],
+        session_id:     str,
+        prior_strategy: str,
+    ) -> SufficiencyResult:
+        """
+        ATTRIBUTE_QUESTION / EXPLANATION_WHY / COMPARISON / SELECTION_REFERENCE
+
+        These labels reference items that were already recommended. The tier
+        depends on whether the relevant items exist in session memory and how
+        recent they are.
+
+        Decision tree:
+          1. Items in dialogue_state.currently_discussing?
+             ├─ Yes → are they in the last 3 exchanges (history)?
+             │        ├─ Yes → PARTIAL_RECENT   (score ~0.70–0.79)
+             │        └─ No  → PARTIAL_SESSION  (score ~0.44–0.79)
+             └─ No  → any recommendations in full session (MongoDB)?
+                      ├─ Yes → PARTIAL_SESSION  (score ~0.40–0.55)
+                      └─ No  → FULL_STANDARD    (score  0.20)
         """
         discussing = dialogue_state.get("currently_discussing", {})
         item_a = discussing.get("item_a")
         item_b = discussing.get("item_b")
+        print(f"[CSE-ITEMREF] label={label}  msg='{message[:60]}'")
+        print(f"[CSE-ITEMREF] dialogue_state.currently_discussing: "
+              f"item_a={bool(item_a)} ('{(item_a or {}).get('prod_name', '—')}')  "
+              f"item_b={bool(item_b)} ('{(item_b or {}).get('prod_name', '—')}')")
 
-        if item_a and item_b:
-            return 1.0   # both items known
-        if item_a or item_b:
-            return 0.7   # one item known
+        # COMPARISON specifically requires both items
+        needs_both = (label == "COMPARISON")
+        has_sufficient = (bool(item_a) and bool(item_b)) if needs_both else bool(item_a or item_b)
+        print(f"[CSE-ITEMREF] needs_both={needs_both}  has_sufficient={has_sufficient}")
 
-        # Check history for recent recommendations
-        for turn in reversed(history[-6:]):
-            if turn.get("role") == "bot":
-                content = turn.get("content", "").lower()
-                if "option 1" in content or "option 2" in content:
-                    return 0.8
-                if "£" in content and ("dress" in content or "top" in content
-                                       or "shirt" in content):
-                    return 0.6
+        if not has_sufficient:
+            # ── Fallback: check full session history in MongoDB ────────────
+            print(f"[CSE-ITEMREF] no items in dialogue_state → querying MongoDB fallback (session={session_id})")
+            session_items = await self._find_items_in_full_session(session_id)
+            print(f"[CSE-ITEMREF] MongoDB fallback: found {len(session_items)} item(s) in session history")
+            if session_items:
+                d_items = 0.60
+                d_recency = 0.25
+                d_completeness = self._info_completeness(label, message, dialogue_state)
+                print(f"[CSE-ITEMREF] MongoDB path → d_items={d_items}  d_recency={d_recency}  "
+                      f"d_completeness={d_completeness:.2f}  → PARTIAL_SESSION")
+                score = round(
+                    0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness,
+                    4,
+                )
+                score = max(score, 0.40)  # always PARTIAL for this path
+                return SufficiencyResult(
+                    tier="PARTIAL",
+                    score=score,
+                    label=label,
+                    prior_strategy=prior_strategy,
+                    override=(prior_strategy != "PARTIAL"),
+                    full_subtype=None,
+                    partial_subtype="PARTIAL_SESSION",
+                    excluded_ids=[],
+                    d_self_sufficient=0.0,
+                    d_items_available=d_items,
+                    d_info_recency=d_recency,
+                    d_info_completeness=d_completeness,
+                    rationale=(
+                        f"{label} → PARTIAL_SESSION. S={score:.3f}. "
+                        f"Items not in current dialogue state but found in "
+                        f"session history (MongoDB). Bounded lookup sufficient. "
+                        f"[Roy2024: follow-up on previously retrieved items]"
+                    ),
+                )
+            else:
+                # No items anywhere in session — must do a fresh catalog search
+                print("[CSE-ITEMREF] no items anywhere in session → escalating to FULL retrieval")
+                return SufficiencyResult(
+                    tier="FULL",
+                    score=0.20,
+                    label=label,
+                    prior_strategy=prior_strategy,
+                    override=(prior_strategy != "FULL"),
+                    full_subtype="FULL_STANDARD",
+                    partial_subtype=None,
+                    excluded_ids=[],
+                    d_self_sufficient=0.0,
+                    d_items_available=0.0,
+                    d_info_recency=0.0,
+                    d_info_completeness=0.0,
+                    rationale=(
+                        f"{label} → FULL (no items in session). S=0.20. "
+                        f"No recommendations found in this session — "
+                        f"catalog search required before referencing items. "
+                        f"[Jeong2024: retrieval required]"
+                    ),
+                )
 
-        return 0.0   # no item set in session
+        # ── Resolve which specific item the user is asking about ──────────
+        # Do this BEFORE checking completeness so we inspect the RIGHT item's
+        # fields. "what material is option 2?" must check item_b, not item_a.
+        target_item = self._resolve_target_item(message, item_a, item_b)
+        target_name = (
+            (target_item.get("prod_name") if isinstance(target_item, dict)
+             else getattr(target_item, "prod_name", None)) or "unknown"
+        )
+        print(f"[CSE] resolved target item: '{target_name}' "
+              f"(from label={label} msg='{message[:50]}')")
 
-    # ── Helpers ────────────────────────────────────────────────────────────────
+        # ── Items are in dialogue_state — check recency ────────────────────
+        d_items = 1.0
+        d_completeness = self._info_completeness(
+            label, message, dialogue_state, target_item=target_item
+        )
+        items_recent = self._items_in_recent_history(history, target_item, None)
+
+        if items_recent:
+            d_recency = 1.0
+            partial_subtype = "PARTIAL_RECENT"
+        else:
+            d_recency = 0.40
+            partial_subtype = "PARTIAL_SESSION"
+
+        score = round(
+            0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness,
+            4,
+        )
+        # These labels are NEVER NO retrieval — cap score below NO threshold
+        score = min(score, 0.79)
+
+        return SufficiencyResult(
+            tier="PARTIAL",
+            score=score,
+            label=label,
+            prior_strategy=prior_strategy,
+            override=(prior_strategy != "PARTIAL"),
+            full_subtype=None,
+            partial_subtype=partial_subtype,
+            excluded_ids=[],
+            d_self_sufficient=0.0,
+            d_items_available=d_items,
+            d_info_recency=d_recency,
+            d_info_completeness=d_completeness,
+            rationale=(
+                f"{label} → {partial_subtype}. S={score:.3f}. "
+                f"Target item: '{target_name}'. "
+                f"Context {'from last 3 exchanges (Redis)' if items_recent else 'from earlier in session (MongoDB)'}. "
+                f"D_items={d_items:.2f} D_recency={d_recency:.2f} D_completeness={d_completeness:.2f}. "
+                f"I(A;C_t) ≫ I(A;K\\C_t): bounded DB lookup sufficient. "
+                f"[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
+            ),
+        )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Memory helpers
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _find_similar_question_exclusions(
+        self,
+        current_message: str,
+        session_id:      str,
+    ) -> list:
+        """
+        For INITIAL_REQUEST: scan all prior INITIAL_REQUEST turns in this session.
+        Any turn whose message has cosine similarity >= 0.75 with the current
+        message is considered a duplicate question. The article_ids from the
+        bot response that followed that turn are returned as excluded_ids so
+        the retrieval engine does not recommend the same items again.
+
+        Flow:
+          1. Load full session turns from MongoDB (beyond Redis 10-turn buffer)
+          2. Embed current message + all prior INITIAL_REQUEST messages
+          3. Compare cosine similarity — threshold 0.75
+          4. For matching turns: load recommendation from db.recommendations
+             using the bot turn's recommendation_id
+          5. Return list of article_ids to exclude
+        """
+        from memory.db.mongo import get_db
+        db = get_db()
+
+        sess_doc = await db.sessions.find_one(
+            {"session_id": session_id},
+            {"turns": 1},
+        )
+        if not sess_doc:
+            return []
+
+        all_turns = sess_doc.get("turns", [])
+
+        # Collect prior INITIAL_REQUEST user turns with non-empty content
+        prior_turns = [
+            t for t in all_turns
+            if t.get("role") == "user"
+            and t.get("classification", {}).get("label") == "INITIAL_REQUEST"
+            and t.get("content", "").strip()
+        ]
+        if not prior_turns:
+            return []
+
+        model = _get_embed_model()
+        if model is None:
+            return []
+
+        messages = [t["content"] for t in prior_turns]
+        try:
+            all_embs = model.encode([current_message] + messages)
+        except Exception as e:
+            print(f"[CSE] Embedding error in similar-question check: {e}")
+            return []
+
+        current_emb = all_embs[0]
+        similar_turn_numbers = []
+        for i, t in enumerate(prior_turns):
+            sim = _cosine(current_emb, all_embs[i + 1])
+            if sim >= _SIMILAR_QUESTION_THRESHOLD:
+                print(f"[CSE] Similar question (sim={sim:.3f}): "
+                      f"'{t['content'][:60]}'")
+                similar_turn_numbers.append(t.get("turn_number"))
+
+        if not similar_turn_numbers:
+            return []
+
+        # Build a map of turn_number → turn for quick lookup
+        turn_map = {t.get("turn_number"): t for t in all_turns}
+
+        excluded_ids = []
+        for turn_num in similar_turn_numbers:
+            # The bot response immediately follows the user turn (turn_number + 1)
+            bot_turn = turn_map.get(turn_num + 1)
+            if not bot_turn or bot_turn.get("role") != "assistant":
+                continue
+            rec_id = bot_turn.get("recommendation_id")
+            if not rec_id:
+                continue
+            rec = await db.recommendations.find_one(
+                {"recommendation_id": rec_id},
+                {"items": 1},
+            )
+            if rec:
+                for item in rec.get("items", []):
+                    aid = str(item.get("article_id", ""))
+                    if aid and aid not in excluded_ids:
+                        excluded_ids.append(aid)
+
+        if excluded_ids:
+            print(f"[CSE] {len(excluded_ids)} article(s) excluded "
+                  f"(similar prior questions in session)")
+        return excluded_ids
+
+    async def _find_items_in_full_session(self, session_id: str) -> list:
+        """
+        Checks MongoDB's recommendations collection for any items that were
+        recommended during this session. Used as fallback when
+        dialogue_state.currently_discussing is empty.
+
+        Returns the items list from the most recent recommendation, or [].
+        """
+        from memory.db.mongo import get_db
+        db = get_db()
+
+        rec = await db.recommendations.find_one(
+            {"session_id": session_id},
+            {"items": 1},
+            sort=[("created_at", -1)],
+        )
+        if rec:
+            return rec.get("items", [])
+        return []
+
+    async def _all_session_article_ids(self, session_id: str) -> list[str]:
+        """
+        Returns every article_id recommended across ALL turns in this session.
+
+        Queries all documents in db.recommendations for this session_id and
+        collects every article_id, deduplicated. Used by REFINEMENT so that
+        the re-search never surfaces a product the user has already seen,
+        regardless of how many turns have passed since it was recommended.
+        """
+        from memory.db.mongo import get_db
+        db = get_db()
+
+        cursor = db.recommendations.find(
+            {"session_id": session_id},
+            {"items": 1},
+        )
+        excluded: list[str] = []
+        async for rec in cursor:
+            for item in rec.get("items", []):
+                aid = str(item.get("article_id", "")).strip()
+                if aid and aid not in excluded:
+                    excluded.append(aid)
+
+        print(f"[CSE-REFINE] _all_session_article_ids: found {len(excluded)} unique IDs "
+              f"across all recommendations in session={session_id}")
+        return excluded
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Synchronous helpers (no I/O)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _resolve_target_item(
+        self,
+        message: str,
+        item_a:  Optional[dict],
+        item_b:  Optional[dict],
+    ) -> Optional[dict]:
+        """
+        Identifies which item the user is referring to in their message.
+
+        Resolution order:
+          1. Explicit ordinal reference ("second one", "option 2") → item_b
+          2. Colour mention matching item's colour_group_name
+          3. Product name word match
+          4. Default → item_a (first / primary item)
+
+        Works with plain dicts (dialogue_state stores items as model_dump()
+        output, not ItemInContext objects).
+        """
+        msg = message.lower()
+
+        if self._msg_refs_item_b(msg):
+            return item_b
+
+        b_colour = self._item_field(item_b, "colour_group_name")
+        if b_colour and b_colour in msg:
+            return item_b
+        a_colour = self._item_field(item_a, "colour_group_name")
+        if a_colour and a_colour in msg:
+            return item_a
+
+        # Check item_b first — name match is more significant for the non-default item
+        if item_b and self._item_name_in_msg(item_b, msg):
+            return item_b
+        if item_a and self._item_name_in_msg(item_a, msg):
+            return item_a
+
+        return item_a or item_b  # default: first available
+
+    @staticmethod
+    def _msg_refs_item_b(msg: str) -> bool:
+        """Returns True if the message explicitly references the second item."""
+        return any(ref in msg for ref in [
+            "second", "option 2", "the other", "second one",
+            "the 2nd", "number two", "item 2", "2nd one", "#2",
+            "latter", "last one",
+        ])
+
+    @staticmethod
+    def _item_field(item: Optional[dict], field: str) -> str:
+        """Safely reads a field from an item dict or object, returns lowercase."""
+        if not item:
+            return ""
+        val = (
+            item.get(field, "")
+            if isinstance(item, dict)
+            else getattr(item, field, "") or ""
+        )
+        return val.lower()
+
+    @staticmethod
+    def _item_name_in_msg(item: Optional[dict], msg: str) -> bool:
+        """Returns True if any significant word of the item's name appears in msg."""
+        name = (
+            item.get("prod_name", "")
+            if isinstance(item, dict)
+            else getattr(item, "prod_name", "") or ""
+        ).lower()
+        return any(w in msg for w in name.split() if len(w) > 3)
+
+    def _items_in_recent_history(
+        self,
+        history: list[dict],
+        item_a:  Optional[dict],
+        item_b:  Optional[dict],
+    ) -> bool:
+        """
+        Checks whether the currently_discussing items appear in the recent
+        turn history (last 3 exchanges, passed from pipeline's get_turns_as_history).
+
+        Matches by product name words in bot turn content, and by generic
+        recommendation markers (£, "option 1", etc.).
+        """
+        if not history:
+            return False
+
+        bot_content = " ".join(
+            t.get("content", "").lower()
+            for t in history
+            if t.get("role") in ("assistant", "bot")
+        )
+        if not bot_content:
+            return False
+
+        # Check for item names in bot content
+        for item in (item_a, item_b):
+            if not item:
+                continue
+            name = (
+                item.get("prod_name", "")
+                if isinstance(item, dict)
+                else getattr(item, "prod_name", "") or ""
+            ).lower()
+            if name and len(name) > 3:
+                # Match on first 3 significant words (handles truncation)
+                words = [w for w in name.split()[:4] if len(w) > 3]
+                if any(w in bot_content for w in words):
+                    return True
+
+        # Generic recommendation markers (bot showed items)
+        return any(
+            kw in bot_content
+            for kw in ["option 1", "option 2", "here are", "£", "found two", "found these"]
+        )
+
+    def _info_completeness(
+        self,
+        label:          str,
+        message:        str,
+        dialogue_state: dict,
+        target_item:    Optional[dict] = None,
+    ) -> float:
+        """
+        Measures how complete the available session information is for
+        answering this specific label without a new catalog search.
+
+        Uses target_item (the resolved specific item the user asked about)
+        to check the RIGHT item's fields — not always item_a.
+
+        Returns a float in [0.0, 1.0].
+        """
+        item = self._resolve_item_dict(target_item, dialogue_state)
+        dispatch = {
+            "ATTRIBUTE_QUESTION":  lambda: self._completeness_attribute(message.lower(), item),
+            "EXPLANATION_WHY":     lambda: self._completeness_explanation(dialogue_state, item),
+            "COMPARISON":          lambda: self._completeness_comparison(dialogue_state, item),
+            "SELECTION_REFERENCE": lambda: self._completeness_selection(item),
+        }
+        handler = dispatch.get(label)
+        return handler() if handler else 0.50
+
+    @staticmethod
+    def _resolve_item_dict(
+        target_item:    Optional[dict],
+        dialogue_state: dict,
+    ) -> dict:
+        """Returns a plain dict for the target item, falling back to item_a."""
+        item = target_item
+        if not item:
+            item = dialogue_state.get("currently_discussing", {}).get("item_a") or {}
+        if hasattr(item, "model_dump"):
+            item = item.model_dump()
+        return item or {}
+
+    @staticmethod
+    def _completeness_attribute(msg: str, item: dict) -> float:
+        """Completeness score for ATTRIBUTE_QUESTION based on which attribute is asked."""
+        if any(w in msg for w in ["price", "cost", "how much", "£"]):
+            return 0.90 if item.get("price") else 0.40
+        if any(w in msg for w in ["colour", "color"]):
+            return 0.90 if item.get("colour_group_name") else 0.50
+        if any(w in msg for w in ["type", "category", "kind"]):
+            return 0.90 if item.get("product_type_name") else 0.50
+        if any(w in msg for w in ["material", "fabric", "made"]):
+            return 0.30  # never stored in session — always needs DB lookup
+        if any(w in msg for w in ["description", "detail", "tell me about"]):
+            return 0.80 if item.get("detail_desc") else 0.30
+        return 0.50
+
+    @staticmethod
+    def _completeness_explanation(dialogue_state: dict, item: dict) -> float:
+        """Completeness score for EXPLANATION_WHY."""
+        prefs = dialogue_state.get("preference_profile", {})
+        if prefs and item:
+            return 0.80
+        if item:
+            return 0.55  # can explain based on item attributes alone
+        return 0.30
+
+    @staticmethod
+    def _completeness_comparison(dialogue_state: dict, item: dict) -> float:
+        """Completeness score for COMPARISON — requires both items."""
+        item_b = dialogue_state.get("currently_discussing", {}).get("item_b") or {}
+        if hasattr(item_b, "model_dump"):
+            item_b = item_b.model_dump()
+        return 0.80 if (item and item_b) else 0.30
+
+    @staticmethod
+    def _completeness_selection(item: dict) -> float:
+        """Completeness score for SELECTION_REFERENCE."""
+        if item.get("prod_name") and item.get("colour_group_name"):
+            return 0.90
+        return 0.50 if item else 0.30
 
     def _label_to_default_strategy(self, label: str) -> str:
-        """Returns the DistilBERT default strategy for a label."""
+        """Returns the DistilBERT default retrieval strategy for a label."""
         return {
             "INITIAL_REQUEST":    "FULL",
             "REFINEMENT":         "FULL",
@@ -437,54 +879,8 @@ class ContextSufficiencyEvaluator:
             "CHITCHAT":           "NO",
         }.get(label, "FULL")
 
-    def _build_rationale(
-        self,
-        label, tier, prior_strategy, score,
-        d1, d2, d3, d4, d5
-    ) -> str:
-        """
-        Builds a human-readable scientific rationale for the tier assignment.
-        This is what you show your supervisor.
-        """
-        dominant = max(
-            [("D1_referent", d1 * _W1_REFERENT),
-             ("D2_predicate", d2 * _W2_PREDICATE),
-             ("D3_no_catalog", (1-d3) * _W3_NO_CATALOG),
-             ("D4_parametric", d4 * _W4_PARAMETRIC),
-             ("D5_item_known", d5 * _W5_KNOWN_SET)],
-            key=lambda x: x[1]
-        )[0]
 
-        if tier == "NO":
-            return (
-                f"{label} → NO retrieval. "
-                f"S={score:.3f} ≥ {_NO_THRESHOLD} (parametric threshold). "
-                f"Dominant factor: {dominant}. "
-                f"H(A|q,C)≈0: response is dialogue-management, "
-                f"I(A;K|q,C)≈0 (catalog adds nothing). "
-                f"[Joren2025: Sufficient(q,∅,param)=1]"
-            )
-        elif tier == "PARTIAL":
-            return (
-                f"{label} → PARTIAL retrieval. "
-                f"S={score:.3f} in [{_PARTIAL_THRESHOLD},{_NO_THRESHOLD}). "
-                f"Dominant factor: {dominant}. "
-                f"Referent in C_t (D1={d1:.2f}): item set known. "
-                f"I(A;C_t) ≫ I(A;K\\C_t): bounded attribute/graph lookup only. "
-                f"[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
-            )
-        else:
-            return (
-                f"{label} → FULL retrieval. "
-                f"S={score:.3f} < {_PARTIAL_THRESHOLD} (below partial threshold). "
-                f"Dominant factor: {dominant}. "
-                f"I(A;K\\C_t) large: candidate set unknown, "
-                f"ANN catalog search required (D3={d3:.2f}). "
-                f"[Jeong2024: multi-step retrieval; Joren2025: Sufficient(q,C_t)=0]"
-            )
-
-
-# Module-level singleton — loaded once, shared across all pipeline calls
+# ── Module-level singleton ─────────────────────────────────────────────────────
 _cse_instance: Optional[ContextSufficiencyEvaluator] = None
 
 

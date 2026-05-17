@@ -224,6 +224,87 @@ def _best_match_index(query: str, candidates: list) -> tuple:
     return best_idx, best_score
 
 
+# ── Catalog-derived term sets (built at module load from sample_articles.csv) ──
+# Two fast frozensets used by FashionGuard Stage 2c/2d:
+#
+#   _CATALOG_TYPE_TERMS  — every unique product_type_name token (lowercased).
+#       Catches "short", "top", "bra", "tights", "hoodie" etc. that are missing
+#       from the hand-written allowlist but exist in the actual catalogue.
+#
+#   _CATALOG_NAME_TOKENS — significant words from prod_name values.
+#       Catches catalogue-specific identifiers like "thuhin", "whisper",
+#       "robban", "babette" that signal a product reference even when the
+#       semantic model has never seen those words.
+#
+# Both sets are O(1) frozensets so the per-request check is negligible.
+
+_GENERIC_FASHION_WORDS = frozenset({
+    # colours / patterns  – too common to be a reliable product-name signal
+    "black", "white", "grey", "gray", "blue", "pink", "brown", "green",
+    "beige", "light", "dark", "solid", "melange", "denim", "khaki",
+    # garment adjectives
+    "basic", "classic", "slim", "loose", "fitted", "short", "long", "mini",
+    "maxi", "cropped", "wide", "narrow", "thick", "thin", "soft", "warm",
+    "sport", "sports", "casual", "elegant", "fancy", "trendy", "smart",
+    # garment anatomy
+    "waist", "collar", "sleeve", "pocket", "strap", "lining", "seam",
+    "layer", "panel", "front", "back", "inner", "outer", "lace",
+    # materials
+    "cotton", "polyester", "nylon", "jersey", "knit", "woven",
+    # size / quantity
+    "extra", "large", "small", "plus", "piece", "pair", "single",
+    "women", "ladies", "girls", "boys", "mens", "kids", "baby",
+    # common English words likely in names
+    "with", "and", "the", "for", "from", "that", "this", "have",
+    "will", "your", "over", "under", "more", "less", "very",
+})
+
+
+def _build_catalog_terms() -> tuple:
+    """
+    Reads sample_articles.csv once at import time and returns two frozensets:
+      (product_type_terms, prod_name_tokens)
+
+    product_type_terms  : each word from every unique product_type_name value
+    prod_name_tokens    : significant words (>= 5 chars, alpha, not generic)
+                          from every unique prod_name value
+    """
+    import csv as _csv
+    _csv_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                     "shared", "main_data_set", "sample_articles.csv")
+    )
+    type_terms:  set = set()
+    name_tokens: set = set()
+    try:
+        with open(_csv_path, encoding="utf-8") as _f:
+            for _row in _csv.DictReader(_f):
+                # product_type_name — add full value and each word
+                _pt = _row.get("product_type_name", "").strip().lower()
+                if _pt:
+                    type_terms.add(_pt)
+                    for _w in _pt.split("/"):        # "cap/peaked" → "cap", "peaked"
+                        for _t in _w.split():
+                            if len(_t) >= 3:
+                                type_terms.add(_t.strip("-"))
+
+                # prod_name — extract significant tokens only
+                _pn = _row.get("prod_name", "").strip().lower()
+                for _w in _pn.split():
+                    _w = re.sub(r"[^a-z]", "", _w)  # strip punctuation
+                    if (len(_w) >= 5
+                            and _w.isalpha()
+                            and _w not in _GENERIC_FASHION_WORDS):
+                        name_tokens.add(_w)
+    except Exception as _e:
+        print(f"[FashionGuard] Warning: could not load catalog terms: {_e}")
+    print(f"[FashionGuard] Catalog terms loaded: "
+          f"{len(type_terms)} type terms, {len(name_tokens)} name tokens")
+    return frozenset(type_terms), frozenset(name_tokens)
+
+
+_CATALOG_TYPE_TERMS, _CATALOG_NAME_TOKENS = _build_catalog_terms()
+
 # ── Stage 1: Continuation bypass phrases ──────────────────────────────────────
 # When these appear in a message that has conversation history, the message
 # is always a continuation (references prior items) — never off-topic.
@@ -452,95 +533,98 @@ async def _groq_relevance_check(message: str) -> tuple:
     return True, 0.5  # on any error → default allow (prefer false-negatives over false-positives)
 
 
+def _fg_stage0(msg: str, msg_words: set, history: list) -> tuple | None:
+    """Stage 0: exact word blocklist. Returns result tuple or None to continue."""
+    blocked = msg_words & _EXACT_WORD_BLOCKLIST
+    if not blocked:
+        return None
+    if not history:
+        print(f"[FashionGuard] Stage0-word-block: '{msg}' matched {blocked}")
+        return False, 0.0, "stage0_exact_block"
+    if not any(p in msg for p in _CONTINUATION_PHRASES):
+        print(f"[FashionGuard] Stage0-word-block (history): '{msg}' matched {blocked}")
+        return False, 0.0, "stage0_exact_block"
+    return None
+
+
+def _fg_stage1(msg: str, history: list) -> tuple | None:
+    """Stage 1: continuation phrase bypass (requires history)."""
+    if history:
+        for phrase in _CONTINUATION_PHRASES:
+            if phrase in msg:
+                return True, 1.0, "stage1_continuation"
+    return None
+
+
+def _fg_stage2_allow(msg: str, msg_words: set, history: list) -> tuple | None:
+    """Stages 2a/2c/2d: allowlist, catalog type terms, catalog name tokens."""
+    for phrase in _ALLOWLIST_PHRASES:
+        if phrase in msg:
+            return True, 0.95, "stage2_allowlist"
+    type_hit = msg_words & _CATALOG_TYPE_TERMS
+    if type_hit:
+        print(f"[FashionGuard] Stage2c-catalog-type: matched {type_hit} in '{msg[:60]}'")
+        return True, 0.95, "stage2_catalog_type"
+    if history:
+        name_hit = msg_words & _CATALOG_NAME_TOKENS
+        if name_hit:
+            print(f"[FashionGuard] Stage2d-catalog-name: matched {name_hit} in '{msg[:60]}'")
+            return True, 0.93, "stage2_catalog_name"
+    return None
+
+
+def _fg_stage2b_block(msg: str) -> tuple | None:
+    """Stage 2b: regex blocklist."""
+    for pattern in _BLOCKLIST_PATTERNS:
+        if re.search(pattern, msg):
+            print(f"[FashionGuard] Stage2-blocklist: pattern={pattern!r} msg='{msg[:60]}'")
+            return False, 0.05, "stage2_blocklist"
+    return None
+
+
+def _fg_stage3(message: str, msg: str) -> tuple[tuple | None, float, float]:
+    """Stage 3: dual-pool semantic scoring. Returns (result_or_None, f_score, o_score)."""
+    f_score, o_score = _semantic_scores(message)
+    margin = f_score - o_score
+    print(f"[FashionGuard] Stage3 fashion={f_score:.3f} offtopic={o_score:.3f} "
+          f"margin={margin:.3f} msg='{msg[:40]}'")
+    if o_score > f_score + _SEMANTIC_MARGIN:
+        return (False, o_score, "stage3_semantic"), f_score, o_score
+    if f_score < _SEMANTIC_FASHION_MIN:
+        return (False, f_score, "stage3_semantic"), f_score, o_score
+    if f_score >= _AMBIGUITY_HIGH:
+        return (True, f_score, "stage3_semantic"), f_score, o_score
+    if margin < _SEMANTIC_FASHION_WIN_MARGIN:
+        print(f"[FashionGuard] Stage3-thin-margin: f={f_score:.3f} o={o_score:.3f} "
+              f"margin={margin:.3f} < {_SEMANTIC_FASHION_WIN_MARGIN} → escalating to Groq")
+    return None, f_score, o_score
+
+
 async def is_fashion_relevant_async(
     message: str,
     history: list = None
 ) -> tuple:
     """
     Full 4-stage fashion relevance classifier (async).
-
-    Returns (is_relevant: bool, confidence: float, stage: str)
-
-    IMPORTANT — no blanket short-message bypass:
-      'washroom', 'pizza', 'car' are 1 word and must be blocked.
-      Only messages that hit Stage 1 (continuation with history) or
-      Stage 2a (allowlist fashion keyword) are fast-allowed.
-      Everything else is fully evaluated regardless of length.
+    Returns (is_relevant: bool, confidence: float, stage: str).
+    Each stage is extracted into its own _fg_stageX helper for clarity.
     """
-    msg = message.lower().strip()
+    msg = " ".join(message.lower().split())
+    msg_words = set(msg.split())
 
-    # ── Stage 0: Exact word blocklist (fastest, no model needed) ───────────
-    # FIX: Check INDIVIDUAL WORDS in the message, not the full message string.
-    # Old behaviour: only "food" (alone) was blocked.
-    #                "i need food" slipped through because it != "food".
-    # New behaviour: any message CONTAINING a blocklist word is blocked.
-    #                "i need food" → {"i","need","food"} ∩ blocklist = {"food"} → blocked.
-    #                "get me pizza" → blocked. "order sushi" → blocked.
-    # Exception: skip word-level check when continuation history exists
-    # so that "ok", "yes" etc. (which overlap with transport/other words)
-    # are correctly allowed as continuation phrases in Stage 1.
-    _msg_words = set(msg.split())
-    _blocked_words = _msg_words & _EXACT_WORD_BLOCKLIST
-    if _blocked_words and not history:
-        # No history — block immediately
-        print(f"[FashionGuard] Stage0-word-block: '{msg}' matched {_blocked_words}")
-        return False, 0.0, "stage0_exact_block"
-    elif _blocked_words and history:
-        # Has history — only block if no continuation phrase present
-        # (prevents "ok food" type edge cases in active conversations)
-        _has_continuation = any(p in msg for p in _CONTINUATION_PHRASES)
-        if not _has_continuation:
-            print(f"[FashionGuard] Stage0-word-block (history): '{msg}' matched {_blocked_words}")
-            return False, 0.0, "stage0_exact_block"
+    for check in (
+        _fg_stage0(msg, msg_words, history),
+        _fg_stage1(msg, history),
+        _fg_stage2_allow(msg, msg_words, history),
+        _fg_stage2b_block(msg),
+    ):
+        if check is not None:
+            return check
 
-    # ── Stage 1: Conversational bypass (history-aware) ────────────────────
-    # If history exists AND message contains a continuation phrase,
-    # it is always a reply to shown items — never off-topic.
-    # This handles: "thanks", "yes", "which one", "ok", "tell me more" etc.
-    if history:
-        for phrase in _CONTINUATION_PHRASES:
-            if phrase in msg:
-                return True, 1.0, "stage1_continuation"
+    decided, f_score, o_score = _fg_stage3(message, msg)
+    if decided is not None:
+        return decided
 
-    # ── Stage 2a: Fast allowlist — contains a fashion keyword ─────────────
-    # Handles fashion fragments of any length: "dress", "red dress",
-    # "shirt", "navy blazer" etc. Short fashion words land here.
-    for phrase in _ALLOWLIST_PHRASES:
-        if phrase in msg:
-            return True, 0.95, "stage2_allowlist"
-
-    # ── Stage 2b: Fast blocklist — clear off-topic signal ─────────────────
-    for pattern in _BLOCKLIST_PATTERNS:
-        if re.search(pattern, msg):
-            print(f"[FashionGuard] Stage2-blocklist: pattern={pattern!r} msg='{msg[:60]}'")
-            return False, 0.05, "stage2_blocklist"
-
-    # ── Stage 3: Dual-pool semantic scoring ───────────────────────────────
-    # Runs for ALL messages not caught above — including single unknown words.
-    # Short ambiguous words (washroom, pizza, car) will have low fashion
-    # similarity and get rejected here or escalated to Groq.
-    f_score, o_score = _semantic_scores(message)
-    margin = f_score - o_score
-    print(f"[FashionGuard] Stage3 fashion={f_score:.3f} offtopic={o_score:.3f} margin={margin:.3f} msg='{msg[:40]}'")
-
-    if o_score > f_score + _SEMANTIC_MARGIN:
-        return False, o_score, "stage3_semantic"
-    if f_score < _SEMANTIC_FASHION_MIN:
-        return False, f_score, "stage3_semantic"
-    if f_score >= _AMBIGUITY_HIGH:
-        return True, f_score, "stage3_semantic"
-
-    # FIX: fashion must lead off-topic by at least _SEMANTIC_FASHION_WIN_MARGIN.
-    # Previously any f_score > o_score was accepted — margin=0.033 slipped through.
-    # Now: margin < 0.08 → genuinely ambiguous → escalate to Stage 4 Groq.
-    if (f_score - o_score) < _SEMANTIC_FASHION_WIN_MARGIN:
-        print(
-            f"[FashionGuard] Stage3-thin-margin: f={f_score:.3f} o={o_score:.3f} "
-            f"margin={f_score - o_score:.3f} < {_SEMANTIC_FASHION_WIN_MARGIN} → escalating to Groq"
-        )
-        # Fall through to Stage 4 Groq arbitration
-
-    # ── Stage 4: Groq LLM for genuinely ambiguous middle zone ─────────────
     print(f"[FashionGuard] Stage4-Groq: f={f_score:.3f} o={o_score:.3f} msg='{message[:60]}'")
     is_rel, conf = await _groq_relevance_check(message)
     return is_rel, conf, "stage4_groq"
@@ -718,39 +802,46 @@ _NUMBER_WORDS = {
     "eighty": 80, "ninety": 90, "hundred": 100,
 }
 
+_PRICE_CONTEXT_WORDS = frozenset([
+    "pound", "dollar", "euro", "budget",
+    "under", "below", "less", "cheap", "afford",
+])
+_PRICE_MIN_WORDS = frozenset(["over", "above", "more than", "at least"])
+# Word-set (not substring) so "cheap" does NOT match inside "cheaper"
+_BUDGET_WORDS  = frozenset(["budget", "cheap", "affordable"])
+_LUXURY_WORDS  = frozenset(["luxury", "premium", "designer", "high-end"])
+
+_PRICE_MAX_PATTERNS = [
+    r'under\s+[£$€]?\s*(\d+(?:\.\d+)?)',
+    r'below\s+[£$€]?\s*(\d+(?:\.\d+)?)',
+    r'less\s+than\s+[£$€]?\s*(\d+(?:\.\d+)?)',
+    r'[£$€]\s*(\d+(?:\.\d+)?)',
+    r'(\d+(?:\.\d+)?)\s*(?:pounds?|dollars?|euros?|gbp)',
+]
+
+
+def _price_from_number_word(msg: str, value: float) -> dict:
+    key = "price_min" if any(kw in msg for kw in _PRICE_MIN_WORDS) else "price_max"
+    return {key: float(value)}
+
 
 def _extract_price(msg: str) -> dict:
-    result = {}
-    patterns_max = [
-        r'under\s+[£$€]?\s*(\d+(?:\.\d+)?)',
-        r'below\s+[£$€]?\s*(\d+(?:\.\d+)?)',
-        r'less\s+than\s+[£$€]?\s*(\d+(?:\.\d+)?)',
-        r'[£$€]\s*(\d+(?:\.\d+)?)',
-        r'(\d+(?:\.\d+)?)\s*(?:pounds?|dollars?|euros?|gbp)',
-    ]
-    for pattern in patterns_max:
+    for pattern in _PRICE_MAX_PATTERNS:
         m = re.search(pattern, msg)
         if m:
-            result["price_max"] = float(m.group(1))
-            return result
-    # Text number words — only when price context present
+            return {"price_max": float(m.group(1))}
+
     for word, value in _NUMBER_WORDS.items():
-        if re.search(rf'\b{re.escape(word)}\b', msg):
-            if any(kw in msg for kw in [
-                "pound", "dollar", "euro", "budget",
-                "under", "below", "less", "cheap", "afford"
-            ]):
-                if any(kw in msg for kw in
-                       ["over", "above", "more than", "at least"]):
-                    result["price_min"] = float(value)
-                else:
-                    result["price_max"] = float(value)
-                return result
-    if any(kw in msg for kw in ["budget", "cheap", "affordable"]):
-        result["price_max"] = 35.0
-    elif any(kw in msg for kw in ["luxury", "premium", "high-end", "designer"]):
-        result["price_min"] = 80.0
-    return result
+        if re.search(rf'\b{re.escape(word)}\b', msg) and \
+                any(kw in msg for kw in _PRICE_CONTEXT_WORDS):
+            return _price_from_number_word(msg, value)
+
+    msg_words = set(msg.split())
+    if any(kw in msg_words for kw in _BUDGET_WORDS):
+        return {"price_max": 35.0}
+    if any(kw in msg_words for kw in _LUXURY_WORDS):
+        return {"price_min": 80.0}
+    return {}
 
 
 def extract_entities_keyword(message: str) -> dict:
