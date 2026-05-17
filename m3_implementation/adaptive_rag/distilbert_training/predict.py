@@ -17,17 +17,90 @@
 #       # skip retrieval entirely
 # =============================================================================
 
+import os
 import re
 import torch
-# from transformers import (
-#     DistilBertForSequenceClassification,
-#     DistilBertTokenizer,
-# )
+from dotenv import load_dotenv
+
+# Load .env from the project root (3 levels above this file's directory)
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+load_dotenv(os.path.join(_PROJECT_ROOT, '.env'))
 from transformers import (
     DistilBertForSequenceClassification,
     AutoTokenizer,
 )
 from config import MODEL_SAVE_DIR, LABEL_NAMES, RETRIEVAL_STRATEGY_MAP, MAX_LEN
+
+_VALID_LABELS = frozenset(LABEL_NAMES)
+_LABEL_TO_ID  = {name: i for i, name in enumerate(LABEL_NAMES)}
+_NAME_TO_STRATEGY = {LABEL_NAMES[i]: s for i, s in RETRIEVAL_STRATEGY_MAP.items()}
+
+# ── Groq LLM judge ────────────────────────────────────────────────────────────
+# Secondary classifier that verifies DistilBERT when it's uncertain.
+# Triggered when confidence < JUDGE_THRESHOLD or in the known failure mode
+# (INITIAL_REQUEST predicted with conversation history present).
+_GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+_GROQ_BASE_URL   = "https://api.groq.com/openai/v1"
+
+_JUDGE_SYSTEM_PROMPT = """You classify user messages in a fashion shopping assistant into one of 8 intents.
+
+INITIAL_REQUEST  — fresh product search, different category from prior context, or no history.
+                   e.g. "I want a coat", "show me jeans", "I need boots under £50"
+REFINEMENT       — narrows or changes the SAME product type already being discussed.
+                   e.g. "make it cheaper", "in red instead", "something smaller"
+ATTRIBUTE_QUESTION — asks about a specific attribute of an already-shown product.
+                   e.g. "what material is it?", "is it machine washable?", "what sizes?"
+EXPLANATION_WHY  — asks why a product was recommended.
+                   e.g. "why this one?", "why did you suggest this?"
+COMPARISON       — compares two shown products.
+                   e.g. "which is better quality?", "what's the difference?"
+SELECTION_REFERENCE — requests more detail on one specific shown product.
+                   e.g. "tell me more about the second one", "more on option 1"
+FEEDBACK         — positive or negative reaction, no new product ask.
+                   e.g. "I'll take it", "too expensive", "love it", "not for me"
+CHITCHAT         — greeting or casual conversation.
+                   e.g. "hello", "thanks", "ok"
+
+Reply with ONLY the label name. Nothing else."""
+
+
+class _GroqJudge:
+    """Calls Groq to confirm or override an uncertain DistilBERT prediction."""
+
+    def __init__(self) -> None:
+        from openai import OpenAI
+        api_key = os.getenv("GROQ_API_KEY", "")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY not set")
+        self._client = OpenAI(api_key=api_key, base_url=_GROQ_BASE_URL)
+
+    def classify(self, history: list[dict], current_message: str) -> str | None:
+        """Returns a validated label name, or None if the call fails."""
+        if history:
+            lines = [f"{t['role'].upper()}: {t['content'][:120]}" for t in history[-4:]]
+            user_content = "Context:\n" + "\n".join(lines) + f'\n\nClassify: "{current_message}"'
+        else:
+            user_content = f'No prior conversation.\n\nClassify: "{current_message}"'
+        try:
+            resp = self._client.chat.completions.create(
+                model=_GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_content},
+                ],
+                max_tokens=15,
+                temperature=0.0,
+            )
+            raw = resp.choices[0].message.content.strip().upper()
+            if raw in _VALID_LABELS:
+                return raw
+            for label in _VALID_LABELS:
+                if label in raw:
+                    return label
+            return None
+        except Exception as exc:
+            print(f"[GroqJudge] call failed: {exc}")
+            return None
 
 
 def clean_text(text: str) -> str:
@@ -36,9 +109,9 @@ def clean_text(text: str) -> str:
     Always apply this to any text before passing it to the model,
     so the model sees inputs in the same format it was trained on.
     """
-    text = re.sub(r'\*\*', '', text)
-    text = re.sub(r' — ', ', ', text)
-    text = re.sub(r'—', ', ', text)
+    text = text.replace('**', '')
+    text = text.replace(' — ', ', ')
+    text = text.replace('—', ', ')
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
@@ -79,17 +152,6 @@ class Predictor:
     every single conversation turn.
     """
 
-    # def __init__(self, model_dir: str = MODEL_SAVE_DIR):
-    #     device_str = "cuda" if torch.cuda.is_available() else "cpu"
-    #     self.device = torch.device(device_str)
-
-    #     print(f"Loading trained model from: {model_dir}")
-    #     self.tokenizer = DistilBertTokenizer.from_pretrained(model_dir)
-    #     self.model     = DistilBertForSequenceClassification.from_pretrained(model_dir)
-    #     self.model.to(self.device)
-    #     self.model.eval()
-    #     print("Model loaded and ready.")
-
     def __init__(self, model_dir: str = None):
         if model_dir is None:
             model_dir = MODEL_SAVE_DIR
@@ -102,6 +164,11 @@ class Predictor:
         self.model.to(self.device)
         self.model.eval()
         print("Model loaded and ready.")
+
+        # Judge is initialised lazily on first predict() call so that
+        # GROQ_API_KEY is already in os.environ (loaded by other modules at startup)
+        self._judge: _GroqJudge | None = None
+        self._judge_ready: bool = False
 
     def predict(
         self,
@@ -123,6 +190,15 @@ class Predictor:
             all_probabilities  : dict of label_name → probability for all 8 classes
         """
         # Format the input exactly as during training
+        # ── Lazy judge init (first call only, after all dotenv is loaded) ────
+        if not self._judge_ready:
+            self._judge_ready = True
+            try:
+                self._judge = _GroqJudge()
+                print("[GroqJudge] initialised on first request — verifying every prediction")
+            except Exception as exc:
+                print(f"[GroqJudge] disabled: {exc}")
+
         input_text = format_input_text(history, current_message)
 
         # Tokenize
@@ -146,11 +222,29 @@ class Predictor:
         probs      = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
         label_id   = int(probs.argmax())
         confidence = float(probs[label_id])
+        label_name = LABEL_NAMES[label_id]
+
+        # ── Groq judge: always verify, Groq wins on disagreement ─────────────
+        print(f"[DistilBERT] label={label_name}  conf={confidence:.1%}")
+        if self._judge is not None:
+            groq_label = self._judge.classify(history, current_message)
+            if groq_label:
+                if groq_label == label_name:
+                    print(f"[GroqJudge]  label={groq_label}  -> AGREE")
+                else:
+                    print(f"[GroqJudge]  label={groq_label}  -> OVERRIDE (DistilBERT={label_name})")
+                    label_name = groq_label
+                    label_id   = _LABEL_TO_ID[label_name]
+            else:
+                print("[GroqJudge]  API call failed — keeping DistilBERT result")
+        else:
+            print("[GroqJudge]  DISABLED (check GROQ_API_KEY in .env and openai package)")
+        print(f"[FINAL]      label={label_name}  strategy={_NAME_TO_STRATEGY[label_name]}")
 
         return {
             "label_id":           label_id,
-            "label_name":         LABEL_NAMES[label_id],
-            "retrieval_strategy": RETRIEVAL_STRATEGY_MAP[label_id],
+            "label_name":         label_name,
+            "retrieval_strategy": _NAME_TO_STRATEGY[label_name],
             "confidence":         round(confidence, 4),
             "all_probabilities": {
                 LABEL_NAMES[i]: round(float(probs[i]), 4)
