@@ -101,8 +101,8 @@ class TextRAGPipeline:
         print(f"[RAG] retrieval_input action={_ri_dbg.get('action','None')}")
         _ri_payload = _ri_dbg.get("payload") or {}
         print(f"[RAG] filters={_ri_payload.get('filters',{})}")
-        # ── Step 1: Handle not-relevant inputs immediately ──────────────────
-        if memory_context.get("not_relevant"):
+        # ── Step 1: Handle not-relevant / session-context-blocked inputs ───────
+        if memory_context.get("not_relevant") or memory_context.get("session_context_blocked"):
             refusal = memory_context.get(
                 "refusal_message",
                 "I can only help with fashion and clothing recommendations."
