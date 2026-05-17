@@ -129,6 +129,8 @@ class MemoryPipeline:
             self.predictor = None
             print("[MemoryPipeline] Using fallback rule-based classifier.")
 
+        self._known_product_names: frozenset = self._load_product_names()
+
     async def process_turn(
         self,
         user_id: str,
@@ -361,7 +363,49 @@ class MemoryPipeline:
                 confidence         = 0.80
                 used_rules         = True
 
-        # ── Step 4d: Context Sufficiency Evaluation (CSE) ──────────────────────
+        # ── Step 4d: Session-context validation ───────────────────────────────────
+        # Prevents follow-up intents (REFINEMENT, COMPARISON, etc.) from
+        # proceeding when no prior INITIAL_REQUEST exists in the session.
+        _ctx_allowed, _ctx_stop_msg = await self._validate_session_context(
+            label, message, active_session_id
+        )
+        if not _ctx_allowed:
+            print(f"[PIPELINE-4d] SESSION-CTX BLOCK: label={label} — no prior INITIAL_REQUEST")
+            _blocked_turn = await self.turn_mgr.add_user_turn(
+                session_id=active_session_id,
+                user_id=user_id,
+                content=message,
+                classification=TurnClassification(
+                    label=label,
+                    retrieval_strategy="NO",
+                    confidence=confidence,
+                    used_rules=True
+                ),
+                entities={}
+            )
+            return {
+                "user_id":    user_id,
+                "session_id": active_session_id,
+                "turn_id":    _blocked_turn.turn_id,
+                "label":              label,
+                "retrieval_strategy": "NO",
+                "confidence":         confidence,
+                "used_rules":         True,
+                "retrieval_input":    None,
+                "memory_context": {
+                    "session_context_blocked": True,
+                    "refusal_message":         _ctx_stop_msg,
+                    "dialogue_state":          {},
+                    "long_term_preferences":   [],
+                    "style_profile":           {},
+                    "preference_summary":      {},
+                    "existing_explanation":    None,
+                },
+                "side_effects":     [f"Session-context validation blocked label={label}"],
+                "classifier_input": classifier_input,
+            }
+
+        # ── Step 4e: Context Sufficiency Evaluation (CSE) ──────────────────────
         # Applies the formal information-theoretic tier assignment from
         # Joren et al. ICLR 2025 (Sufficient Context predicate) and
         # Jeong et al. NAACL 2024 (Adaptive-RAG 3-tier policy).
@@ -794,3 +838,90 @@ class MemoryPipeline:
                 break
 
         return entities
+
+    @staticmethod
+    def _load_product_names() -> frozenset:
+        """Loads prod_name values from sample_articles.csv into a frozenset."""
+        import csv
+        csv_path = os.path.normpath(
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                '..', '..', '..', 'shared', 'main_data_set', 'sample_articles.csv'
+            )
+        )
+        names: set[str] = set()
+        try:
+            with open(csv_path, newline='', encoding='utf-8') as f:
+                for row in csv.DictReader(f):
+                    name = row.get('prod_name', '').strip().lower()
+                    if len(name) >= 4:
+                        names.add(name)
+            print(f"[MemoryPipeline] Loaded {len(names)} product names for session-context validation.")
+        except Exception as exc:
+            print(f"[MemoryPipeline] Could not load product names: {exc}")
+        return frozenset(names)
+
+    def _message_contains_product_name(self, message: str) -> bool:
+        """Returns True if any known product name appears in the message."""
+        msg_lower = message.lower()
+        return any(name in msg_lower for name in self._known_product_names)
+
+    async def _validate_session_context(
+        self,
+        label: str,
+        message: str,
+        session_id: str
+    ) -> tuple[bool, str | None]:
+        """
+        Gate for follow-up intents: only allowed when a prior INITIAL_REQUEST
+        exists in the session.  Returns (allowed, stop_message).
+
+        Rules:
+          INITIAL_REQUEST / FEEDBACK / CHITCHAT  → always allowed
+          Any other label with prior IR           → allowed
+          REFINEMENT / EXPLANATION_WHY / COMPARISON with no prior IR → blocked
+          SELECTION_REFERENCE / ATTRIBUTE_QUESTION with no prior IR:
+            - product name found in message → allowed
+            - no product name              → blocked
+        """
+        if label in ("INITIAL_REQUEST", "FEEDBACK", "CHITCHAT"):
+            return True, None
+
+        all_turns = await self.turn_mgr.get_all_session_turns(session_id)
+        has_prior_ir = any(
+            (t.get("classification") or {}).get("label") == "INITIAL_REQUEST"
+            for t in all_turns
+        )
+        if has_prior_ir:
+            return True, None
+
+        if label == "REFINEMENT":
+            return False, (
+                "It looks like you're trying to refine a search, but we haven't found "
+                "any items yet! Tell me what you're looking for and I'll find some "
+                "great options for you."
+            )
+
+        if label == "EXPLANATION_WHY":
+            return False, (
+                "I haven't recommended anything yet, so there's nothing to explain! "
+                "Let me know what kind of fashion item you're looking for and I'll "
+                "get started."
+            )
+
+        if label == "COMPARISON":
+            return False, (
+                "There are no items to compare yet! Share what you're looking for "
+                "and I'll find some options you can compare."
+            )
+
+        if label in ("SELECTION_REFERENCE", "ATTRIBUTE_QUESTION"):
+            if self._message_contains_product_name(message):
+                return True, None
+            return False, (
+                "I'm not sure which item you're referring to. Could you tell me "
+                "the product name you'd like to know more about? Or let me know "
+                "what type of item you're looking for and I'll find some options!"
+            )
+
+        return True, None
