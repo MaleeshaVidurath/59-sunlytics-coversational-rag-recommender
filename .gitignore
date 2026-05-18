@@ -23,3 +23,6 @@ m2_multimodal_rag/models/
 Thumbs.db
 
 node_modules/
+
+#temporary files
+Accuracy/

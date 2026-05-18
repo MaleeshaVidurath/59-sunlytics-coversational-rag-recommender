@@ -17,12 +17,113 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from shared.data_loader import data_loader
+
+
+# =====================================================================
+# Inline accuracy reporter — prints after every catalog_search
+# =====================================================================
+
+_FUZZY_GROUPS = {
+    "product_type_name": {
+        "Dress":           ["dress"],
+        "Top":             ["top", "t-shirt", "vest top", "blouse"],
+        "Trousers":        ["trousers", "jeans"],
+        "Jacket":          ["jacket", "coat", "blazer"],
+        "Sweater":         ["sweater", "jumper", "knitwear"],
+        "Hoodie":          ["hoodie", "sweatshirt"],
+        "Shirt":           ["shirt"],
+        "Blouse":          ["blouse"],
+        "Leggings/Tights": ["leggings/tights", "leggings", "tights"],
+    },
+    "colour_group_name": {
+        "Dark Blue": ["dark blue", "blue", "navy blue"],
+        "White":     ["white", "off white"],
+        "Black":     ["black"],
+        "Red":       ["red", "dark red"],
+        "Grey":      ["grey", "gray", "dark grey"],
+    },
+    "index_group_name": {
+        "Ladieswear": ["ladieswear"],
+        "Menswear":   ["menswear"],
+        "Divided":    ["divided"],
+        "Children":   ["children", "baby"],
+    },
+}
+
+
+def _attr_match(item_val: str, expected_val: str, field: str) -> bool:
+    iv = str(item_val).strip().lower()
+    ev = str(expected_val).strip().lower()
+    if iv == ev:
+        return True
+    for members in _FUZZY_GROUPS.get(field, {}).values():
+        if ev in members and iv in members:
+            return True
+    return False
+
+
+def _print_accuracy(items: list, filters: dict):
+    """
+    Prints an accuracy block to the terminal after every catalog_search.
+    Uses the request's hard filters as the expected attributes.
+    Skips price filters — those are not catalogue columns.
+    """
+    checkable = {k: v for k, v in filters.items()
+                 if k not in ("price_max", "price_min") and v is not None}
+
+    print("\n" + "=" * 60)
+    print("  [ACCURACY] Catalog Search Recommendation Report")
+    print("=" * 60)
+
+    if not checkable:
+        print("  [ACCURACY] No checkable filters in this request — skipping score.")
+        print("=" * 60 + "\n")
+        return
+
+    print("  Expected attributes from request filters:")
+    for k, v in checkable.items():
+        print(f"    {k}: {v}")
+
+    if not items:
+        print("  [ACCURACY] No items returned — cannot score.")
+        print("=" * 60 + "\n")
+        return
+
+    item_accs = []
+    for idx, item in enumerate(items, 1):
+        hits = 0
+        print(f"\n  Item {idx}: {item.get('prod_name', '?')}")
+        print(f"  {'Attribute':<30} {'Expected':<18} {'Got':<20} Result")
+        print(f"  {'-'*75}")
+        for field, exp_val in checkable.items():
+            got     = str(item.get(field, "")).strip()
+            matched = _attr_match(got, str(exp_val), field)
+            tick    = "[PASS]" if matched else "[FAIL]"
+            print(f"  {field:<30} {str(exp_val):<18} {got:<20} {tick}")
+            if matched:
+                hits += 1
+        acc = hits / len(checkable)
+        item_accs.append(acc)
+        print(f"  Item accuracy: {acc:.0%}")
+
+    avg_acc  = sum(item_accs) / len(item_accs)
+    full_hit = any(a >= 1.0 - 1e-9 for a in item_accs)
+    part_hit = any(a >= 0.5 for a in item_accs)
+    status   = "FULL HIT" if full_hit else ("PARTIAL HIT" if part_hit else "MISS")
+
+    print(f"\n  {'─'*60}")
+    print(f"  Result          : {status}")
+    print(f"  Avg Accuracy    : {avg_acc:.0%}  ({avg_acc*100:.1f}% of expected attrs matched)")
+    print(f"  Full Hit        : {'YES' if full_hit else 'NO'}  (all expected attrs matched in >=1 item)")
+    print(f"  Items returned  : {len(items)}")
+    print("=" * 60 + "\n")
 from m2_multimodal_rag.llm_generator import llm_generator
 from m2_multimodal_rag.clip_embeddings import clip_encoder
 from m2_multimodal_rag.faiss_index import faiss_db
 from m2_multimodal_rag.regeneration_loop import generator_loop
 from m2_multimodal_rag.cross_encoder_reranker import cross_encoder_reranker
 from m2_multimodal_rag.diversity_bandit import diversity_bandit
+from m2_multimodal_rag.blip_verification import blip_verifier
 
 
 # =====================================================================
@@ -67,6 +168,61 @@ def _call_llm(prompt: str) -> str | None:
     Reuses the llm_generator's configuration for consistency.
     """
     return llm_generator._call_llm(prompt, max_tokens=250)
+
+
+def _vlm_verified_response(
+    prompt: str,
+    metadata: dict,
+    article_id: str,
+    max_attempts: int = 2,
+) -> str | None:
+    """
+    Generates an LLM response, passes it through the self-reflection gate,
+    then verifies it visually with ViLT against the product image.
+
+    Mirrors the regeneration_loop pattern but keeps the caller's custom
+    prompt (with matched_prefs, prior_claims, etc.) instead of rebuilding
+    it from scratch — so personalization context is preserved.
+
+    Fallback chain:
+        1. Self-reflection fails → regenerate with corrective feedback
+        2. VLM fails up to max_attempts → regenerate with visual feedback
+        3. No image found → return self-reflection-cleared text as-is
+    """
+    response = _call_llm(prompt)
+    if not response:
+        return response
+
+    # Self-reflection gate (NOVELTY 4): LLM scores its own output
+    passes_self, self_feedback = llm_generator.self_evaluate(response, metadata)
+    if not passes_self:
+        print(f"  [VLM] Self-reflection FAIL — regenerating. Reason: {self_feedback}")
+        regenerated = _call_llm(
+            prompt + f"\n\n[Your previous answer scored poorly: {self_feedback}. Improve it.]"
+        )
+        if regenerated:
+            response = regenerated
+
+    # VLM visual verification loop
+    image_path = data_loader.get_image(article_id)
+    if not image_path or not image_path.exists():
+        print(f"  [VLM] No image for {article_id} — skipping visual gate.")
+        return response
+
+    for attempt in range(1, max_attempts + 1):
+        is_valid, reason = blip_verifier.verify(str(image_path), response)
+        if is_valid:
+            print(f"  [VLM] Visual verification PASS (attempt {attempt}): {reason}")
+            return response
+        print(f"  [VLM] Visual verification FAIL (attempt {attempt}/{max_attempts}): {reason}")
+        if attempt < max_attempts:
+            corrected = _call_llm(
+                prompt + f"\n\n[Visual check failed: {reason}. Correct your description.]"
+            )
+            if corrected:
+                response = corrected
+
+    return response
 
 
 # =====================================================================
@@ -277,7 +433,7 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
     # incorporating soft_constraints and purchase_history context that the
     # cross-encoder cannot see.
     # ------------------------------------------------------------------
-    print(f"  [catalog_search] LLM semantic re-ranking top-8 from neural stage...")
+    print("  [catalog_search] LLM semantic re-ranking top-8 from neural stage...")
     reranked_results = llm_generator.rerank_candidates(
         user_message=user_message,
         candidates=neural_reranked,
@@ -344,6 +500,9 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
     else:
         summary = "I couldn't find any items matching all your criteria."
 
+    # Auto-print accuracy report using the request's hard filters as expected attrs
+    _print_accuracy(response_items, filters)
+
     return {
         "action": "catalog_search",
         "success": len(response_items) > 0,
@@ -398,7 +557,8 @@ def handle_attribute_lookup(retrieval_input: dict) -> dict:
         f"If the information isn't available in the details, say so honestly."
     )
 
-    response_text = _call_llm(prompt)
+    print(f"  [attribute_lookup] Running self-reflection + VLM verification...")
+    response_text = _vlm_verified_response(prompt, metadata, article_id)
     if not response_text:
         # Fallback to template-based response
         response_text = (
@@ -477,7 +637,9 @@ def handle_item_compare(retrieval_input: dict) -> dict:
         f"State which item is better for the customer and why, based on the comparison dimension."
     )
 
-    response_text = _call_llm(prompt)
+    # Verify comparison answer visually against item_a as the primary anchor
+    print(f"  [item_compare] Running self-reflection + VLM verification (anchor: item_a)...")
+    response_text = _vlm_verified_response(prompt, meta_a, article_id_a)
     if not response_text:
         response_text = (
             f"Comparing the {item_a['prod_name']} ({item_a['colour_group_name']}) "
@@ -562,7 +724,8 @@ def handle_explanation_generate(retrieval_input: dict) -> dict:
         f"Do NOT contradict any prior claims listed above."
     )
 
-    response_text = _call_llm(prompt)
+    print(f"  [explanation_generate] Running self-reflection + VLM verification...")
+    response_text = _vlm_verified_response(prompt, metadata, article_id)
     if not response_text:
         # Fallback: build explanation from matched_prefs
         if matched_prefs:
@@ -631,7 +794,8 @@ def handle_item_detail_lookup(retrieval_input: dict) -> dict:
         f"Be informative and enthusiastic. Highlight the key selling points."
     )
 
-    response_text = _call_llm(prompt)
+    print(f"  [item_detail_lookup] Running self-reflection + VLM verification...")
+    response_text = _vlm_verified_response(prompt, metadata, article_id)
     if not response_text:
         response_text = (
             f"Here are the details for the {item_info['prod_name']}: "

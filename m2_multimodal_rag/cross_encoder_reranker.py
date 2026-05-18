@@ -63,17 +63,22 @@ class NeuralCrossEncoderReranker:
 
         pool = candidates[:top_k]
 
+        def _safe(val, max_len=None) -> str:
+            """Converts a metadata value to string, treating NaN floats as empty."""
+            s = "" if isinstance(val, float) else str(val or "").strip()
+            return s[:max_len] if max_len else s
+
         # Build (query, item_text) input pairs for the cross-encoder
         pairs = []
         for c in pool:
             m = c.get("metadata", {})
             item_text = " ".join(filter(None, [
-                m.get("prod_name", ""),
-                m.get("colour_group_name", ""),
-                m.get("product_type_name", ""),
-                m.get("department_name", ""),
-                m.get("graphical_appearance_name", ""),
-                (m.get("detail_desc") or "")[:200],
+                _safe(m.get("prod_name")),
+                _safe(m.get("colour_group_name")),
+                _safe(m.get("product_type_name")),
+                _safe(m.get("department_name")),
+                _safe(m.get("graphical_appearance_name")),
+                _safe(m.get("detail_desc"), max_len=200),
             ]))
             pairs.append([query, item_text])
 
