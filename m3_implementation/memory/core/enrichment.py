@@ -863,9 +863,12 @@ class EnrichmentLayer:
                 exclude_ids=state.rejected_items,
                 payload={
                     # Single item explanation
-                    "article_id":    target_item.article_id if target_item else None,
+                    "article_id":     target_item.article_id if target_item else None,
+                    # Full item data stored at recommendation time — assembler uses
+                    # this to skip the DB query when detail_desc is already present.
+                    "context_article": target_item.model_dump() if target_item else None,
                     # All-items summary: passed when user asks "why" with no product name
-                    "all_item_ids":  (
+                    "all_item_ids":   (
                         None if target_item
                         else [it.article_id for it in all_ctx_items]
                     ),
