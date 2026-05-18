@@ -266,11 +266,16 @@ class TextRAGPipeline:
                 for item in items_recommended:
                     if item.get("article_id"):
                         rec_items.append({
-                            "article_id":        str(item["article_id"]),
-                            "prod_name":         item.get("name") or "",
-                            "product_type_name": item.get("type") or "",
-                            "colour_group_name": item.get("colour") or "",
-                            "price":             item.get("price_raw"),
+                            "article_id":                str(item["article_id"]),
+                            "prod_name":                 item.get("name") or "",
+                            "product_type_name":         item.get("type") or "",
+                            "colour_group_name":         item.get("colour") or "",
+                            "price":                     item.get("price_raw"),
+                            "index_group_name":          item.get("index_group") or None,
+                            "section_name":              item.get("section") or None,
+                            "garment_group_name":        item.get("garment_group") or None,
+                            "detail_desc":               item.get("material_description") or None,
+                            "graphical_appearance_name": item.get("pattern") or None,
                         })
 
                 await memory_pipeline.store_response(

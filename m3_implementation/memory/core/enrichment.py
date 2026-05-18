@@ -970,23 +970,29 @@ class EnrichmentLayer:
                 "side_effects":       ["Reclassified: no items in context"],
             }
 
-        # Search ALL items in currently_discussing (item_a … item_z) by name first.
-        # This handles the case where the user names item_c, item_d, etc. by name.
+        # Score ALL items in currently_discussing (item_a … item_z) by name-word overlap.
+        # Pick the item with the highest score — avoids false matches on generic category
+        # words like "sneaker" or "dress" that appear in multiple item names.
         all_ctx_items = [
             v for k, v in sorted(current_items.items())
             if k.startswith("item_") and v is not None
         ]
         msg_lower = current_message.lower()
         msg_words = set(msg_lower.split())
-        selected_item = None
+        best_item  = None
+        best_score = 0
         for item in all_ctx_items:
             name = (item.prod_name or "").lower()
-            if any(w in msg_words for w in name.split() if len(w) > 3):
-                selected_item = item
-                print(f"[ENRICH-SELECT] name-matched '{item.prod_name}' "
-                      f"(article_id={item.article_id}) from {len(all_ctx_items)} context items")
-                break
-        if selected_item is None:
+            score = sum(1 for w in name.split() if len(w) > 3 and w in msg_words)
+            if score > best_score:
+                best_score = score
+                best_item  = item
+        if best_item is not None:
+            selected_item = best_item
+            print(f"[ENRICH-SELECT] name-scored '{selected_item.prod_name}' "
+                  f"(article_id={selected_item.article_id}, score={best_score}) "
+                  f"from {len(all_ctx_items)} context items")
+        else:
             # Fallback: handles ordinals ("second one"), colours, "the other one"
             selected_item = _resolve_item_reference(current_message, item_a, item_b)
             print(f"[ENRICH-SELECT] fallback resolved to "
@@ -1019,7 +1025,10 @@ class EnrichmentLayer:
                 item_b=item_b,
                 exclude_ids=state.rejected_items,
                 payload={
-                    "article_id": selected_item.article_id if selected_item else None,
+                    "article_id":     selected_item.article_id if selected_item else None,
+                    # Full item data stored at recommendation time — assembler uses
+                    # this to skip the DB query when detail_desc is already present.
+                    "context_article": selected_item.model_dump() if selected_item else None,
                 }
             ),
             "memory_context": memory_ctx,

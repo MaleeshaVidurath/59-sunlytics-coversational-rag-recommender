@@ -515,13 +515,35 @@ class EvidenceAssembler:
     async def _assemble_detail_lookup(
         self, ri: dict, mc: dict
     ) -> dict:
-        """Fetches full article details."""
+        """
+        Fetches full article details.
+        Uses context data stored at recommendation time when available (no DB query).
+        Falls back to PostgreSQL only when detail_desc was not stored in context.
+        """
         payload      = ri.get("payload", {})
         article_id   = payload.get("article_id")
         user_message = ri.get("user_message", "")
+        context_art  = payload.get("context_article") or {}
 
         article = None
-        if article_id:
+
+        if context_art and context_art.get("detail_desc"):
+            # Rich data already in session context — skip DB query entirely
+            print(f"[ASSEMBLER-DETAIL] using stored context for article_id={article_id} (no DB query)")
+            article = {
+                "article_id":               str(context_art.get("article_id", "")),
+                "prod_name":                context_art.get("prod_name", ""),
+                "product_type_name":        context_art.get("product_type_name", ""),
+                "colour_group_name":        context_art.get("colour_group_name", ""),
+                "graphical_appearance_name":context_art.get("graphical_appearance_name", ""),
+                "detail_desc":              context_art.get("detail_desc", ""),
+                "garment_group_name":       context_art.get("garment_group_name", ""),
+                "section_name":             context_art.get("section_name", ""),
+                "index_group_name":         context_art.get("index_group_name", ""),
+                "avg_price":                context_art.get("price"),
+            }
+        elif article_id:
+            print(f"[ASSEMBLER-DETAIL] context missing detail_desc — querying DB for article_id={article_id}")
             article = await get_article_by_id(str(article_id))
 
         return {

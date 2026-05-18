@@ -139,6 +139,7 @@ class ItemInContext(BaseModel):
     section_name: Optional[str] = None
     garment_group_name: Optional[str] = None
     detail_desc: Optional[str] = None
+    graphical_appearance_name: Optional[str] = None
     price: Optional[float] = None        # From transactions if available
 
 
