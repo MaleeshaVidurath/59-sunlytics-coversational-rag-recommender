@@ -441,6 +441,41 @@ def _score_items_by_name(message: str, item_pool: list) -> list:
 
 
 
+async def _collect_session_items(session_id: str) -> list:
+    """
+    Returns all unique ItemInContext objects recommended in this session
+    (INITIAL_REQUEST and REFINEMENT turns only), oldest first.
+    Used when named items are not found in the last-turn pool.
+    """
+    try:
+        db     = get_db()
+        cursor = db.recommendations.find(
+            {
+                "session_id":    session_id,
+                "trigger_label": {"$in": ["INITIAL_REQUEST", "REFINEMENT"]},
+            },
+            {"items": 1, "created_at": 1},
+        ).sort("created_at", 1)
+        docs = await cursor.to_list(length=50)
+
+        seen_ids:  set  = set()
+        all_items: list = []
+        for doc in docs:
+            for item_dict in (doc.get("items") or []):
+                aid = item_dict.get("article_id")
+                if aid and aid not in seen_ids:
+                    seen_ids.add(aid)
+                    try:
+                        all_items.append(ItemInContext(**item_dict))
+                    except Exception:
+                        pass
+        print(f"[ENRICH-COMPARE] session history: {len(all_items)} unique items")
+        return all_items
+    except Exception as e:
+        print(f"[ENRICH-COMPARE] session history query failed: {e}")
+        return []
+
+
 # ── Helper: build items_in_context dict ───────────────────────────────────────
 
 def _items_dict(item_a, item_b) -> dict:
@@ -938,7 +973,7 @@ class EnrichmentLayer:
         }
 
     async def _enrich_comparison(
-        self, _session_id, user_id, current_message, entities, state
+        self, session_id, user_id, current_message, entities, state
     ) -> dict:
         print(f"[ENRICH-COMPARE] ━━━ called msg='{current_message[:50]}' entities={entities}")
         """COMPARISON → action: item_compare"""
@@ -958,8 +993,22 @@ class EnrichmentLayer:
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
         memory_ctx = await self._base_memory_context(user_id, state)
 
-        # Resolve which items the user named against last-turn items only.
+        # Step 1: try to match named items from the last-turn pool.
         resolved = _score_items_by_name(current_message, all_ctx_items)
+        print(f"[ENRICH-COMPARE] name-match (last turn): {[it.prod_name for it in resolved]}")
+
+        # Step 2: if last-turn pool gave <2 matches, check session history.
+        # Covers the case where the user names items from an earlier turn.
+        # If no names were mentioned either, session history also returns empty
+        # so the generic fallback below still fires correctly.
+        if len(resolved) < 2:
+            hist_pool = await _collect_session_items(session_id)
+            if hist_pool:
+                hist_resolved = _score_items_by_name(current_message, hist_pool)
+                if len(hist_resolved) >= 2:
+                    resolved = hist_resolved
+                    print(f"[ENRICH-COMPARE] name-match (session history): "
+                          f"{[it.prod_name for it in resolved]}")
 
         if len(resolved) >= 2:
             compare_a    = resolved[0]
@@ -968,7 +1017,7 @@ class EnrichmentLayer:
             print(f"[ENRICH-COMPARE] named {len(resolved)} item(s): "
                   f"{[it.prod_name for it in resolved]}")
         else:
-            # No names mentioned — compare all last-turn items
+            # No names mentioned — compare all last-turn items only
             compare_a    = all_ctx_items[0] if all_ctx_items else None
             compare_b    = all_ctx_items[1] if len(all_ctx_items) > 1 else None
             compare_list = all_ctx_items
