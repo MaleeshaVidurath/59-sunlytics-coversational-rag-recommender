@@ -551,10 +551,10 @@ class EnrichmentLayer:
 
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
 
-        # Extract hard constraints from entities
+        # Extract hard constraints from entities — quantity is NOT a DB filter
         new_constraints = {
             k: v for k, v in entities.items()
-            if k not in ("style", "occasion") and v is not None
+            if k not in ("style", "occasion", "quantity") and v is not None
         }
 
         if new_constraints:
@@ -600,7 +600,6 @@ class EnrichmentLayer:
                     # Hard constraints — mandatory WHERE conditions
                     "filters": merged_filters,
                     # Soft constraints from session state (style, occasion)
-                    # NOT mandatory — use to contextualise search and ranking
                     "soft_constraints": {
                         k: v for k, v in state.soft_constraints.items()
                         if v is not None
@@ -619,6 +618,8 @@ class EnrichmentLayer:
                     "purchase_history_hints": await self._get_purchase_hints(user_id),
                     # Disliked values — rank lower in results
                     "penalties": pref_summary.get("disliked_values", {}),
+                    # Quantity requested by user — from LLM entity extraction
+                    "quantity": entities.get("quantity") if entities else None,
                 }
             ),
             "memory_context": memory_ctx,
@@ -642,7 +643,7 @@ class EnrichmentLayer:
         # New constraints from this message, merged on top of existing ones
         new_constraints = {
             k: v for k, v in entities.items()
-            if k not in ("style", "occasion") and v is not None
+            if k not in ("style", "occasion", "quantity") and v is not None
         }
 
         # Override LLM-guessed price_max when user says "cheaper [than X]"
@@ -885,11 +886,39 @@ class EnrichmentLayer:
         item_a = current_items.get("item_a")
         item_b = current_items.get("item_b")
 
+        # Collect ALL items stored in currently_discussing (item_a … item_e)
+        all_ctx_items = [
+            v for k, v in sorted(current_items.items())
+            if k.startswith("item_") and v is not None
+        ]
+        print(f"[ENRICH-COMPARE] currently_discussing keys={list(current_items.keys())} "
+              f"non-null items={len(all_ctx_items)}")
+
         # Identify comparison dimension using hybrid similarity
         dimension = _identify_comparison_dimension(current_message)
 
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
         memory_ctx = await self._base_memory_context(user_id, state)
+
+        payload = {
+            "article_id_a":         item_a.article_id if item_a else None,
+            "article_id_b":         item_b.article_id if item_b else None,
+            "comparison_dimension": dimension,
+            "preference_weights": {
+                p["attribute_name"]: p["weight"]
+                for p in pref_summary.get("liked_attributes", [])
+            },
+        }
+        if len(all_ctx_items) > 2:
+            payload["article_ids_list"] = [
+                {
+                    "article_id": it.article_id,
+                    "prod_name":  it.prod_name,
+                    "colour":     it.colour_group_name,
+                    "price":      getattr(it, "price", None),
+                }
+                for it in all_ctx_items
+            ]
 
         return {
             "label":              "COMPARISON",
@@ -901,15 +930,7 @@ class EnrichmentLayer:
                 item_a=item_a,
                 item_b=item_b,
                 exclude_ids=state.rejected_items,
-                payload={
-                    "article_id_a":        item_a.article_id if item_a else None,
-                    "article_id_b":        item_b.article_id if item_b else None,
-                    "comparison_dimension": dimension,
-                    "preference_weights": {
-                        p["attribute_name"]: p["weight"]
-                        for p in pref_summary.get("liked_attributes", [])
-                    },
-                }
+                payload=payload,
             ),
             "memory_context": memory_ctx,
             "side_effects":   [],

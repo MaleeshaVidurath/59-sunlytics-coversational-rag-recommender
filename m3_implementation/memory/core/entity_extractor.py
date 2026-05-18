@@ -161,6 +161,15 @@ def _validate_entities(entities: dict) -> dict:
         if entities["style"] in VALID_STYLES:
             validated["style"] = entities["style"]
 
+    # Quantity: accept any positive integer
+    if "quantity" in entities:
+        try:
+            qty = int(entities["quantity"])
+            if qty > 0:
+                validated["quantity"] = qty
+        except (TypeError, ValueError):
+            pass
+
     return validated
 
 

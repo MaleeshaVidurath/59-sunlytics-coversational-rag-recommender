@@ -255,9 +255,9 @@ class TextRAGPipeline:
                     if item.get("article_id"):
                         rec_items.append({
                             "article_id":        str(item["article_id"]),
-                            "prod_name":         item.get("name", ""),
-                            "product_type_name": item.get("type", ""),
-                            "colour_group_name": item.get("colour", ""),
+                            "prod_name":         item.get("name") or "",
+                            "product_type_name": item.get("type") or "",
+                            "colour_group_name": item.get("colour") or "",
                             "price":             item.get("price_raw"),
                         })
 
