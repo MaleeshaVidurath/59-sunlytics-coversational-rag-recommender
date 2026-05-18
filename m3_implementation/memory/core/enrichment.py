@@ -292,7 +292,7 @@ def _classify_feedback_sentiment(message: str) -> float:
 # context and sets price_max to strictly below that price.
 
 _CHEAPER_KEYWORDS = frozenset([
-    "cheaper", "less expensive", "more affordable", "lower price",
+    "cheaper", "cheapest", "cheap", "less expensive", "more affordable", "lower price",
     "cheaper than", "not as expensive", "cost less", "budget option",
     "something cheaper", "a cheaper one",
 ])
@@ -301,8 +301,7 @@ _CHEAPER_KEYWORDS = frozenset([
 def _resolve_cheaper_price(
     message: str,
     constraints: dict,
-    item_a,
-    item_b,
+    *context_items,
 ) -> dict:
     """
     Override price_max when the user asks for something cheaper.
@@ -314,12 +313,16 @@ def _resolve_cheaper_price(
     Sets price_max = reference_price - 0.01 (strictly cheaper).
     """
     msg_lower = message.lower()
-    if not any(kw in msg_lower for kw in _CHEAPER_KEYWORDS):
+    is_cheaper = (
+        any(kw in msg_lower for kw in _CHEAPER_KEYWORDS)
+        or any(w.startswith("cheap") for w in msg_lower.split())
+    )
+    if not is_cheaper:
         return constraints
 
     # Collect (item, price) pairs that have a known price
     items_with_price = []
-    for item in (item_a, item_b):
+    for item in context_items:
         if item is None:
             continue
         price = getattr(item, "price", None)
@@ -724,10 +727,14 @@ class EnrichmentLayer:
 
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
 
-        # Extract items first so we can use their prices for constraint resolution
+        # Extract items for retrieval_input and price resolution
         current_items = state.currently_discussing
         item_a = current_items.get("item_a")
         item_b = current_items.get("item_b")
+        all_ctx_items = [
+            v for k, v in sorted(current_items.items())
+            if k.startswith("item_") and v is not None
+        ]
 
         # New constraints from this message, merged on top of existing ones
         new_constraints = {
@@ -736,8 +743,9 @@ class EnrichmentLayer:
         }
 
         # Override LLM-guessed price_max when user says "cheaper [than X]"
+        # Pass all currently_discussing items so min price covers all recommended items
         new_constraints = _resolve_cheaper_price(
-            current_message, new_constraints, item_a, item_b
+            current_message, new_constraints, *all_ctx_items
         )
 
         merged_constraints = {**state.hard_constraints, **new_constraints}
