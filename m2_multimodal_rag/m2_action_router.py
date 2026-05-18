@@ -23,6 +23,14 @@ from m2_multimodal_rag.m2_handlers import (
     handle_no_retrieval,
 )
 
+HANDLER_MAP = {
+    "catalog_search": handle_catalog_search,
+    "item_attribute_lookup": handle_attribute_lookup,
+    "item_compare": handle_item_compare,
+    "explanation_generate": handle_explanation_generate,
+    "item_detail_lookup": handle_item_detail_lookup,
+}
+
 
 class M2ActionRouter:
     """
@@ -31,14 +39,7 @@ class M2ActionRouter:
     and routes to the appropriate action handler.
     """
 
-    # Valid action types from the retrieval_input reference spec
-    VALID_ACTIONS = {
-        "catalog_search",
-        "item_attribute_lookup",
-        "item_compare",
-        "explanation_generate",
-        "item_detail_lookup",
-    }
+    VALID_ACTIONS = set(HANDLER_MAP.keys())
 
     def __init__(self):
         print("M2 Router: Action Router initialized. Ready to receive retrieval_input from m3 pipeline.")
@@ -92,20 +93,7 @@ class M2ActionRouter:
         print(f"    User message: \"{user_message}\"")
 
         try:
-            if action == "catalog_search":
-                return handle_catalog_search(retrieval_input)
-
-            elif action == "item_attribute_lookup":
-                return handle_attribute_lookup(retrieval_input)
-
-            elif action == "item_compare":
-                return handle_item_compare(retrieval_input)
-
-            elif action == "explanation_generate":
-                return handle_explanation_generate(retrieval_input)
-
-            elif action == "item_detail_lookup":
-                return handle_item_detail_lookup(retrieval_input)
+            return HANDLER_MAP[action](retrieval_input)
 
         except Exception as e:
             print(f"M2 Router: [ERROR] Handler for '{action}' failed: {e}")

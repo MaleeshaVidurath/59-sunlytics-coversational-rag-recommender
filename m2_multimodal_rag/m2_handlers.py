@@ -587,13 +587,31 @@ def handle_item_compare(retrieval_input: dict) -> dict:
     Compares two items currently in context on a specified dimension
     (price, quality, style_and_occasion, material, colour, fit, overall).
     Uses preference_weights to explain which item better matches the user.
+
+    VLM verification runs in two phases:
+      Phase 1 — self-reflection + BLIP against item_a (existing)
+      Phase 2 — additional BLIP pass against item_b to catch hallucinations
+                 about the second item that item_a's image cannot detect
     """
     payload = retrieval_input.get("payload", {})
     user_message = retrieval_input.get("user_message", "")
-    article_id_a = payload.get("article_id_a", "")
-    article_id_b = payload.get("article_id_b", "")
+    article_id_a = payload.get("article_id_a") or ""
+    article_id_b = payload.get("article_id_b") or ""
     comparison_dimension = payload.get("comparison_dimension", "overall")
     preference_weights = payload.get("preference_weights", {})
+
+    # Guard: both article IDs are required to compare
+    if not article_id_a or not article_id_b:
+        return {
+            "action": "item_compare",
+            "success": False,
+            "response_text": (
+                "I'd be happy to compare items for you! "
+                "Could you let me know which two items you'd like me to compare?"
+            ),
+            "items": [],
+            "error": "Missing article_id_a or article_id_b in payload",
+        }
 
     print(f"  [item_compare] Comparing {article_id_a} vs {article_id_b} on '{comparison_dimension}'")
 
@@ -637,9 +655,30 @@ def handle_item_compare(retrieval_input: dict) -> dict:
         f"State which item is better for the customer and why, based on the comparison dimension."
     )
 
-    # Verify comparison answer visually against item_a as the primary anchor
-    print(f"  [item_compare] Running self-reflection + VLM verification (anchor: item_a)...")
+    # ── Phase 1: self-reflection + BLIP verification against item_a ───────────
+    print(f"  [item_compare] Phase 1 — self-reflection + VLM verification (anchor: item_a)...")
     response_text = _vlm_verified_response(prompt, meta_a, article_id_a)
+
+    # ── Phase 2: additional BLIP pass against item_b ──────────────────────────
+    # Catches hallucinations about item_b that item_a's image cannot detect.
+    if response_text:
+        image_path_b = data_loader.get_image(article_id_b)
+        if image_path_b and image_path_b.exists():
+            print(f"  [item_compare] Phase 2 — additional VLM verification (anchor: item_b)...")
+            is_valid_b, reason_b = blip_verifier.verify(str(image_path_b), response_text)
+            if is_valid_b:
+                print(f"  [item_compare] Item B VLM PASS: {reason_b}")
+            else:
+                print(f"  [item_compare] Item B VLM FAIL: {reason_b} — regenerating with item_b feedback")
+                corrected = _call_llm(
+                    prompt + f"\n\n[Visual check on Item B failed: {reason_b}. "
+                             f"Ensure your description of Item B is visually accurate.]"
+                )
+                if corrected:
+                    response_text = corrected
+        else:
+            print(f"  [item_compare] Phase 2 — no image for item_b ({article_id_b}), skipping.")
+
     if not response_text:
         response_text = (
             f"Comparing the {item_a['prod_name']} ({item_a['colour_group_name']}) "
