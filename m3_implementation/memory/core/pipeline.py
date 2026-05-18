@@ -589,8 +589,9 @@ class MemoryPipeline:
             for item_dict in recommended_items:
                 try:
                     items.append(ItemInContext(**item_dict))
-                except Exception:
-                    pass
+                except Exception as _e:
+                    print(f"[store_response] ItemInContext validation FAILED for "
+                          f"article_id={item_dict.get('article_id','?')}: {_e}")
 
             rec_doc = RecommendationDocument(
                 session_id=session_id,
@@ -605,15 +606,20 @@ class MemoryPipeline:
             )
             recommendation_id = rec_doc.recommendation_id
 
+            print(f"[store_response] {len(recommended_items)} passed in, "
+                  f"{len(items)} passed ItemInContext validation")
             if len(items) >= 1:
+                _labels = "abcde"
+                _discussing = {
+                    f"item_{_labels[i]}": item.model_dump()
+                    for i, item in enumerate(items[:5])
+                }
+                if len(items) == 1:
+                    _discussing["item_b"] = None
+                print(f"[store_response] saving currently_discussing keys={list(_discussing.keys())}")
                 await self.session_mgr.update_dialogue_state(
                     session_id,
-                    {
-                        "currently_discussing": {
-                            "item_a": items[0].model_dump(),
-                            "item_b": items[1].model_dump() if len(items) >= 2 else None
-                        }
-                    }
+                    {"currently_discussing": _discussing}
                 )
 
         bot_turn = await self.turn_mgr.add_assistant_turn(

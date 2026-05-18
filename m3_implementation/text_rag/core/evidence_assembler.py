@@ -23,33 +23,44 @@ from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
-def _extract_quantity(message: str) -> int:
+_WORD_TO_DIGIT = {
+    "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9",
+}
+
+_MAX_RECOMMENDATIONS = 5  # maximum items that can be returned in one turn
+
+def _extract_quantity(message: str, payload_qty: int = 0) -> int:
     """
     Extracts requested quantity from user message.
-    e.g. "5 t shirts in 5 colours" -> 5
-         "show me 3 dresses" -> 3
-         "I need a dress" -> 2 (default)
-    Max allowed: 5
+    e.g. "5 shirts"   -> 5  (honours the request, capped at 5)
+         "six shirts"  -> 5  (word recognised)
+         "I need a dress" -> 2 (default when no number given)
+    Max allowed: 5  (matches item_a … item_e slots in currently_discussing)
+    Default: 2
+    Accepts an optional payload_qty already extracted by the LLM entity extractor.
     """
+    # Payload quantity from LLM entity extraction takes priority
+    if payload_qty and payload_qty >= 2:
+        return min(payload_qty, _MAX_RECOMMENDATIONS)
+
+    # Normalise English number words to digits before regex matching
     msg = message.lower()
+    for word, digit in _WORD_TO_DIGIT.items():
+        msg = re.sub(rf"\b{word}\b", digit, msg)
+
     patterns = [
-        # "5 colours" / "5 options"
         r"\b([2-9])\s+(?:different\s+)?(?:colours?|colors?|options?|items?|pieces?|styles?)\b",
-        # "5 t shirts" / "5 shirts" / "5 dresses" — handles "t shirt" too
-        r"\b([2-9])\s+(?:t[- ])?(?:dress|top|shirt|trouser|short|jacket|sweater|skirt|coat|blouse)s?\b",
-        # "show me 5" / "find me 3"
+        r"\b([2-9])\s+(?:t[- ])?(?:dress|top|shirt|trouser|short|jacket|sweater|skirt|coat|blouse|bra|bras|sock|socks|shoe|shoes|boot|boots|jean|jeans|short|shorts|hoodie|hoodies|cardigan|cardigans|blazer|blazers|legging|leggings)s?\b",
         r"\b(?:show|find|get|give)\s+(?:me\s+)?([2-9])\b",
-        # "need 5" / "want 3" / "buy 4"
         r"\b(?:need|want|buy)\s+([2-9])\b",
-        # starts with number "5 shorts"
         r"^([2-9])\s+",
     ]
     for pattern in patterns:
         m = re.search(pattern, msg)
         if m:
-            qty = int(m.group(1))
-            return min(qty, 5)
-    return 2  # default
+            return min(int(m.group(1)), _MAX_RECOMMENDATIONS)
+    return 2  # default when no quantity mentioned
 
 
 def _ensure_colour_diversity(articles: list, requested_qty: int) -> list:
@@ -171,6 +182,7 @@ class EvidenceAssembler:
         soft_constraints = payload.get("soft_constraints", {})
         exclude_ids    = ri.get("exclude_ids", [])
         user_message   = ri.get("user_message", "")
+        payload_qty    = int(payload.get("quantity") or 0)
 
         # Step 1: Semantic search in Qdrant
         semantic_query = self._build_semantic_query(user_message, filters, soft_constraints)
@@ -179,7 +191,7 @@ class EvidenceAssembler:
             filters=filters,
             exclude_ids=exclude_ids,
             penalties=payload.get("penalties", {}),
-            top_k=max(20, _extract_quantity(user_message) * 5)
+            top_k=max(20, _extract_quantity(user_message, payload_qty) * 5)
         )
 
         print(f"[ASSEMBLER-QDRANT] got {len(qdrant_results)} results")
@@ -187,7 +199,7 @@ class EvidenceAssembler:
         # Step 2: PostgreSQL filtered search for ranking diversity
         # Fetch larger pool when user requests multiple items
         print(f"\n[ASSEMBLER-CATALOG] ━━━ catalog search ━━━")
-        requested_qty = _extract_quantity(user_message)
+        requested_qty = _extract_quantity(user_message, payload_qty)
         print(f"[ASSEMBLER-CATALOG] qty={requested_qty} msg='{user_message[:60]}'")
         print(f"[ASSEMBLER-CATALOG] filters={filters}")
         print(f"[ASSEMBLER-CATALOG] exclude_ids={exclude_ids}")
@@ -312,27 +324,65 @@ class EvidenceAssembler:
     async def _assemble_comparison(
         self, ri: dict, mc: dict
     ) -> dict:
-        """Fetches both articles and assembles comparison evidence."""
-        payload    = ri.get("payload", {})
-        id_a       = payload.get("article_id_a")
-        id_b       = payload.get("article_id_b")
-        dimension  = payload.get("comparison_dimension", "overall")
+        """Fetches all context articles and assembles comparison evidence."""
+        payload      = ri.get("payload", {})
+        id_a         = payload.get("article_id_a")
+        id_b         = payload.get("article_id_b")
+        dimension    = payload.get("comparison_dimension", "overall")
         pref_weights = payload.get("preference_weights", {})
         user_message = ri.get("user_message", "")
+        ids_list     = payload.get("article_ids_list")  # all context items if >2
 
         item_a, item_b = await get_articles_for_comparison(
             str(id_a) if id_a else "",
             str(id_b) if id_b else ""
         )
 
+        # Fetch ALL context items when >2 were recommended
+        items_all = None
+        if ids_list and len(ids_list) > 2:
+            all_ids = [entry["article_id"] for entry in ids_list]
+            fetched = await get_articles_by_ids(all_ids)
+            # Preserve order from ids_list; attach context prices where DB has none
+            id_to_ctx = {entry["article_id"]: entry for entry in ids_list}
+            items_all = []
+            for art in fetched:
+                aid = str(art.get("article_id", ""))
+                ctx = id_to_ctx.get(aid, {})
+                if art.get("avg_price") is None and ctx.get("price") is not None:
+                    art = dict(art)
+                    art["avg_price"] = ctx["price"]
+                items_all.append(art)
+            # Sort by price ascending for price comparisons
+            if dimension == "price":
+                items_all.sort(key=lambda x: float(x.get("avg_price") or 9999))
+
         # Build dimension-specific comparison facts
         comparison_facts = _build_comparison_facts(item_a, item_b, dimension)
+
+        # For multi-item price comparison, override with full ranked list
+        if items_all and dimension == "price":
+            comparison_facts["all_items_ranked"] = [
+                {
+                    "name":   a.get("prod_name", ""),
+                    "colour": a.get("colour_group_name", ""),
+                    "price":  _format_price(a.get("avg_price")),
+                }
+                for a in items_all
+            ]
+            if items_all:
+                cheapest = items_all[0]
+                comparison_facts["cheaper_item"] = (
+                    f"{cheapest.get('prod_name','')} ({cheapest.get('colour_group_name','')})"
+                )
+                comparison_facts["cheapest_price"] = _format_price(cheapest.get("avg_price"))
 
         return {
             "action":            "item_compare",
             "user_message":      user_message,
             "item_a":            _article_summary(item_a) if item_a else None,
             "item_b":            _article_summary(item_b) if item_b else None,
+            "items_all":         items_all,
             "comparison_dimension": dimension,
             "comparison_facts":  comparison_facts,
             "preference_weights":pref_weights,

@@ -152,20 +152,40 @@ Answer the question in 1-2 sentences. Do not invent information not in the facts
 
 
 def _build_comparison_prompt(evidence: dict, strictness: int = 0) -> str:
-    """Prompt for comparing two items."""
-    item_a  = evidence.get("item_a") or {}
-    item_b  = evidence.get("item_b") or {}
-    facts   = evidence.get("comparison_facts", {})
-    dim     = evidence.get("comparison_dimension", "overall")
-    user_msg= evidence.get("user_message", "")
-
-    facts_text = "\n".join(f"  {k}: {v}" for k, v in facts.items() if v)
+    """Prompt for comparing two or more items."""
+    item_a    = evidence.get("item_a") or {}
+    item_b    = evidence.get("item_b") or {}
+    facts     = evidence.get("comparison_facts", {})
+    dim       = evidence.get("comparison_dimension", "overall")
+    user_msg  = evidence.get("user_message", "")
+    items_all = evidence.get("items_all")
 
     strictness_instruction = {
         0: "Compare them helpfully and clearly.",
         1: "STRICT MODE: State ONLY facts present in the evidence below.",
         2: "STRICTEST MODE: Use bullet points, each citing a specific fact from evidence.",
     }[strictness]
+
+    # Multi-item price comparison — list all prices, identify cheapest
+    if items_all and len(items_all) > 2 and dim == "price":
+        ranked = facts.get("all_items_ranked", [])
+        if ranked:
+            price_lines = "\n".join(
+                f"  {i+1}. {r['name']} ({r['colour']}) — {r['price']}"
+                for i, r in enumerate(ranked)
+            )
+            cheapest = ranked[0]
+            return (
+                FASHION_CONTEXT
+                + f'\nUser asked: "{user_msg}"\n\n'
+                + f"All {len(ranked)} recommended items from cheapest to most expensive:\n"
+                + price_lines
+                + f"\n\n{strictness_instruction}\n"
+                + f"State that {cheapest['name']} ({cheapest['colour']}) at {cheapest['price']} is the cheapest, "
+                + "then briefly list all other prices. Write 2-3 sentences."
+            )
+
+    facts_text = "\n".join(f"  {k}: {v}" for k, v in facts.items() if v)
 
     return FASHION_CONTEXT + f"""You are a fashion shopping assistant.
 {strictness_instruction}
@@ -586,10 +606,25 @@ class ResponseGenerator:
             return f"Here are the details for {name}: {article.get('colour','')} {article.get('type','')}."
 
         elif action == "item_compare":
-            facts = evidence.get("comparison_facts", {})
-            dim   = evidence.get("comparison_dimension", "overall")
-            a_name = facts.get("item_a_name", "Option 1")
-            b_name = facts.get("item_b_name", "Option 2")
+            facts     = evidence.get("comparison_facts", {})
+            dim       = evidence.get("comparison_dimension", "overall")
+            items_all = evidence.get("items_all")
+            a_name    = facts.get("item_a_name", "Option 1")
+            b_name    = facts.get("item_b_name", "Option 2")
+            # Multi-item price fallback
+            if dim == "price" and items_all and len(items_all) > 2:
+                ranked = facts.get("all_items_ranked", [])
+                if ranked:
+                    cheapest = ranked[0]
+                    others = ", ".join(
+                        f"{r['name']} ({r['colour']}) {r['price']}"
+                        for r in ranked[1:]
+                    )
+                    return (
+                        f"The cheapest is {cheapest['name']} ({cheapest['colour']}) "
+                        f"at {cheapest['price']}. "
+                        f"Other prices: {others}."
+                    )
             if dim == "price" and facts.get("cheaper_item"):
                 diff = facts.get("price_difference", "")
                 return (
