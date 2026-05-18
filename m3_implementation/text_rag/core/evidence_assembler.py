@@ -473,20 +473,34 @@ class EvidenceAssembler:
                 "style_profile":     mc.get("style_profile", {}),
             }
 
+        context_art = payload.get("context_article") or {}
         article = None
-        if article_id:
+
+        if context_art and context_art.get("detail_desc"):
+            # Rich data already in session context — skip DB query entirely
+            print(f"[ASSEMBLER-EXPLAIN] using stored context for article_id={article_id} (no DB query)")
+            article = {
+                "article_id":               str(context_art.get("article_id", "")),
+                "prod_name":                context_art.get("prod_name", ""),
+                "product_type_name":        context_art.get("product_type_name", ""),
+                "colour_group_name":        context_art.get("colour_group_name", ""),
+                "graphical_appearance_name":context_art.get("graphical_appearance_name", ""),
+                "detail_desc":              context_art.get("detail_desc", ""),
+                "garment_group_name":       context_art.get("garment_group_name", ""),
+                "section_name":             context_art.get("section_name", ""),
+                "index_group_name":         context_art.get("index_group_name", ""),
+                "avg_price":                context_art.get("price"),
+            }
+        elif article_id:
+            print(f"[ASSEMBLER-EXPLAIN] context missing detail_desc — querying DB for article_id={article_id}")
             article = await get_article_by_id(str(article_id))
-            print(f"[ASSEMBLER-EXPLAIN] get_article_by_id result: {article is not None}")
             if article:
-                print(f"[ASSEMBLER-EXPLAIN] article keys: {list(article.keys())[:10]}")
                 print(f"[ASSEMBLER-EXPLAIN] article: name={article.get('prod_name')} colour={article.get('colour_group_name')} type={article.get('product_type_name')}")
             else:
                 print(f"[ASSEMBLER-EXPLAIN] WARNING: article not found for id={article_id}")
-                # Try from items_in_context as fallback
                 for slot in ['item_a', 'item_b']:
                     ctx_item = items_ctx.get(slot) or {}
                     if str(ctx_item.get('article_id','')) == str(article_id):
-                        # Build a minimal article dict from context
                         article = {
                             'article_id':        str(article_id),
                             'prod_name':         ctx_item.get('prod_name',''),
