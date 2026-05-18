@@ -1026,6 +1026,8 @@ class EnrichmentLayer:
         payload = {
             "article_id_a":         compare_a.article_id if compare_a else None,
             "article_id_b":         compare_b.article_id if compare_b else None,
+            "context_article_a":    compare_a.model_dump() if compare_a else None,
+            "context_article_b":    compare_b.model_dump() if compare_b else None,
             "comparison_dimension": dimension,
             "preference_weights": {
                 p["attribute_name"]: p["weight"]
@@ -1041,6 +1043,9 @@ class EnrichmentLayer:
                     "price":      getattr(it, "price", None),
                 }
                 for it in compare_list
+            ]
+            payload["context_items_list"] = [
+                it.model_dump() for it in compare_list
             ]
 
         return {

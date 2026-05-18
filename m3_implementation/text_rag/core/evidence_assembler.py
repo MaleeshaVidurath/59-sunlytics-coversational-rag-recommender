@@ -94,6 +94,26 @@ def _format_price(price) -> str:
     return f"£{float(price):.2f}"
 
 
+def _ctx_to_article(ctx: dict) -> dict:
+    """
+    Convert a stored ItemInContext dict (from session memory) to the same
+    shape as a DB article dict. Only difference: stored context uses 'price',
+    DB uses 'avg_price'.
+    """
+    return {
+        "article_id":                str(ctx.get("article_id", "")),
+        "prod_name":                 ctx.get("prod_name", ""),
+        "product_type_name":         ctx.get("product_type_name", ""),
+        "colour_group_name":         ctx.get("colour_group_name", ""),
+        "graphical_appearance_name": ctx.get("graphical_appearance_name", ""),
+        "detail_desc":               ctx.get("detail_desc", ""),
+        "garment_group_name":        ctx.get("garment_group_name", ""),
+        "section_name":              ctx.get("section_name", ""),
+        "index_group_name":          ctx.get("index_group_name", ""),
+        "avg_price":                 ctx.get("price"),
+    }
+
+
 def _article_summary(art: dict) -> dict:
     """Returns a clean summary dict of an article for the evidence bundle."""
     if not art:
@@ -377,17 +397,45 @@ class EvidenceAssembler:
         user_message = ri.get("user_message", "")
         ids_list     = payload.get("article_ids_list")  # all context items if >2
 
-        item_a, item_b = await get_articles_for_comparison(
-            str(id_a) if id_a else "",
-            str(id_b) if id_b else ""
-        )
+        ctx_a = payload.get("context_article_a") or {}
+        ctx_b = payload.get("context_article_b") or {}
 
-        # Fetch ALL context items when >2 were recommended
+        if ctx_a.get("detail_desc") and ctx_b.get("detail_desc"):
+            print("[ASSEMBLER-COMPARE] using stored context for both items (no DB query)")
+            item_a = _ctx_to_article(ctx_a)
+            item_b = _ctx_to_article(ctx_b)
+        else:
+            print("[ASSEMBLER-COMPARE] context missing detail_desc — querying DB")
+            item_a, item_b = await get_articles_for_comparison(
+                str(id_a) if id_a else "",
+                str(id_b) if id_b else ""
+            )
+
+        # Build items_all for multi-item comparisons (>2 items)
         items_all = None
-        if ids_list and len(ids_list) > 2:
+        ctx_items_list = payload.get("context_items_list")
+        if ctx_items_list and len(ctx_items_list) > 2:
+            if all(c.get("detail_desc") for c in ctx_items_list):
+                print(f"[ASSEMBLER-COMPARE] using stored context for all "
+                      f"{len(ctx_items_list)} items (no DB query)")
+                items_all = [_ctx_to_article(c) for c in ctx_items_list]
+            else:
+                print("[ASSEMBLER-COMPARE] context missing detail_desc — querying DB for all items")
+                all_ids = [c["article_id"] for c in ctx_items_list]
+                fetched = await get_articles_by_ids(all_ids)
+                id_to_ctx = {c["article_id"]: c for c in ctx_items_list}
+                items_all = []
+                for art in fetched:
+                    aid = str(art.get("article_id", ""))
+                    ctx = id_to_ctx.get(aid, {})
+                    if art.get("avg_price") is None and ctx.get("price") is not None:
+                        art = dict(art)
+                        art["avg_price"] = ctx["price"]
+                    items_all.append(art)
+        elif ids_list and len(ids_list) > 2:
+            # Legacy fallback: no context_items_list in payload
             all_ids = [entry["article_id"] for entry in ids_list]
             fetched = await get_articles_by_ids(all_ids)
-            # Preserve order from ids_list; attach context prices where DB has none
             id_to_ctx = {entry["article_id"]: entry for entry in ids_list}
             items_all = []
             for art in fetched:
@@ -397,9 +445,9 @@ class EvidenceAssembler:
                     art = dict(art)
                     art["avg_price"] = ctx["price"]
                 items_all.append(art)
-            # Sort by price ascending for price comparisons
-            if dimension == "price":
-                items_all.sort(key=lambda x: float(x.get("avg_price") or 9999))
+
+        if items_all and dimension == "price":
+            items_all.sort(key=lambda x: float(x.get("avg_price") or 9999))
 
         # Build dimension-specific comparison facts
         comparison_facts = _build_comparison_facts(item_a, item_b, dimension)
