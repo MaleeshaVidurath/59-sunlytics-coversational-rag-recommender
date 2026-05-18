@@ -801,38 +801,40 @@ class EnrichmentLayer:
         item_a = current_items.get("item_a")
         item_b = current_items.get("item_b")
 
-        # ── Identify which specific item user is asking about ──────────────
-        # Resolution order (first match wins — no fallback overrides):
-        #   1. Explicit ordinal ref ("first", "option 1") → item_a
-        #   2. Explicit ordinal ref ("second", "option 2") → item_b
-        #   3. item_b name word match → item_b   (checked before item_a so
-        #      shared words like "short"/"shorts" don't cause item_a to win)
-        #   4. item_a name word match → item_a
-        #   5. Default → item_a
-        #
-        # Uses WORD-SET matching (msg split into words) so "short" does NOT
-        # match inside "shorts" the way a substring check would.
+        # Collect ALL recommended items (item_a … item_z)
+        all_ctx_items = [
+            v for k, v in sorted(current_items.items())
+            if k.startswith("item_") and v is not None
+        ]
+
         msg_lower = current_message.lower()
         msg_words = set(msg_lower.split())
 
-        def _name_match(item) -> bool:
-            if not item:
-                return False
-            name = (item.prod_name or "").lower()
-            return any(w in msg_words for w in name.split() if len(w) > 3)
-
+        # ── Identify which specific item user is asking about ──────────────
+        # Explicit ordinals first, then score ALL items by name-word overlap.
+        # Avoids false matches on generic category words (e.g. "shorts"
+        # appears in every item name when user asks "why JONES 5-PKT SHORTS").
+        # When no name is mentioned at all → target_item = None (explain all).
         if any(ref in msg_lower for ref in ["first", "option 1", "1st", "number 1", "#1"]):
             target_item = item_a
         elif any(ref in msg_lower for ref in [
             "second", "option 2", "2nd", "number 2", "the other", "latter", "last one", "#2"
         ]):
             target_item = item_b
-        elif _name_match(item_b):
-            target_item = item_b
-        elif _name_match(item_a):
-            target_item = item_a
         else:
-            target_item = item_a  # default: first item
+            best_item  = None
+            best_score = 0
+            for item in all_ctx_items:
+                name  = (item.prod_name or "").lower()
+                score = sum(1 for w in name.split() if len(w) > 3 and w in msg_words)
+                if score > best_score:
+                    best_score = score
+                    best_item  = item
+            target_item = best_item if best_score > 0 else None
+
+        print(f"[ENRICH-WHY] target_item="
+              f"'{target_item.prod_name if target_item else 'ALL ITEMS'}' "
+              f"(scored from {len(all_ctx_items)} context items)")
 
         # ── Fetch stored explanation for target item ───────────────────────
         existing_explanation = None
@@ -849,11 +851,6 @@ class EnrichmentLayer:
         memory_ctx = await self._base_memory_context(user_id, state)
         memory_ctx["existing_explanation"] = existing_explanation
 
-        # Log which item was targeted for debugging
-        target_name = (target_item.prod_name if target_item else "unknown")
-        print(f"[EnrichExplanation] User asked about: '{target_name}' "
-              f"(parsed from: '{current_message[:50]}')")
-
         return {
             "label":              "EXPLANATION_WHY",
             "retrieval_strategy": "PARTIAL",
@@ -861,11 +858,17 @@ class EnrichmentLayer:
                 action="explanation_generate",
                 retrieval_strategy="PARTIAL",
                 user_message=current_message,
-                item_a=target_item,
+                item_a=target_item if target_item else item_a,
                 item_b=item_b if target_item != item_b else item_a,
                 exclude_ids=state.rejected_items,
                 payload={
-                    "article_id":   target_item.article_id if target_item else None,
+                    # Single item explanation
+                    "article_id":    target_item.article_id if target_item else None,
+                    # All-items summary: passed when user asks "why" with no product name
+                    "all_item_ids":  (
+                        None if target_item
+                        else [it.article_id for it in all_ctx_items]
+                    ),
                     "prior_claims": (
                         existing_explanation.get("claims", [])
                         if existing_explanation else []

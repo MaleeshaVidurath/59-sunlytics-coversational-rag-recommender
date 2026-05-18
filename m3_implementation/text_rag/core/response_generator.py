@@ -203,6 +203,48 @@ Always refer to items by their actual names: {item_a.get('name','Option 1')} and
 Write a clear comparison in 2-3 sentences. State which clothing item is better for {dim} and why, using only the facts above."""
 
 
+def _build_explanation_all_prompt(evidence: dict, strictness: int = 0) -> str:
+    """Prompt when user asks 'why' with no specific product name — summarise all recommended items."""
+    articles  = evidence.get("articles", [])
+    all_prefs = evidence.get("matched_prefs", [])
+    user_msg  = evidence.get("user_message", "")
+
+    item_lines = []
+    for i, a in enumerate(articles, 1):
+        item_lines.append(
+            f"  Option {i}: {a.get('name','')} | "
+            f"{a.get('colour','')} {a.get('type','')} | {a.get('price','')}"
+        )
+
+    top_prefs = sorted(all_prefs, key=lambda x: x.get("weight", 0), reverse=True)[:3]
+    pref_text = ", ".join(
+        f"{p.get('attribute_value','')} {p.get('attribute_name','').replace('_group_name','').replace('_name','').replace('_','  ')}"
+        for p in top_prefs if p.get("attribute_value")
+    ) or "general fashion preferences"
+
+    strictness_instruction = {
+        0: "Give a natural, friendly group explanation in 2-3 sentences.",
+        1: "STRICT MODE: Only reference items and preferences listed below.",
+        2: "STRICTEST MODE: One sentence per item. No additional claims.",
+    }.get(strictness, "Give a natural, friendly group explanation in 2-3 sentences.")
+
+    return FASHION_CONTEXT + f"""You are a fashion shopping assistant.
+{strictness_instruction}
+
+USER QUESTION: "{user_msg}"
+
+RECOMMENDED ITEMS:
+{chr(10).join(item_lines)}
+
+USER PREFERENCES: {pref_text}
+
+TASK: Explain briefly why these items were recommended as a group.
+- Mention how the overall selection matches the user's preferences
+- You may reference individual items by name
+- Keep total response under 100 words
+- Do not invent details not listed above"""
+
+
 def _build_explanation_prompt(evidence: dict, strictness: int = 0) -> str:
     """
     Builds a rich explanation prompt combining:
@@ -211,6 +253,10 @@ def _build_explanation_prompt(evidence: dict, strictness: int = 0) -> str:
     - All user preferences ranked by weight
     - Prior claims (must not contradict)
     """
+    # All-items summary path (user asked "why" with no specific product name)
+    if evidence.get("articles"):
+        return _build_explanation_all_prompt(evidence, strictness)
+
     article       = evidence.get("article") or {}
     matches       = evidence.get("confirmed_matches", [])
     all_prefs     = evidence.get("matched_prefs", [])
