@@ -970,7 +970,27 @@ class EnrichmentLayer:
                 "side_effects":       ["Reclassified: no items in context"],
             }
 
-        selected_item = _resolve_item_reference(current_message, item_a, item_b)
+        # Search ALL items in currently_discussing (item_a … item_z) by name first.
+        # This handles the case where the user names item_c, item_d, etc. by name.
+        all_ctx_items = [
+            v for k, v in sorted(current_items.items())
+            if k.startswith("item_") and v is not None
+        ]
+        msg_lower = current_message.lower()
+        msg_words = set(msg_lower.split())
+        selected_item = None
+        for item in all_ctx_items:
+            name = (item.prod_name or "").lower()
+            if any(w in msg_words for w in name.split() if len(w) > 3):
+                selected_item = item
+                print(f"[ENRICH-SELECT] name-matched '{item.prod_name}' "
+                      f"(article_id={item.article_id}) from {len(all_ctx_items)} context items")
+                break
+        if selected_item is None:
+            # Fallback: handles ordinals ("second one"), colours, "the other one"
+            selected_item = _resolve_item_reference(current_message, item_a, item_b)
+            print(f"[ENRICH-SELECT] fallback resolved to "
+                  f"'{selected_item.prod_name if selected_item else None}'")
 
         # If user selected item_b, swap so item_a is always the focus
         side_effects = []
