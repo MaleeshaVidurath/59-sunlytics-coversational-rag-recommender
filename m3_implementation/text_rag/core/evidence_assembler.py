@@ -28,21 +28,19 @@ _WORD_TO_DIGIT = {
     "six": "6", "seven": "7", "eight": "8", "nine": "9",
 }
 
-_MAX_RECOMMENDATIONS = 5  # maximum items that can be returned in one turn
-
 def _extract_quantity(message: str, payload_qty: int = 0) -> int:
     """
     Extracts requested quantity from user message.
-    e.g. "5 shirts"   -> 5  (honours the request, capped at 5)
-         "six shirts"  -> 5  (word recognised)
-         "I need a dress" -> 2 (default when no number given)
-    Max allowed: 5  (matches item_a … item_e slots in currently_discussing)
+    e.g. "5 shirts"      -> 5  (honours the request exactly)
+         "six shirts"     -> 6  (English word recognised)
+         "I need a dress" -> 2  (default when no number given)
+    No artificial cap — returns whatever the user asked for.
     Default: 2
     Accepts an optional payload_qty already extracted by the LLM entity extractor.
     """
     # Payload quantity from LLM entity extraction takes priority
     if payload_qty and payload_qty >= 2:
-        return min(payload_qty, _MAX_RECOMMENDATIONS)
+        return payload_qty
 
     # Normalise English number words to digits before regex matching
     msg = message.lower()
@@ -59,7 +57,7 @@ def _extract_quantity(message: str, payload_qty: int = 0) -> int:
     for pattern in patterns:
         m = re.search(pattern, msg)
         if m:
-            return min(int(m.group(1)), _MAX_RECOMMENDATIONS)
+            return int(m.group(1))
     return 2  # default when no quantity mentioned
 
 
