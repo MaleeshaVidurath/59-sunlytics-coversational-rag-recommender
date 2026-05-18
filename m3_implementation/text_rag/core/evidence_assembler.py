@@ -443,16 +443,35 @@ class EvidenceAssembler:
         Fetches article from PostgreSQL and finds which user preferences match.
         """
         print(f"\n[ASSEMBLER-EXPLAIN] ━━━ _assemble_explanation ━━━")
-        payload      = ri.get("payload", {})
-        article_id   = payload.get("article_id")
-        prior_claims = payload.get("prior_claims", [])
-        matched_prefs= payload.get("matched_prefs", [])
-        user_message = ri.get("user_message", "")
-        items_ctx    = ri.get("items_in_context", {})
+        payload       = ri.get("payload", {})
+        article_id    = payload.get("article_id")
+        all_item_ids  = payload.get("all_item_ids")   # present when user asked "why" with no product name
+        prior_claims  = payload.get("prior_claims", [])
+        matched_prefs = payload.get("matched_prefs", [])
+        user_message  = ri.get("user_message", "")
+        items_ctx     = ri.get("items_in_context", {})
 
-        print(f"[ASSEMBLER-EXPLAIN] article_id={article_id}")
+        print(f"[ASSEMBLER-EXPLAIN] article_id={article_id} all_item_ids={all_item_ids}")
         print(f"[ASSEMBLER-EXPLAIN] matched_prefs count={len(matched_prefs)}")
         print(f"[ASSEMBLER-EXPLAIN] prior_claims count={len(prior_claims)}")
+
+        # ── All-items summary (no specific product named) ──────────────────
+        if not article_id and all_item_ids:
+            print(f"[ASSEMBLER-EXPLAIN] all-items summary for {len(all_item_ids)} items")
+            fetched = await get_articles_by_ids(all_item_ids)
+            articles_summary = [_article_summary(a) for a in fetched if a]
+            print(f"[ASSEMBLER-EXPLAIN] fetched {len(articles_summary)} articles for summary")
+            return {
+                "action":            "explanation_generate",
+                "user_message":      user_message,
+                "article":           {},
+                "articles":          articles_summary,   # multi-item path
+                "prior_claims":      [],
+                "confirmed_matches": [],
+                "matched_prefs":     matched_prefs,
+                "user_preferences":  mc.get("long_term_preferences", []),
+                "style_profile":     mc.get("style_profile", {}),
+            }
 
         article = None
         if article_id:
