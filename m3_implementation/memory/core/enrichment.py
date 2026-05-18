@@ -387,6 +387,60 @@ def _resolve_item_reference(
     return item_a
 
 
+# ── Comparison item resolver ──────────────────────────────────────────────────
+
+def _score_items_by_name(message: str, item_pool: list) -> list:
+    """
+    For each item in the pool check whether its product name appears in the
+    message. Full-name substring match scores 100; word-overlap scores by
+    count of matching name words (>=3 chars). Deduplicates by prod_name
+    (one item per unique product name), ordered by score descending.
+    Returns empty list if no item names are detected.
+
+    Why no splitting by 'and/vs'?
+    The user may write any connector or none at all. Checking item names
+    directly is more reliable and works for any phrasing.
+    """
+    if not item_pool:
+        return []
+
+    msg_lower = message.lower()
+    msg_words = {w for w in msg_lower.split() if len(w) >= 3}
+
+    scored = []
+    for item in item_pool:
+        name_lower = (item.prod_name or "").lower()
+        if name_lower and name_lower in msg_lower:
+            score = 100          # full product-name substring found
+        else:
+            name_words = {w for w in name_lower.split() if len(w) >= 3}
+            score = len(name_words & msg_words)
+        scored.append((score, item))
+
+    scored.sort(key=lambda x: -x[0])
+    if not scored or scored[0][0] == 0:
+        return []
+
+    top_score = scored[0][0]
+    # When strong full-name matches exist, drop items that only scored via
+    # incidental shared words (e.g. every leggings item matching "leggings").
+    min_score = (top_score // 2) if top_score >= 10 else 1
+
+    seen_names: set  = set()
+    result:     list = []
+    for score, item in scored:
+        if score < min_score:
+            break
+        name_key = (item.prod_name or "").lower()
+        if name_key not in seen_names:
+            seen_names.add(name_key)
+            result.append(item)
+
+    return result
+
+
+
+
 # ── Helper: build items_in_context dict ───────────────────────────────────────
 
 def _items_dict(item_a, item_b) -> dict:
@@ -884,15 +938,13 @@ class EnrichmentLayer:
         }
 
     async def _enrich_comparison(
-        self, session_id, user_id, current_message, entities, state
+        self, _session_id, user_id, current_message, entities, state
     ) -> dict:
         print(f"[ENRICH-COMPARE] ━━━ called msg='{current_message[:50]}' entities={entities}")
         """COMPARISON → action: item_compare"""
         current_items = state.currently_discussing
-        item_a = current_items.get("item_a")
-        item_b = current_items.get("item_b")
 
-        # Collect ALL items stored in currently_discussing (item_a … item_e)
+        # Collect ALL items stored in currently_discussing (item_a … item_z)
         all_ctx_items = [
             v for k, v in sorted(current_items.items())
             if k.startswith("item_") and v is not None
@@ -906,16 +958,32 @@ class EnrichmentLayer:
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
         memory_ctx = await self._base_memory_context(user_id, state)
 
+        # Resolve which items the user named against last-turn items only.
+        resolved = _score_items_by_name(current_message, all_ctx_items)
+
+        if len(resolved) >= 2:
+            compare_a    = resolved[0]
+            compare_b    = resolved[1]
+            compare_list = resolved
+            print(f"[ENRICH-COMPARE] named {len(resolved)} item(s): "
+                  f"{[it.prod_name for it in resolved]}")
+        else:
+            # No names mentioned — compare all last-turn items
+            compare_a    = all_ctx_items[0] if all_ctx_items else None
+            compare_b    = all_ctx_items[1] if len(all_ctx_items) > 1 else None
+            compare_list = all_ctx_items
+            print(f"[ENRICH-COMPARE] generic: comparing all {len(all_ctx_items)} last-turn items")
+
         payload = {
-            "article_id_a":         item_a.article_id if item_a else None,
-            "article_id_b":         item_b.article_id if item_b else None,
+            "article_id_a":         compare_a.article_id if compare_a else None,
+            "article_id_b":         compare_b.article_id if compare_b else None,
             "comparison_dimension": dimension,
             "preference_weights": {
                 p["attribute_name"]: p["weight"]
                 for p in pref_summary.get("liked_attributes", [])
             },
         }
-        if len(all_ctx_items) > 2:
+        if len(compare_list) > 2:
             payload["article_ids_list"] = [
                 {
                     "article_id": it.article_id,
@@ -923,7 +991,7 @@ class EnrichmentLayer:
                     "colour":     it.colour_group_name,
                     "price":      getattr(it, "price", None),
                 }
-                for it in all_ctx_items
+                for it in compare_list
             ]
 
         return {
@@ -933,8 +1001,8 @@ class EnrichmentLayer:
                 action="item_compare",
                 retrieval_strategy="PARTIAL",
                 user_message=current_message,
-                item_a=item_a,
-                item_b=item_b,
+                item_a=compare_a,
+                item_b=compare_b,
                 exclude_ids=state.rejected_items,
                 payload=payload,
             ),
