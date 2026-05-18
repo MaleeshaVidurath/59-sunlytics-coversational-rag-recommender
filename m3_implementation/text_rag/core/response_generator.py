@@ -166,6 +166,29 @@ def _build_comparison_prompt(evidence: dict, strictness: int = 0) -> str:
         2: "STRICTEST MODE: Use bullet points, each citing a specific fact from evidence.",
     }[strictness]
 
+    # General multi-item comparison (non-price, >2 items — generic or named group)
+    if items_all and len(items_all) > 2 and dim != "price":
+        item_lines = []
+        for i, a in enumerate(items_all, 1):
+            name   = a.get("prod_name") or a.get("name", f"Option {i}")
+            colour = a.get("colour_group_name") or a.get("colour", "")
+            price  = a.get("avg_price")
+            price_str = f"£{float(price):.2f}" if price is not None else ""
+            desc   = (a.get("detail_desc") or "")[:100]
+            line   = f"  Option {i}: {name} | {colour}" + (f" | {price_str}" if price_str else "")
+            if desc:
+                line += f" | {desc}"
+            item_lines.append(line)
+        items_text = "\n".join(item_lines)
+        return (
+            FASHION_CONTEXT
+            + f'\nUser asked: "{user_msg}"\n\n'
+            + f"Compare all {len(items_all)} recommended items ({dim}):\n"
+            + items_text
+            + f"\n\n{strictness_instruction}\n"
+            + "Give a helpful overall comparison and your top recommendation. 3-4 sentences."
+        )
+
     # Multi-item price comparison — list all prices, identify cheapest
     if items_all and len(items_all) > 2 and dim == "price":
         ranked = facts.get("all_items_ranked", [])
