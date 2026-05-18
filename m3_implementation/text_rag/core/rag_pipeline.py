@@ -155,6 +155,18 @@ class TextRAGPipeline:
             attempt_count = attempt + 1
             strictness    = attempt  # 0=normal, 1=strict, 2=strictest
 
+            # Guard: 0 items in evidence means the LLM will hallucinate product
+            # names and prices — skip generation entirely and return a honest message.
+            if action == "catalog_search" and not evidence.get("items"):
+                print("[RAG] 0 items in evidence — skipping LLM to prevent hallucination")
+                final_response = (
+                    "Sorry, we don't have any products matching that description at the moment. "
+                    "Try searching for a different product type, or remove specific filters "
+                    "such as price range or category to see more options."
+                )
+                final_flag = False
+                break
+
             # Generate response
             try:
                 print(f"[DBG-5] OLLAMA GENERATE: attempt={attempt_count} strictness={strictness} action={action}")

@@ -243,6 +243,52 @@ class EvidenceAssembler:
             print(f"[ASSEMBLER-CATALOG] post-merge exclude filter: {before} → {len(merged)} items "
                   f"(removed {before - len(merged)} excluded)")
 
+        # ── Filter relaxation fallback ──────────────────────────────────────
+        # If full filters returned 0 results, retry with progressively looser
+        # constraints so the user gets something rather than nothing.
+        if not merged:
+            # Pass 1: drop price constraints (most likely culprit)
+            _price_keys = {"price_min", "price_max"}
+            _relaxed = {k: v for k, v in filters.items() if k not in _price_keys}
+            if _relaxed != filters:
+                print(f"[ASSEMBLER-CATALOG] 0 results — retrying without price filters: {_relaxed}")
+                _qr2 = semantic_search(
+                    query=semantic_query, filters=_relaxed, exclude_ids=exclude_ids,
+                    penalties=penalties, top_k=max(20, requested_qty * 5)
+                )
+                _pg2 = await search_articles_filtered(
+                    filters=_relaxed, exclude_ids=exclude_ids,
+                    preference_boosts=preference_boosts, purchase_hints=purchase_hints,
+                    penalties=penalties, limit=search_limit
+                )
+                for art in _qr2 + _pg2:
+                    aid = str(art.get("article_id", ""))
+                    if aid not in seen_ids:
+                        seen_ids.add(aid)
+                        merged.append(art)
+                print(f"[ASSEMBLER-CATALOG] after price-relaxed retry: {len(merged)} results")
+
+        if not merged:
+            # Pass 2: keep only product_type_name (broadest search)
+            _minimal = {k: v for k, v in filters.items() if k == "product_type_name"}
+            if _minimal and _minimal != filters:
+                print(f"[ASSEMBLER-CATALOG] still 0 — retrying with product_type only: {_minimal}")
+                _qr3 = semantic_search(
+                    query=semantic_query, filters=_minimal, exclude_ids=exclude_ids,
+                    penalties=penalties, top_k=max(20, requested_qty * 5)
+                )
+                _pg3 = await search_articles_filtered(
+                    filters=_minimal, exclude_ids=exclude_ids,
+                    preference_boosts=preference_boosts, purchase_hints=purchase_hints,
+                    penalties=penalties, limit=search_limit
+                )
+                for art in _qr3 + _pg3:
+                    aid = str(art.get("article_id", ""))
+                    if aid not in seen_ids:
+                        seen_ids.add(aid)
+                        merged.append(art)
+                print(f"[ASSEMBLER-CATALOG] after product_type-only retry: {len(merged)} results")
+
         # Apply colour diversity for multi-item requests
         if requested_qty > 2:
             top_articles = _ensure_colour_diversity(merged, requested_qty)
