@@ -609,10 +609,10 @@ class MemoryPipeline:
             print(f"[store_response] {len(recommended_items)} passed in, "
                   f"{len(items)} passed ItemInContext validation")
             if len(items) >= 1:
-                _labels = "abcde"
+                import string as _string
                 _discussing = {
-                    f"item_{_labels[i]}": item.model_dump()
-                    for i, item in enumerate(items[:5])
+                    f"item_{_string.ascii_lowercase[i]}": item.model_dump()
+                    for i, item in enumerate(items)
                 }
                 if len(items) == 1:
                     _discussing["item_b"] = None
