@@ -23,7 +23,6 @@ Usage:
 """
 
 import sys
-import os
 import json
 import argparse
 import requests
@@ -524,174 +523,176 @@ def print_response(result: dict):
 
 
 # =============================================================================
-# RAGAS evaluation helpers
+# Deterministic accuracy evaluation — no LLM required
 # =============================================================================
 
-def _build_ragas_components():
-    """
-    Builds RAGAS LLM + embeddings backed by Groq + HuggingFace.
-    Uses the same GROQ_API_KEY already in .env — no extra key needed.
-    Returns (llm, embeddings) or (None, None) on failure.
-    """
-    try:
-        from langchain_groq import ChatGroq
-    except ImportError:
-        print("  [RAGAS] Install: pip install ragas langchain-groq langchain-huggingface")
-        return None, None
-
-    groq_key = os.getenv("GROQ_API_KEY", "")
-    if not groq_key:
-        print("  [RAGAS] GROQ_API_KEY not set — cannot run RAGAS.")
-        return None, None
-
-    groq_model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-
-    # LLM wrapper — try new API first, fall back to deprecated wrapper
-    try:
-        from ragas.llms import LangchainLLMWrapper
-        llm = LangchainLLMWrapper(ChatGroq(model=groq_model, api_key=groq_key))
-    except Exception as e:
-        print(f"  [RAGAS] LLM setup failed: {e}")
-        return None, None
-
-    # Embeddings — try native RAGAS HuggingFace first, then LangChain wrapper
-    try:
-        from ragas.embeddings import HuggingFaceEmbeddings as RagasHFEmb
-        emb = RagasHFEmb(model="sentence-transformers/all-MiniLM-L6-v2")
-    except Exception:
-        try:
-            from ragas.embeddings import LangchainEmbeddingsWrapper
-            from langchain_huggingface import HuggingFaceEmbeddings
-            emb = LangchainEmbeddingsWrapper(
-                HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-            )
-        except Exception as e:
-            print(f"  [RAGAS] Embeddings setup failed: {e}")
-            return None, None
-
-    return llm, emb
+_REQUIRED_ITEM_FIELDS = ["article_id", "prod_name", "colour_group_name", "product_type_name"]
+_MIN_SIMILARITY_SCORE = 0.10
+_UNCERTAINTY_WORDS    = ["i think", "maybe", "possibly", "i'm not sure", "i believe", "probably"]
 
 
-def _ragas_contexts(items: list) -> list:
-    contexts = []
-    for item in items:
-        parts = list(filter(None, [
-            item.get("prod_name"),
-            item.get("colour_group_name"),
-            item.get("product_type_name"),
-            item.get("detail_desc"),
-        ]))
-        if parts:
-            contexts.append(" ".join(parts))
-    return contexts or ["No item context available."]
+def _check(checks: dict, name: str, passed: bool, detail: str):
+    checks[name] = (passed, detail)
 
 
-def _ragas_answer(response_text: str, items: list) -> str:
-    explanations = [item["explanation"] for item in items if item.get("explanation")]
-    if explanations:
-        return response_text + " " + " ".join(explanations)
-    return response_text
+def _eval_catalog_search(ri: dict, result: dict, checks: dict):
+    filters  = ri.get("payload", {}).get("filters", {})
+    items    = result.get("items", [])
+    exc_ids  = set(ri.get("exclude_ids", []))
+
+    # Every requested filter must match every returned item
+    if filters and items:
+        compliant = 0
+        for item in items:
+            if all(item.get(k, "").lower() == v.lower() for k, v in filters.items()):
+                compliant += 1
+        pct = compliant / len(items) * 100
+        _check(checks, "filter_precision",
+               compliant == len(items),
+               f"{compliant}/{len(items)} items match filters {list(filters.keys())}  ({pct:.0f}%)")
+    else:
+        _check(checks, "filter_precision", True, "no hard filters requested")
+
+    # Similarity scores above noise floor
+    if items:
+        scores  = [item.get("score", 0) for item in items if item.get("score") is not None]
+        avg_scr = sum(scores) / len(scores) if scores else 0
+        _check(checks, "score_quality",
+               avg_scr >= _MIN_SIMILARITY_SCORE,
+               f"avg similarity={avg_scr:.4f}  (threshold={_MIN_SIMILARITY_SCORE})")
+
+    # No excluded items leaked through
+    returned_ids = {item.get("article_id") for item in items}
+    leaked       = returned_ids & exc_ids
+    _check(checks, "exclude_compliance",
+           len(leaked) == 0,
+           f"0 excluded IDs leaked" if not leaked else f"LEAKED: {leaked}")
+
+    # Every item has an explanation (RAG grounding)
+    with_exp = sum(1 for item in items if item.get("explanation"))
+    _check(checks, "explanations_present",
+           with_exp == len(items),
+           f"{with_exp}/{len(items)} items have explanation")
+
+    # Response text references returned product names
+    resp = (result.get("response_text") or "").lower()
+    named = sum(1 for item in items if (item.get("prod_name") or "").lower() in resp)
+    _check(checks, "response_mentions_items",
+           named > 0,
+           f"{named}/{len(items)} item names mentioned in response")
 
 
-def _ragas_metrics(llm, emb):
-    try:
-        from ragas.metrics import Faithfulness, ResponseRelevancy
-        return (
-            [Faithfulness(llm=llm), ResponseRelevancy(llm=llm, embeddings=emb, strictness=1)],
-            "faithfulness",
-            "response_relevancy",
-        )
-    except Exception:
-        from ragas.metrics.collections import faithfulness, answer_relevancy
-        faithfulness.llm            = llm
-        answer_relevancy.llm        = llm
-        answer_relevancy.embeddings = emb
-        return [faithfulness, answer_relevancy], "faithfulness", "answer_relevancy"
+def _eval_single_article(ri: dict, result: dict, checks: dict):
+    requested_id = ri.get("payload", {}).get("article_id", "")
+    items        = result.get("items", [])
+
+    returned_ids = [item.get("article_id") for item in items]
+    _check(checks, "article_id_match",
+           requested_id in returned_ids,
+           f"requested={requested_id}  returned={returned_ids}")
+
+    resp = result.get("response_text") or ""
+    _check(checks, "response_not_empty",
+           len(resp.strip()) > 20,
+           f"response length={len(resp)} chars")
 
 
-def _ragas_dataset(user_message: str, answer: str, contexts: list):
-    try:
-        from ragas import EvaluationDataset
-        from ragas.dataset_schema import SingleTurnSample
-        return EvaluationDataset(samples=[SingleTurnSample(
-            user_input=user_message,
-            response=answer,
-            retrieved_contexts=contexts,
-        )])
-    except Exception:
-        from datasets import Dataset
-        return Dataset.from_dict({
-            "question": [user_message],
-            "answer":   [answer],
-            "contexts": [contexts],
-        })
+def _eval_compare(ri: dict, result: dict, checks: dict):
+    payload = ri.get("payload", {})
+    id_a    = payload.get("article_id_a", "")
+    id_b    = payload.get("article_id_b", "")
+    items   = result.get("items", [])
+    ids     = {item.get("article_id") for item in items}
+
+    _check(checks, "article_a_present", id_a in ids, f"article_a={id_a}")
+    _check(checks, "article_b_present", id_b in ids, f"article_b={id_b}")
+
+    resp = result.get("response_text") or ""
+    _check(checks, "response_not_empty", len(resp.strip()) > 20,
+           f"response length={len(resp)} chars")
+
+    dim  = payload.get("comparison_dimension", "")
+    _check(checks, "dimension_mentioned",
+           not dim or dim.lower() in resp.lower(),
+           f"dimension '{dim}' {'found' if dim.lower() in resp.lower() else 'NOT found'} in response")
 
 
-def _ragas_grade(overall: float) -> str:
-    if overall >= 0.85:
-        return "EXCELLENT"
-    if overall >= 0.70:
-        return "GOOD"
-    if overall >= 0.50:
-        return "FAIR"
+def _eval_explanation(ri: dict, result: dict, checks: dict):
+    requested_id = ri.get("payload", {}).get("article_id", "")
+    items        = result.get("items", [])
+    returned_ids = [item.get("article_id") for item in items]
+
+    _check(checks, "article_id_match",
+           requested_id in returned_ids,
+           f"requested={requested_id}  returned={returned_ids}")
+
+    explanations = [item.get("explanation", "") for item in items]
+    has_exp      = any(len(e) > 20 for e in explanations)
+    _check(checks, "explanation_present", has_exp,
+           f"explanation {'present' if has_exp else 'MISSING or too short'}")
+
+    # Uncertainty / hallucination signal: LLM should not hedge on known product facts
+    combined = " ".join(explanations).lower()
+    hedges   = [w for w in _UNCERTAINTY_WORDS if w in combined]
+    _check(checks, "no_uncertainty_language",
+           len(hedges) == 0,
+           f"no hedge words found" if not hedges else f"hedge words detected: {hedges}")
+
+
+def _grade(pct: float) -> str:
+    if pct >= 90: return "EXCELLENT"
+    if pct >= 75: return "GOOD"
+    if pct >= 50: return "FAIR"
     return "POOR"
 
 
-def _ragas_evaluate(user_message: str, response_text: str, items: list):
-    """
-    Runs RAGAS Faithfulness + ResponseRelevancy on a single M2 response.
+def evaluate_accuracy(ri: dict, result: dict):
+    """Deterministic, zero-LLM accuracy evaluation for any M2 action type."""
+    action = ri.get("action", "")
+    items  = result.get("items", [])
+    checks: dict = {}
 
-    Faithfulness      — is the answer grounded in the retrieved item data?
-    ResponseRelevancy — does the answer actually address what the user asked?
+    # --- Universal checks ---
+    _check(checks, "api_success",   result.get("success", False),  "M2 returned success=True")
+    _check(checks, "has_results",   len(items) > 0,                f"{len(items)} items returned")
 
-    Groq compatibility: max_workers=1 serialises calls (Groq rejects n>1 batches).
-    Answer includes item explanations so RAGAS has specific verifiable claims.
-    """
-    try:
-        from ragas import evaluate, RunConfig
-    except ImportError:
-        print("  [RAGAS] ragas not installed. Run: pip install ragas")
-        return
+    # Field completeness — every item should have core fields
+    if items:
+        complete = sum(
+            1 for item in items
+            if all(item.get(f) for f in _REQUIRED_ITEM_FIELDS)
+        )
+        _check(checks, "field_completeness",
+               complete == len(items),
+               f"{complete}/{len(items)} items have all required fields")
 
-    if not response_text:
-        print("  [RAGAS] No response text — skipping.")
-        return
+    # --- Action-specific checks ---
+    if action == "catalog_search":
+        _eval_catalog_search(ri, result, checks)
+    elif action == "item_attribute_lookup":
+        _eval_single_article(ri, result, checks)
+    elif action == "item_compare":
+        _eval_compare(ri, result, checks)
+    elif action == "explanation_generate":
+        _eval_explanation(ri, result, checks)
+    elif action == "item_detail_lookup":
+        _eval_single_article(ri, result, checks)
 
-    llm, emb = _build_ragas_components()
-    if llm is None:
-        return
+    # --- Report ---
+    passed  = sum(1 for ok, _ in checks.values() if ok)
+    total   = len(checks)
+    pct     = passed / total * 100 if total else 0
+    grade   = _grade(pct)
 
-    contexts          = _ragas_contexts(items)
-    answer            = _ragas_answer(response_text, items)
-    metrics, f_key, ar_key = _ragas_metrics(llm, emb)
-    dataset           = _ragas_dataset(user_message, answer, contexts)
-    run_cfg           = RunConfig(max_workers=1, max_retries=2, timeout=120)
-
-    print("  [RAGAS] Evaluating (serialised calls, no concurrent batching)...")
-    try:
-        result  = evaluate(dataset, metrics=metrics, run_config=run_cfg)
-        df      = result.to_pandas()
-
-        if f_key in df.columns:
-            f_score = float(df[f_key].iloc[0])
-        else:
-            f_score = 0.0
-        if ar_key in df.columns:
-            a_score = float(df[ar_key].iloc[0])
-        else:
-            a_score = 0.0
-        overall = (f_score + a_score) / 2
-        grade   = _ragas_grade(overall)
-
-        print(f"\n  {'─'*56}")
-        print("  [RAGAS] RAG Pipeline Evaluation")
-        print(f"  {'─'*56}")
-        print(f"  Faithfulness     : {f_score:.3f}  — answer grounded in item data")
-        print(f"  Answer Relevancy : {a_score:.3f}  — answer addresses user question")
-        print(f"  Overall          : {overall:.3f}  [{grade}]")
-        print(f"  {'─'*56}\n")
-    except Exception as e:
-        print(f"  [RAGAS] Evaluation error: {e}")
+    print(f"\n  {'─'*56}")
+    print(f"  [ACCURACY]  Deterministic Evaluation  ({action})")
+    print(f"  {'─'*56}")
+    for name, (ok, detail) in checks.items():
+        tag = "PASS" if ok else "FAIL"
+        print(f"  [{tag}]  {name:<30}  {detail}")
+    print(f"  {'─'*56}")
+    print(f"  Score : {passed}/{total} checks passed  ({pct:.0f}%)  [{grade}]")
+    print(f"  {'─'*56}\n")
 
 
 def _print_payload_summary(ri: dict):
@@ -729,7 +730,7 @@ def _print_payload_summary(ri: dict):
         print(f"  article_id      : {payload.get('article_id', '?')}")
 
 
-def run_case(case: dict, run_ragas: bool = False):
+def run_case(case: dict):
     print(f"\n{'='*62}")
     print(f"  TEST: {case['name']}")
     print(f"  {case['description']}")
@@ -752,18 +753,8 @@ def run_case(case: dict, run_ragas: bool = False):
 
     print_response(result)
 
-    action = ri.get("action", "")
-    if action == "catalog_search":
-        print("\n  (Accuracy report printed above by M2 handler)")
-    else:
-        print("\n  (Self-reflection + VLM verification printed above by M2 handler)")
-
-    if run_ragas and result.get("success"):
-        _ragas_evaluate(
-            user_message  = ri.get("user_message", ""),
-            response_text = result.get("response_text", ""),
-            items         = result.get("items", []),
-        )
+    if result.get("success"):
+        evaluate_accuracy(ri, result)
 
     print(f"{'='*62}")
 
@@ -864,8 +855,6 @@ def main():
                         help='Send a custom query (catalog_search payload auto-built)')
     parser.add_argument('--json',  action='store_true',
                         help='Print the full JSON payload sent to M2')
-    parser.add_argument('--ragas', action='store_true',
-                        help='Run RAGAS faithfulness + answer_relevancy after each case')
     args = parser.parse_args()
 
     print("=" * 62)
@@ -884,7 +873,7 @@ def main():
         if args.json:
             print("\n  Full JSON payload:")
             print(json.dumps(payload, indent=4))
-        run_case(case, run_ragas=args.ragas)
+        run_case(case)
 
     elif args.case is not None:
         idx = args.case - 1
@@ -895,12 +884,12 @@ def main():
         if args.json:
             print("\n  Full JSON payload:")
             print(json.dumps(case["payload"], indent=4))
-        run_case(case, run_ragas=args.ragas)
+        run_case(case)
 
     else:
         print(f"  Running all {len(DUMMY_CASES)} cases...\n")
         for case in DUMMY_CASES:
-            run_case(case, run_ragas=args.ragas)
+            run_case(case)
 
 
 if __name__ == '__main__':
