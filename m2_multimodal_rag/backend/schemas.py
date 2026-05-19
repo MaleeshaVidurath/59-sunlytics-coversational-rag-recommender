@@ -1,5 +1,8 @@
-from typing import Optional, Dict, Any, List, Union
-from pydantic import BaseModel, Field
+import logging
+from typing import Optional, Dict, Any, List, Union, Literal, Type
+from pydantic import BaseModel, Field, model_validator
+
+logger = logging.getLogger(__name__)
 
 # =====================================================================
 # Pydantic Request Models (Strict Template Injection from PDF)
@@ -13,18 +16,24 @@ class BoostTemplate(BaseModel):
     weight: float
 
 class CatalogSearchPayload(BaseModel):
-    filters: Dict[str, str] = Field(default_factory=dict)
+    filters: Dict[str, Any] = Field(default_factory=dict)
     preference_boosts: List[BoostTemplate] = Field(default_factory=list)
     penalties: Dict[str, List[str]] = Field(default_factory=dict)
+    soft_constraints: Dict[str, Any] = Field(default_factory=dict)
+    purchase_history_hints: Dict[str, Any] = Field(default_factory=dict)
 
 class AttributeLookupPayload(BaseModel):
     article_id: str
     attribute_topic: str
 
+ComparisonDimension = Literal[
+    "price", "quality", "style_and_occasion", "material", "colour", "fit", "overall"
+]
+
 class ItemComparePayload(BaseModel):
     article_id_a: str
     article_id_b: str
-    comparison_dimension: str
+    comparison_dimension: ComparisonDimension
     preference_weights: Dict[str, float] = Field(default_factory=dict)
 
 class ClaimTemplate(BaseModel):
@@ -46,6 +55,17 @@ class ExplanationGeneratePayload(BaseModel):
 class ItemDetailLookupPayload(BaseModel):
     article_id: str
 
+# Maps each action string to its expected payload class.
+# Used by the validator below to coerce and validate the payload
+# using the action field rather than relying on Union ordering.
+ACTION_PAYLOAD_MAP: Dict[str, Type[BaseModel]] = {
+    "catalog_search": CatalogSearchPayload,
+    "item_attribute_lookup": AttributeLookupPayload,
+    "item_compare": ItemComparePayload,
+    "explanation_generate": ExplanationGeneratePayload,
+    "item_detail_lookup": ItemDetailLookupPayload,
+}
+
 # --- 2. Main Retrieval Input Model ---
 
 class RetrievalInputModel(BaseModel):
@@ -54,17 +74,46 @@ class RetrievalInputModel(BaseModel):
     user_message: str
     items_in_context: Dict[str, Optional[Dict[str, Any]]] = Field(default_factory=dict)
     exclude_ids: List[str] = Field(default_factory=list)
-    
-    # We use Union to allow any of the strict payload types defined above
-    # The Dict fallback ensures we don't crash if m3 sends something slightly off
     payload: Union[
-        CatalogSearchPayload, 
-        AttributeLookupPayload, 
-        ItemComparePayload, 
-        ExplanationGeneratePayload, 
+        CatalogSearchPayload,
+        AttributeLookupPayload,
+        ItemComparePayload,
+        ExplanationGeneratePayload,
         ItemDetailLookupPayload,
-        Dict[str, Any]  
+        Dict[str, Any]
     ]
+
+    @model_validator(mode='before')
+    @classmethod
+    def coerce_payload_by_action(cls, values: Any) -> Any:
+        """
+        Resolves the payload to the correct typed model using the action field,
+        avoiding Union ordering ambiguity and logging when the fallback Dict is hit.
+        """
+        action = values.get('action') if isinstance(values, dict) else getattr(values, 'action', None)
+        payload = values.get('payload') if isinstance(values, dict) else getattr(values, 'payload', None)
+
+        if not isinstance(payload, dict):
+            return values  # already a typed model instance, skip
+
+        target_class = ACTION_PAYLOAD_MAP.get(action)
+        if target_class:
+            try:
+                coerced = target_class(**payload)
+                if isinstance(values, dict):
+                    values['payload'] = coerced
+            except Exception as e:
+                logger.warning(
+                    "[M2 Schema] Payload validation failed for action='%s': %s. "
+                    "Falling back to raw Dict — handler may receive missing fields.",
+                    action, e
+                )
+        else:
+            logger.warning(
+                "[M2 Schema] Unknown action='%s' — payload stored as raw Dict.", action
+            )
+
+        return values
 
 # --- 3. Pipeline Request ---
 
