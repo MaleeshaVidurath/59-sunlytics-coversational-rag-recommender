@@ -39,6 +39,29 @@ async def _fire_and_forget(url: str, pipeline_output: dict, module_name: str):
         print(f"[CHAT] Could not reach {module_name} at {url}: {type(e).__name__}")
 
 
+async def _call_m2_sync(pipeline_output: dict, timeout: float = 30.0):
+    """Calls M2 synchronously and returns the response dict, or None on failure."""
+    if not _M2_URL:
+        return None
+    body = {
+        "retrieval_input": pipeline_output.get("retrieval_input"),
+        "memory_context":  pipeline_output.get("memory_context") or {},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(f"{_M2_URL}/api/process", json=body)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("success"):
+                print(f"[CHAT] M2 response received: action={data.get('action')} items={len(data.get('items', []))}")
+                return data
+            print(f"[CHAT] M2 returned success=False: {data.get('error')}")
+            return None
+    except Exception as e:
+        print(f"[CHAT] M2 sync call failed ({type(e).__name__}): {e}")
+        return None
+
+
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 
@@ -186,9 +209,14 @@ async def chat(req: ChatRequest):
                   f"D_items={_cse.get('d_items_available', 0.0):.2f} "
                   f"D_recency={_cse.get('d_info_recency', 0.0):.2f} "
                   f"D_completeness={_cse.get('d_info_completeness', 0.0):.2f}")
-        # ── Fire and forget: send to friend modules ────────────────────────
+        # ── Send to friend modules ─────────────────────────────────────────
         import asyncio as _asyncio
-        _asyncio.ensure_future(_fire_and_forget(_M2_URL, pipeline_output, "M2 Multimodal RAG"))
+        _label = pipeline_output.get("label", "")
+        if _label in ("INITIAL_REQUEST", "REFINEMENT"):
+            print(f"[CHAT] M2: label={_label} — waiting for M2 (timeout=30s)")
+            await _call_m2_sync(pipeline_output)
+        else:
+            _asyncio.ensure_future(_fire_and_forget(_M2_URL, pipeline_output, "M2 Multimodal RAG"))
         _asyncio.ensure_future(_fire_and_forget(_M1_URL, pipeline_output, "M1 Graph RAG"))
 
         # ── Store classifier_input in the turn document ───────────────────
