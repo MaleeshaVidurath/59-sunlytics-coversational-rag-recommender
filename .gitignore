@@ -12,6 +12,7 @@ outputs/
 data/
 data_old/
 train_data_set_backup/
+m3_implementation/adaptive_rag/distilbert_training/*.csv
 
 # IDE
 .vscode/
