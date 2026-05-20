@@ -159,6 +159,31 @@ function MetaBadge({ label, confidence, hallucination, contradiction }) {
   );
 }
 
+function ConsentButtons({ onYes, onNo }) {
+  return (
+    <div style={{ display:"flex", gap:8, marginTop:10 }}>
+      <button onClick={onYes}
+        style={{ background:"#1e3a2f", border:"1px solid #2d5a3d",
+          borderRadius:8, color:"#7ec87e", padding:"6px 18px",
+          fontSize:13, cursor:"pointer", fontWeight:600,
+          transition:"all 0.15s" }}
+        onMouseEnter={e=>{e.currentTarget.style.background="#253f35";}}
+        onMouseLeave={e=>{e.currentTarget.style.background="#1e3a2f";}}>
+        Yes
+      </button>
+      <button onClick={onNo}
+        style={{ background:"#1c1c1c", border:`1px solid ${C.border}`,
+          borderRadius:8, color:C.textDim, padding:"6px 18px",
+          fontSize:13, cursor:"pointer", fontWeight:600,
+          transition:"all 0.15s" }}
+        onMouseEnter={e=>{e.currentTarget.style.borderColor="#555";}}
+        onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;}}>
+        No
+      </button>
+    </div>
+  );
+}
+
 function FeedbackButtons({ msg, onFeedback }) {
   if (!msg.recommendation_id) return null;
 
@@ -208,8 +233,11 @@ function FeedbackButtons({ msg, onFeedback }) {
   );
 }
 
-function Message({ msg, onFeedback }) {
+const CONSENT_TRIGGER = "Would you like to see new recommendations for this?";
+
+function Message({ msg, onFeedback, awaitingConsent, onConsentYes, onConsentNo }) {
   const isUser = msg.role === "user";
+  const showConsent = !isUser && awaitingConsent && msg.isConsentQuestion;
   return (
     <div style={{ display:"flex", justifyContent:isUser?"flex-end":"flex-start",
       marginBottom:16, padding:"0 16px" }}>
@@ -237,9 +265,10 @@ function Message({ msg, onFeedback }) {
             hallucination={msg.hallucination_flag}
             contradiction={msg.contradiction_found} />
         )}
-        {!isUser && (
-          <FeedbackButtons msg={msg} onFeedback={onFeedback} />
-        )}
+        {showConsent
+          ? <ConsentButtons onYes={onConsentYes} onNo={onConsentNo} />
+          : !isUser && <FeedbackButtons msg={msg} onFeedback={onFeedback} />
+        }
         <div style={{ fontSize:10, color:C.textMuted, marginTop:4,
           textAlign:isUser?"right":"left" }}>
           {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([],
@@ -391,6 +420,7 @@ function ChatPage({ user, onLogout }) {
   const [sending, setSending]       = useState(false);
   const [sidebarOpen, setSidebar]   = useState(true);
   const [forceNewSession, setForceNew] = useState(false);
+  const [awaitingConsent, setAwaitingConsent] = useState(false);
   const messagesEndRef              = useRef(null);
   const inputRef                    = useRef(null);
 
@@ -408,6 +438,7 @@ function ChatPage({ user, onLogout }) {
   }
 
   async function selectSession(session) {
+    setAwaitingConsent(false);
     setActive(session.session_id);
     try {
       const data = await apiGetHistory(session.session_id, user.user_id);
@@ -429,6 +460,7 @@ function ChatPage({ user, onLogout }) {
     setForceNew(true);
     setActive(null);
     setMessages([]);
+    setAwaitingConsent(false);
     inputRef.current?.focus();
   }
 
@@ -457,9 +489,65 @@ function ChatPage({ user, onLogout }) {
     });
   }
 
+  async function handleConsentYes() {
+    setAwaitingConsent(false);
+    setMessages(prev => [...prev, {
+      id: Date.now(), role:"user", content:"Yes",
+      timestamp: new Date().toISOString(),
+    }]);
+    setSending(true);
+    try {
+      const res = await apiSendMessage({
+        userId: user.user_id, customerId: user.customer_id,
+        message: "yes", sessionId: activeSession,
+      });
+      const botMsg = {
+        id: Date.now()+1, role:"assistant",
+        content: res.response_text,
+        timestamp: new Date().toISOString(),
+        label: res.label, confidence: res.confidence,
+        items: res.items_recommended || [],
+        hallucination_flag: res.hallucination_flag,
+        contradiction_found: res.contradiction_found,
+        recommendation_id: res.recommendation_id || null,
+        turn_id: res.turn_id || null,
+        session_id: res.session_id || null,
+        feedbackGiven: null,
+        isConsentQuestion: (res.response_text||"").includes(CONSENT_TRIGGER),
+      };
+      setMessages(prev => [...prev, botMsg]);
+      if (botMsg.isConsentQuestion) setAwaitingConsent(true);
+    } catch(e) {
+      setMessages(prev => [...prev, {
+        id:Date.now()+1, role:"assistant",
+        content:"Sorry, something went wrong. Please try again.",
+        timestamp: new Date().toISOString(),
+      }]);
+    } finally {
+      setSending(false);
+      inputRef.current?.focus();
+    }
+  }
+
+  async function handleConsentNo() {
+    setAwaitingConsent(false);
+    setMessages(prev => [...prev, {
+      id: Date.now(), role:"user", content:"No",
+      timestamp: new Date().toISOString(),
+    }]);
+    // Call backend silently to clear the consent flag — don't show bot response
+    try {
+      await apiSendMessage({
+        userId: user.user_id, customerId: user.customer_id,
+        message: "no", sessionId: activeSession,
+      });
+    } catch(e) {}
+    inputRef.current?.focus();
+  }
+
   async function send() {
     const text = input.trim();
-    if (!text || sending) return;
+    if (!text || sending || awaitingConsent) return;
 
     const userMsg = { id:Date.now(), role:"user", content:text,
                       timestamp:new Date().toISOString() };
@@ -493,9 +581,11 @@ function ChatPage({ user, onLogout }) {
         recommendation_id: res.recommendation_id || null,
         turn_id: res.turn_id || null,
         session_id: res.session_id || null,
-        feedbackGiven: null,  // null | "up" | "down"
+        feedbackGiven: null,
+        isConsentQuestion: (res.response_text||"").includes(CONSENT_TRIGGER),
       };
       setMessages(prev => [...prev, botMsg]);
+      if (botMsg.isConsentQuestion) setAwaitingConsent(true);
 
       // Reload sessions — retry up to 3 times to handle MongoDB write delay
       const reloadWithRetry = async (retries = 3, delay = 600) => {
@@ -624,7 +714,12 @@ function ChatPage({ user, onLogout }) {
             </div>
           ) : (
             <>
-              {messages.map(msg => <Message key={msg.id} msg={msg} onFeedback={handleFeedback} />)}
+              {messages.map(msg => (
+              <Message key={msg.id} msg={msg} onFeedback={handleFeedback}
+                awaitingConsent={awaitingConsent}
+                onConsentYes={handleConsentYes}
+                onConsentNo={handleConsentNo} />
+            ))}
               {sending && <TypingIndicator />}
               <div ref={messagesEndRef} />
             </>
@@ -639,20 +734,24 @@ function ChatPage({ user, onLogout }) {
             borderRadius:14, padding:"10px 14px" }}>
             <textarea ref={inputRef} value={input}
               onChange={e=>setInput(e.target.value)} onKeyDown={handleKey}
-              placeholder="Message Sunlytics..." rows={1}
+              placeholder={awaitingConsent ? "Please select Yes or No above…" : "Message Sunlytics..."}
+              disabled={awaitingConsent}
+              rows={1}
               style={{ flex:1, background:"transparent", border:"none",
-                color:C.text, fontSize:14, resize:"none", outline:"none",
+                color: awaitingConsent ? C.textMuted : C.text,
+                fontSize:14, resize:"none", outline:"none",
                 lineHeight:1.6, maxHeight:120, overflowY:"auto",
-                fontFamily:"system-ui,sans-serif" }}
+                fontFamily:"system-ui,sans-serif",
+                cursor: awaitingConsent ? "not-allowed" : "text" }}
               onInput={e=>{
                 e.target.style.height="auto";
                 e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";
               }} />
-            <button onClick={send} disabled={!input.trim()||sending}
-              style={{ background:input.trim()&&!sending?C.accent:C.textMuted,
+            <button onClick={send} disabled={!input.trim()||sending||awaitingConsent}
+              style={{ background:input.trim()&&!sending&&!awaitingConsent?C.accent:C.textMuted,
                 border:"none", borderRadius:9, width:36, height:36,
                 display:"flex", alignItems:"center", justifyContent:"center",
-                cursor:input.trim()&&!sending?"pointer":"not-allowed",
+                cursor:input.trim()&&!sending&&!awaitingConsent?"pointer":"not-allowed",
                 fontSize:16, flexShrink:0, transition:"background 0.2s" }}>
               {sending?"…":"↑"}
             </button>

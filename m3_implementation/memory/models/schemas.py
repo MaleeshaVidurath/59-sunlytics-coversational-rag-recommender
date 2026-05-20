@@ -174,6 +174,11 @@ class DialogueState(BaseModel):
     # Summary of what the user is looking for (updated by LLM after each turn)
     intent_summary: Optional[str] = None
 
+    # Set when the bot shows a cached recommendation and asks if the user wants new ones
+    awaiting_new_recommendation_consent: bool = False
+    pending_new_rec_excluded_ids: list[str] = Field(default_factory=list)
+    pending_original_message: Optional[str] = None
+
 
 # ─── 7. Turn Classification ───────────────────────────────────────────────────
 # The result from your DistilBERT classifier for a user turn.

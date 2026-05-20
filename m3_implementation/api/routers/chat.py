@@ -212,11 +212,8 @@ async def chat(req: ChatRequest):
         # ── Send to friend modules ─────────────────────────────────────────
         import asyncio as _asyncio
         _label = pipeline_output.get("label", "")
-        if _label in ("INITIAL_REQUEST", "REFINEMENT"):
-            print(f"[CHAT] M2: label={_label} — waiting for M2 (timeout=30s)")
-            await _call_m2_sync(pipeline_output)
-        else:
-            _asyncio.ensure_future(_fire_and_forget(_M2_URL, pipeline_output, "M2 Multimodal RAG"))
+        print(f"[CHAT] M2: label={_label} — waiting for M2 (timeout=30s)")
+        await _call_m2_sync(pipeline_output)
         _asyncio.ensure_future(_fire_and_forget(_M1_URL, pipeline_output, "M1 Graph RAG"))
 
         # ── Store classifier_input in the turn document ───────────────────
