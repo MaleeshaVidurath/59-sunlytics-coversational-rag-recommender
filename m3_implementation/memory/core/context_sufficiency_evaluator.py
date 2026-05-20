@@ -112,6 +112,10 @@ class SufficiencyResult:
     d_info_recency:       float = 0.0
     d_info_completeness:  float = 0.0
 
+    # Populated when a similar prior INITIAL_REQUEST is found — used to show
+    # the cached recommendation instead of doing a new catalog search.
+    cached_recommendation: list = field(default_factory=list)
+
 
 class ContextSufficiencyEvaluator:
     """
@@ -171,7 +175,7 @@ class ContextSufficiencyEvaluator:
 
         elif label == "INITIAL_REQUEST":
             result = await self._eval_initial_request(
-                message, session_id, prior_strategy
+                message, session_id, prior_strategy, history
             )
 
         elif label == "REFINEMENT":
@@ -242,47 +246,82 @@ class ContextSufficiencyEvaluator:
         message:        str,
         session_id:     str,
         prior_strategy: str,
+        history:        list,
     ) -> SufficiencyResult:
         """
-        INITIAL_REQUEST — always FULL retrieval (candidate set unknown).
+        INITIAL_REQUEST — normally FULL retrieval (candidate set unknown).
 
-        Additionally checks whether the same or very similar question was
-        asked earlier in this session. If found, the article_ids from the
-        prior recommendation are loaded from MongoDB's recommendations
-        collection and returned as excluded_ids so the retrieval engine
-        does not repeat the same products.
+        Exception: if a semantically similar question was asked earlier in
+        this session (cosine >= 0.75), the tier is PARTIAL — we can return
+        the cached recommendation instead of doing a new catalog search.
+        The excluded_ids are preserved so the user can request fresh results.
 
         Sub-level:
-          FULL_WITH_EXCLUSIONS — similar prior question found, exclude IDs
-          FULL_STANDARD        — fresh question, no exclusions
+          PARTIAL_RECENT  — cached items found in last 3 exchanges (Redis)
+          PARTIAL_SESSION — cached items found in earlier session history
+          FULL_STANDARD   — fresh question, no similar prior question
         """
         print(f"[CSE-INIT] checking similar prior questions in session={session_id}")
-        excluded_ids = await self._find_similar_question_exclusions(
+        excluded_ids, cached_items = await self._find_similar_question_exclusions(
             current_message=message,
             session_id=session_id,
         )
-        full_subtype = "FULL_WITH_EXCLUSIONS" if excluded_ids else "FULL_STANDARD"
-        print(f"[CSE-INIT] full_subtype={full_subtype}  excluded_ids_count={len(excluded_ids)}")
+        print(f"[CSE-INIT] excluded_ids_count={len(excluded_ids)}  cached_items_count={len(cached_items)}")
 
+        if excluded_ids and cached_items:
+            # Similar question found — return cached recommendation as PARTIAL
+            items_recent = self._cached_items_in_recent_history(history, cached_items)
+            d_recency     = 1.0 if items_recent else 0.40
+            d_items       = 1.0
+            d_completeness = 0.80
+            score = min(
+                round(0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness, 4),
+                0.79,
+            )
+            partial_subtype = "PARTIAL_RECENT" if items_recent else "PARTIAL_SESSION"
+            print(f"[CSE-INIT] similar question detected → tier=PARTIAL/{partial_subtype}  score={score}")
+            return SufficiencyResult(
+                tier="PARTIAL",
+                score=score,
+                label="INITIAL_REQUEST",
+                prior_strategy=prior_strategy,
+                override=True,
+                full_subtype=None,
+                partial_subtype=partial_subtype,
+                excluded_ids=excluded_ids,
+                cached_recommendation=cached_items,
+                d_self_sufficient=0.0,
+                d_items_available=d_items,
+                d_info_recency=d_recency,
+                d_info_completeness=d_completeness,
+                rationale=(
+                    f"INITIAL_REQUEST → {partial_subtype}. S={score:.3f}. "
+                    f"Similar question asked earlier in session — using cached recommendation "
+                    f"({len(cached_items)} item(s)). User will be asked if new results needed. "
+                    f"Excluded IDs retained for optional new search. "
+                    f"[Joren2025: Sufficient(q,C_t)=1 — bounded session lookup sufficient]"
+                ),
+            )
+
+        # Fresh question — standard FULL retrieval
+        print(f"[CSE-INIT] full_subtype=FULL_STANDARD  excluded_ids_count=0")
         return SufficiencyResult(
             tier="FULL",
             score=0.10,
             label="INITIAL_REQUEST",
             prior_strategy=prior_strategy,
             override=(prior_strategy != "FULL"),
-            full_subtype=full_subtype,
+            full_subtype="FULL_STANDARD",
             partial_subtype=None,
-            excluded_ids=excluded_ids,
+            excluded_ids=[],
             d_self_sufficient=0.0,
             d_items_available=0.0,
             d_info_recency=0.0,
             d_info_completeness=0.0,
             rationale=(
-                f"INITIAL_REQUEST → {full_subtype}. S=0.10. "
-                f"Candidate set entirely unknown — ANN catalog search required. "
-                + (f"Excluded {len(excluded_ids)} article(s) from similar prior question(s). "
-                   if excluded_ids else "")
-                + f"[Jeong2024: multi-step retrieval; Joren2025: Sufficient(q,C_t)=0]"
+                "INITIAL_REQUEST → FULL_STANDARD. S=0.10. "
+                "Candidate set entirely unknown — ANN catalog search required. "
+                "[Jeong2024: multi-step retrieval; Joren2025: Sufficient(q,C_t)=0]"
             ),
         )
 
@@ -534,21 +573,16 @@ class ContextSufficiencyEvaluator:
         self,
         current_message: str,
         session_id:      str,
-    ) -> list:
+    ) -> tuple[list, list]:
         """
         For INITIAL_REQUEST: scan all prior INITIAL_REQUEST turns in this session.
         Any turn whose message has cosine similarity >= 0.75 with the current
-        message is considered a duplicate question. The article_ids from the
-        bot response that followed that turn are returned as excluded_ids so
-        the retrieval engine does not recommend the same items again.
+        message is considered a duplicate question.
 
-        Flow:
-          1. Load full session turns from MongoDB (beyond Redis 10-turn buffer)
-          2. Embed current message + all prior INITIAL_REQUEST messages
-          3. Compare cosine similarity — threshold 0.75
-          4. For matching turns: load recommendation from db.recommendations
-             using the bot turn's recommendation_id
-          5. Return list of article_ids to exclude
+        Returns (excluded_ids, cached_items):
+          excluded_ids  — article_id strings to exclude from any new search
+          cached_items  — full item dicts from the matched prior recommendation
+                          (used to show the cached result without a new search)
         """
         from memory.db.mongo import get_db
         db = get_db()
@@ -558,11 +592,10 @@ class ContextSufficiencyEvaluator:
             {"turns": 1},
         )
         if not sess_doc:
-            return []
+            return [], []
 
         all_turns = sess_doc.get("turns", [])
 
-        # Collect prior INITIAL_REQUEST user turns with non-empty content
         prior_turns = [
             t for t in all_turns
             if t.get("role") == "user"
@@ -570,37 +603,35 @@ class ContextSufficiencyEvaluator:
             and t.get("content", "").strip()
         ]
         if not prior_turns:
-            return []
+            return [], []
 
         model = _get_embed_model()
         if model is None:
-            return []
+            return [], []
 
         messages = [t["content"] for t in prior_turns]
         try:
             all_embs = model.encode([current_message] + messages)
         except Exception as e:
             print(f"[CSE] Embedding error in similar-question check: {e}")
-            return []
+            return [], []
 
         current_emb = all_embs[0]
         similar_turn_numbers = []
         for i, t in enumerate(prior_turns):
             sim = _cosine(current_emb, all_embs[i + 1])
             if sim >= _SIMILAR_QUESTION_THRESHOLD:
-                print(f"[CSE] Similar question (sim={sim:.3f}): "
-                      f"'{t['content'][:60]}'")
+                print(f"[CSE] Similar question (sim={sim:.3f}): '{t['content'][:60]}'")
                 similar_turn_numbers.append(t.get("turn_number"))
 
         if not similar_turn_numbers:
-            return []
+            return [], []
 
-        # Build a map of turn_number → turn for quick lookup
         turn_map = {t.get("turn_number"): t for t in all_turns}
 
-        excluded_ids = []
+        excluded_ids: list[str] = []
+        cached_items: list[dict] = []
         for turn_num in similar_turn_numbers:
-            # The bot response immediately follows the user turn (turn_number + 1)
             bot_turn = turn_map.get(turn_num + 1)
             if not bot_turn or bot_turn.get("role") != "assistant":
                 continue
@@ -616,11 +647,35 @@ class ContextSufficiencyEvaluator:
                     aid = str(item.get("article_id", ""))
                     if aid and aid not in excluded_ids:
                         excluded_ids.append(aid)
+                        cached_items.append(item)
 
         if excluded_ids:
-            print(f"[CSE] {len(excluded_ids)} article(s) excluded "
-                  f"(similar prior questions in session)")
-        return excluded_ids
+            print(f"[CSE] {len(excluded_ids)} article(s) from similar prior question "
+                  f"— will show as cached recommendation")
+        return excluded_ids, cached_items
+
+    def _cached_items_in_recent_history(
+        self,
+        history:     list[dict],
+        cached_items: list[dict],
+    ) -> bool:
+        """Returns True if the cached items appear in the last 3 bot turns."""
+        if not history or not cached_items:
+            return False
+        bot_content = " ".join(
+            t.get("content", "").lower()
+            for t in history
+            if t.get("role") in ("assistant", "bot")
+        )
+        if not bot_content:
+            return False
+        for item in cached_items:
+            name = (item.get("prod_name") or "").lower()
+            if name and len(name) > 3:
+                words = [w for w in name.split()[:4] if len(w) > 3]
+                if any(w in bot_content for w in words):
+                    return True
+        return any(kw in bot_content for kw in ["option 1", "option 2", "here are", "£"])
 
     async def _find_items_in_full_session(self, session_id: str) -> list:
         """

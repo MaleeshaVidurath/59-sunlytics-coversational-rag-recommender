@@ -182,6 +182,23 @@ class MemoryPipeline:
             current_message=message
         )
 
+        # ── Step 3.5: Consent check — user responding to "want new recs?" ──
+        # Must run before the fashion guard and classifier so that "yes"/"no"
+        # is not misclassified as FEEDBACK/CHITCHAT by the pre-classifier.
+        _consent_state = await self.session_mgr.get_dialogue_state(active_session_id)
+        if _consent_state.awaiting_new_recommendation_consent:
+            _consent_result = await self._handle_new_rec_consent(
+                message=message,
+                user_id=user_id,
+                session_id=active_session_id,
+                pending_excluded_ids=list(_consent_state.pending_new_rec_excluded_ids or []),
+                original_message=_consent_state.pending_original_message or "",
+                history=history,
+                classifier_input=classifier_input,
+            )
+            if _consent_result is not None:
+                return _consent_result
+
         # ── Step 3b: Not-relevant input guard (4-stage hybrid classifier) ────
         # is_fashion_relevant_async runs:
         #   Stage 1 (0ms)    — Conversational bypass: continuation phrases
@@ -504,6 +521,34 @@ class MemoryPipeline:
             )
             print(f"[PIPELINE] Merged {len(_cse_result.excluded_ids)} "
                   f"CSE excluded_ids into retrieval_input")
+
+        # ── Cached recommendation injection (similar INITIAL_REQUEST) ──────
+        # When CSE detects a similar prior question and returns PARTIAL,
+        # inject the cached items into memory_context so the RAG can return
+        # them directly without a new catalog search, then ask the user if
+        # they want fresh results.
+        if (label == "INITIAL_REQUEST"
+                and _cse_result.tier == "PARTIAL"
+                and _cse_result.cached_recommendation):
+            _mc = enriched.setdefault("memory_context", {})
+            _mc["is_cached_recommendation"] = True
+            _mc["cached_recommendation"]    = _cse_result.cached_recommendation
+            # Store consent flag in dialogue state so the NEXT turn can
+            # detect the user's yes/no and act accordingly.
+            try:
+                await self.session_mgr.update_dialogue_state(
+                    active_session_id,
+                    {
+                        "awaiting_new_recommendation_consent": True,
+                        "pending_new_rec_excluded_ids": _cse_result.excluded_ids,
+                        "pending_original_message": message,
+                    }
+                )
+                print(f"[PIPELINE] Cached recommendation injected "
+                      f"({len(_cse_result.cached_recommendation)} items). "
+                      f"Consent flag stored with {len(_cse_result.excluded_ids)} exclusion IDs.")
+            except Exception as _cf_err:
+                print(f"[PIPELINE] Could not store consent flag (non-fatal): {_cf_err}")
 
         # ── Return clean, standardised output ─────────────────────────────
         # No duplication — every key appears exactly once.
@@ -844,6 +889,146 @@ class MemoryPipeline:
                 break
 
         return entities
+
+    async def _handle_new_rec_consent(
+        self,
+        message:           str,
+        user_id:           str,
+        session_id:        str,
+        pending_excluded_ids: list,
+        original_message:  str,
+        history:           list,
+        classifier_input:  str,
+    ):
+        """
+        Called when the user is responding to "Would you like new recommendations?".
+
+        "Yes"-like response  → clear flag, run INITIAL_REQUEST FULL with exclusions.
+        "No"-like response   → clear flag, return CHITCHAT/NO immediately.
+        Ambiguous            → return None to let normal pipeline handle it.
+        """
+        _YES = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "please",
+                "new", "show", "find", "different", "others", "more"}
+        _NO  = {"no", "nope", "nah", "not", "fine", "good", "stay", "keep",
+                "these", "same", "don't", "do not"}
+
+        msg_words = set(message.lower().split())
+        is_yes = bool(msg_words & _YES)
+        is_no  = bool(msg_words & _NO) or (not is_yes and len(msg_words) <= 2)
+
+        if not is_yes and not is_no:
+            return None  # Ambiguous — let normal pipeline classify
+
+        # Clear the consent flag regardless of yes/no
+        try:
+            await self.session_mgr.update_dialogue_state(
+                session_id,
+                {
+                    "awaiting_new_recommendation_consent": False,
+                    "pending_new_rec_excluded_ids": [],
+                    "pending_original_message": None,
+                }
+            )
+        except Exception as _e:
+            print(f"[PIPELINE-CONSENT] Could not clear flag (non-fatal): {_e}")
+
+        if is_no:
+            print("[PIPELINE-CONSENT] User declined new recommendations → CHITCHAT/NO")
+            _no_turn = await self.turn_mgr.add_user_turn(
+                session_id=session_id,
+                user_id=user_id,
+                content=message,
+                classification=TurnClassification(
+                    label="CHITCHAT",
+                    retrieval_strategy="NO",
+                    confidence=1.0,
+                    used_rules=True,
+                ),
+                entities={}
+            )
+            return {
+                "user_id":    user_id,
+                "session_id": session_id,
+                "turn_id":    _no_turn.turn_id,
+                "label":              "CHITCHAT",
+                "retrieval_strategy": "NO",
+                "confidence":         1.0,
+                "used_rules":         True,
+                "retrieval_input":    None,
+                "memory_context": {
+                    "dialogue_state":        {},
+                    "long_term_preferences": [],
+                    "style_profile":         {},
+                    "preference_summary":    {},
+                    "existing_explanation":  None,
+                },
+                "side_effects":     ["User kept existing recommendations"],
+                "classifier_input": classifier_input,
+                "cse": {
+                    "score": 0.95, "tier": "NO", "override": False,
+                    "full_subtype": None, "partial_subtype": None,
+                    "excluded_ids": [], "d_self_sufficient": 1.0,
+                    "d_items_available": 1.0, "d_info_recency": 1.0,
+                    "d_info_completeness": 1.0, "rationale": "User declined new recommendations.",
+                },
+            }
+
+        # "Yes" — do a fresh INITIAL_REQUEST FULL with the pending exclusions.
+        # Use the stored original query (e.g. "I need 3 shoes") for entity
+        # extraction and enrichment — not the consent word "yes".
+        _orig = original_message or message
+        print(f"[PIPELINE-CONSENT] User wants new recommendations → INITIAL_REQUEST FULL "
+              f"with {len(pending_excluded_ids)} exclusions (orig='{_orig[:60]}')")
+        entities = await extract_entities(_orig, label="INITIAL_REQUEST")
+        _yes_turn = await self.turn_mgr.add_user_turn(
+            session_id=session_id,
+            user_id=user_id,
+            content=message,
+            classification=TurnClassification(
+                label="INITIAL_REQUEST",
+                retrieval_strategy="FULL",
+                confidence=1.0,
+                used_rules=True,
+            ),
+            entities=entities,
+        )
+        enriched = await self.enricher.enrich(
+            label="INITIAL_REQUEST",
+            retrieval_strategy="FULL",
+            session_id=session_id,
+            user_id=user_id,
+            current_message=_orig,
+            entities=entities,
+        )
+        # Inject the pending excluded IDs into the retrieval_input
+        if pending_excluded_ids and enriched.get("retrieval_input"):
+            _existing = enriched["retrieval_input"].get("exclude_ids") or []
+            enriched["retrieval_input"]["exclude_ids"] = list(
+                set(_existing + pending_excluded_ids)
+            )
+            print(f"[PIPELINE-CONSENT] Injected {len(pending_excluded_ids)} exclusion IDs")
+
+        return {
+            "user_id":    user_id,
+            "session_id": session_id,
+            "turn_id":    _yes_turn.turn_id,
+            "label":              "INITIAL_REQUEST",
+            "retrieval_strategy": "FULL",
+            "confidence":         1.0,
+            "used_rules":         True,
+            "retrieval_input":  enriched.get("retrieval_input"),
+            "memory_context":   enriched.get("memory_context", {}),
+            "side_effects":     enriched.get("side_effects", []) + ["New recommendations requested by user"],
+            "classifier_input": classifier_input,
+            "cse": {
+                "score": 0.10, "tier": "FULL", "override": False,
+                "full_subtype": "FULL_WITH_EXCLUSIONS", "partial_subtype": None,
+                "excluded_ids": pending_excluded_ids,
+                "d_self_sufficient": 0.0, "d_items_available": 0.0,
+                "d_info_recency": 0.0, "d_info_completeness": 0.0,
+                "rationale": "User explicitly requested new recommendations — FULL retrieval with prior exclusions.",
+            },
+        }
 
     @staticmethod
     def _load_product_names() -> frozenset:

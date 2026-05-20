@@ -118,6 +118,85 @@ class TextRAGPipeline:
                 evidence={},
             )
 
+        # ── Step 1.5: Cached recommendation (similar-question hit) ────────────
+        # When the CSE detects a near-identical INITIAL_REQUEST in the same session,
+        # pipeline.py injects the previous recommendation into memory_context so we
+        # can re-present it without hitting the assembler / Qdrant / PostgreSQL again.
+        if memory_context.get("is_cached_recommendation"):
+            cached_items_raw = memory_context.get("cached_recommendation", [])
+            print(f"[RAG] cached recommendation hit — {len(cached_items_raw)} items, skipping assembler")
+
+            # Map ItemInContext field names → assembler/generator field names
+            mapped_items = []
+            for it in cached_items_raw:
+                mapped_items.append({
+                    "article_id":           str(it.get("article_id", "")),
+                    "name":                 it.get("prod_name") or it.get("name") or "",
+                    "type":                 it.get("product_type_name") or it.get("type") or "",
+                    "colour":               it.get("colour_group_name") or it.get("colour") or "",
+                    "index_group":          it.get("index_group_name") or it.get("index_group") or None,
+                    "section":              it.get("section_name") or it.get("section") or None,
+                    "garment_group":        it.get("garment_group_name") or it.get("garment_group") or None,
+                    "material_description": it.get("detail_desc") or it.get("material_description") or None,
+                    "pattern":              it.get("graphical_appearance_name") or it.get("pattern") or None,
+                    "price":                it.get("price"),
+                })
+
+            cached_evidence = {"action": "catalog_search", "items": mapped_items}
+
+            try:
+                cached_response = await self.generator.generate(
+                    evidence=cached_evidence,
+                    strictness=0,
+                )
+            except Exception as e:
+                print(f"[RAG] cached generation error: {e}")
+                cached_response = self._fallback_response("catalog_search", cached_evidence)
+
+            if not cached_response:
+                cached_response = self._fallback_response("catalog_search", cached_evidence)
+
+            cached_response += "\n\nWould you like to see new recommendations for this?"
+
+            if store_response and memory_pipeline and session_id and user_id:
+                try:
+                    rec_items = [
+                        {
+                            "article_id":                item["article_id"],
+                            "prod_name":                 item.get("name") or "",
+                            "product_type_name":         item.get("type") or "",
+                            "colour_group_name":         item.get("colour") or "",
+                            "price":                     item.get("price"),
+                            "index_group_name":          item.get("index_group") or None,
+                            "section_name":              item.get("section") or None,
+                            "garment_group_name":        item.get("garment_group") or None,
+                            "detail_desc":               item.get("material_description") or None,
+                            "graphical_appearance_name": item.get("pattern") or None,
+                        }
+                        for item in mapped_items if item.get("article_id")
+                    ]
+                    await memory_pipeline.store_response(
+                        session_id=session_id,
+                        user_id=user_id,
+                        bot_response=cached_response,
+                        recommended_items=rec_items if rec_items else None,
+                        trigger_label=label,
+                        retrieval_strategy="PARTIAL",
+                    )
+                except Exception as e:
+                    print(f"[RAG] cached store_response error: {e}")
+
+            return self._build_result(
+                response_text=cached_response,
+                action="catalog_search",
+                attempt_count=1,
+                hallucination_flag=False,
+                flagged_sentences=[],
+                hallucination_score=0.0,
+                items_recommended=mapped_items,
+                evidence=cached_evidence,
+            )
+
         # ── Step 2: Assemble evidence ───────────────────────────────────────
         _ri_a = (retrieval_input or {}).get("action", "NO_INPUT")
         print(f"\n[DBG-4] EVIDENCE ASSEMBLY: action={_ri_a}")
