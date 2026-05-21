@@ -124,6 +124,7 @@ from m2_multimodal_rag.regeneration_loop import generator_loop
 from m2_multimodal_rag.cross_encoder_reranker import cross_encoder_reranker
 from m2_multimodal_rag.diversity_bandit import diversity_bandit
 from m2_multimodal_rag.blip_verification import blip_verifier
+from m2_multimodal_rag.knowledge_base.kb_retriever import kb_retriever
 
 
 # =====================================================================
@@ -273,11 +274,46 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
     print(f"  [catalog_search] Exclude IDs: {exclude_ids}")
 
     # ------------------------------------------------------------------
+    # NOVELTY 5 — Improvement 3: detect implicit Kansei style words
+    # Scans the raw user message for emotional vocabulary (Nagamachi, 1995)
+    # so the KB scoring fires even when soft_constraints["style"] is absent.
+    # ------------------------------------------------------------------
+    detected_kansei = kb_retriever.detect_kansei_from_message(user_message)
+    inferred_style  = soft_constraints.get("style") or (detected_kansei[0] if detected_kansei else None)
+    if detected_kansei and not soft_constraints.get("style"):
+        print(f"  [KB] Kansei detected from message: {detected_kansei} → style='{inferred_style}'")
+
+    # ------------------------------------------------------------------
     # PHASE 1 — NOVELTY 1: LLM Query Expansion + Multi-Vector CLIP Ensemble
     # ------------------------------------------------------------------
     filter_terms = " ".join(str(v) for v in filters.values() if not isinstance(v, (int, float)))
     soft_terms = " ".join(str(v) for v in soft_constraints.values() if v)
-    base_search_text = f"{user_message} {filter_terms} {soft_terms}".strip()
+
+    # ------------------------------------------------------------------
+    # NOVELTY 5 — Psychology KB: enrich query with occasion/Kansei context
+    # Injects grounded psychological terminology into the CLIP search text
+    # so the vector retrieval benefits from domain knowledge.
+    # Sources: Nagamachi (1995); Usip et al. (2020)
+    # ------------------------------------------------------------------
+    kb_query_context = kb_retriever.get_context(
+        occasion=soft_constraints.get("occasion"),
+        style_word=inferred_style,
+    )
+    # NOVELTY 5 — Improvement 5: CLIP-optimised visual vocabulary
+    # Appends occasion/Kansei visual terms so FAISS retrieval benefits
+    # from domain-specific visual language beyond the raw user query.
+    clip_terms = kb_retriever.get_clip_terms(
+        occasion=soft_constraints.get("occasion"),
+        style_word=inferred_style,
+    )
+    if kb_query_context:
+        print(f"  [KB] Query context injected: {kb_query_context[:80]}...")
+    if clip_terms:
+        print(f"  [KB] CLIP visual terms: {clip_terms[:80]}...")
+
+    base_search_text = (
+        f"{user_message} {filter_terms} {soft_terms} {kb_query_context} {clip_terms}".strip()
+    )
 
     if not base_search_text:
         base_search_text = " ".join(str(v) for v in filters.values())
@@ -389,7 +425,21 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
                 if price_range[0] <= item_price <= price_range[1]:
                     history_score += 0.08
 
-        final_score = faiss_score + boost_score - penalty_score + history_score
+        # ------------------------------------------------------------------
+        # NOVELTY 5 — Psychology KB score
+        # Boosts items matching occasion/Kansei rules; penalises mismatches.
+        # Sources: Nagamachi (1995); Usip et al. (2020); Kodzoman (2019)
+        # ------------------------------------------------------------------
+        kb_score = kb_retriever.score(
+            item_colour=metadata.get("colour_group_name", ""),
+            item_type=metadata.get("product_type_name", ""),
+            item_appearance=metadata.get("graphical_appearance_name", ""),
+            occasion=soft_constraints.get("occasion"),
+            style_word=inferred_style,
+            index_group_name=metadata.get("index_group_name", ""),
+        )
+
+        final_score = faiss_score + boost_score - penalty_score + history_score + kb_score
 
         filtered_results.append({
             "article_id": article_id,
@@ -433,11 +483,24 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
     # incorporating soft_constraints and purchase_history context that the
     # cross-encoder cannot see.
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # NOVELTY 5 — inject KB psychological context into LLM reranking
+    # The LLM receives grounded fashion psychology rules alongside the
+    # user query so its ranking judgement is knowledge-augmented.
+    # ------------------------------------------------------------------
+    kb_rerank_context = kb_retriever.get_context(
+        occasion=soft_constraints.get("occasion"),
+        style_word=inferred_style,
+    )
+    enriched_soft_constraints = dict(soft_constraints)
+    if kb_rerank_context:
+        enriched_soft_constraints["kb_psychology"] = kb_rerank_context
+
     print("  [catalog_search] LLM semantic re-ranking top-8 from neural stage...")
     reranked_results = llm_generator.rerank_candidates(
         user_message=user_message,
         candidates=neural_reranked,
-        soft_constraints=soft_constraints,
+        soft_constraints=enriched_soft_constraints,
         purchase_hints=purchase_hints,
     )
 
@@ -469,6 +532,16 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
     if not top_results:
         top_results = reranked_results[:2]
 
+    # NOVELTY 5 — Improvement 4: colour harmony diagnostic for the pair
+    # Logs whether the two selected items form a visually coherent outfit.
+    # Paper: Guo Hui et al. (2023) — colour harmony in fashion design.
+    if len(top_results) == 2:
+        c1 = top_results[0]["metadata"].get("colour_group_name", "")
+        c2 = top_results[1]["metadata"].get("colour_group_name", "")
+        h  = kb_retriever.harmony_score(c1, c2)
+        label = "complementary" if h > 0.10 else ("analogous" if h > 0 else ("clashing" if h < 0 else "neutral"))
+        print(f"  [KB] Colour harmony: {c1} × {c2} = {h:+.2f} ({label})")
+
     # ------------------------------------------------------------------
     # PHASE 5 — Verified explanation generation
     # (regeneration_loop now includes the NOVELTY 4 self-reflection gate)
@@ -478,7 +551,24 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
         aid = result["article_id"]
         meta = result["metadata"]
 
-        explanation = generator_loop.generate_faithful_explanation(article_id=aid)
+        # ------------------------------------------------------------------
+        # NOVELTY 5 — KB-grounded explanation fact
+        # Provides a psychology-grounded reason injected into the explanation
+        # prompt so the LLM can cite colour/occasion theory in its response.
+        # ------------------------------------------------------------------
+        kb_explanation_fact = kb_retriever.get_explanation(
+            item_colour=meta.get("colour_group_name", ""),
+            item_type=meta.get("product_type_name", ""),
+            occasion=soft_constraints.get("occasion"),
+            style_word=inferred_style,
+        )
+        if kb_explanation_fact:
+            print(f"  [KB] Explanation fact: {kb_explanation_fact[:80]}...")
+
+        explanation = generator_loop.generate_faithful_explanation(
+            article_id=aid,
+            kb_fact=kb_explanation_fact,
+        )
 
         item_response = _format_article_for_response(meta)
         item_response["explanation"] = explanation

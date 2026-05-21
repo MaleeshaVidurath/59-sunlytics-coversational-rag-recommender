@@ -11,9 +11,16 @@ class GenerationLoop:
         self.max_attempts = max_attempts
         print("M2 Guard: Initializing Regeneration Loop orchestration...")
         
-    def generate_faithful_explanation(self, article_id: str, force_hallucination_test=False) -> str:
+    def generate_faithful_explanation(
+        self,
+        article_id: str,
+        force_hallucination_test: bool = False,
+        kb_fact: str = "",
+    ) -> str:
         """
         Follows the strict PASS/FAIL logic tree depicted in the project architecture.
+        kb_fact: optional psychology-grounded fact from NOVELTY 5 KB injected
+                 into the LLM prompt to ground the explanation in theory.
         """
         # Fetch grounding data
         articles_df = data_loader.load_articles()
@@ -21,7 +28,11 @@ class GenerationLoop:
         if not metadata:
             return "Item not found in database."
         metadata = metadata[0]
-        
+
+        # Attach KB fact to metadata so llm_generator.generate() can use it
+        if kb_fact:
+            metadata["kb_psychology_fact"] = kb_fact
+
         # Fetch physical visual evidence
         image_path = data_loader.get_image(article_id)
         if not image_path or not image_path.exists():

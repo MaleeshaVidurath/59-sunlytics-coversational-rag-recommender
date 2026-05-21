@@ -6,6 +6,7 @@ It acts as the API Gateway for handling structured pipeline requests from the
 m3 Memory Pipeline and serving static image assets.
 """
 
+import json
 import logging
 from typing import Dict, Any
 
@@ -56,6 +57,7 @@ async def process_endpoint(request: PipelineRequest) -> dict:
     
     action_type = retrieval_dict.get('action') if retrieval_dict else 'None (FEEDBACK/CHITCHAT)'
     logger.info(f"Received pipeline request. Action: {action_type}")
+    logger.info(f"[M3->M2 RAW REQUEST]\n{json.dumps(request.dict(), indent=2, default=str)}")
     
     try:
         # Route the request through the central M2 dispatcher

@@ -84,7 +84,13 @@ class ExplanationGenerator:
             department = metadata.get('department_name', 'Fashion')
             category = metadata.get('product_group_name', 'Clothing')
             detail_desc = metadata.get('detail_desc', '')
-            
+            # NOVELTY 5: psychology-grounded fact from Fashion KB
+            kb_fact = metadata.get('kb_psychology_fact', '')
+            kb_instruction = (
+                f"\n- Psychology insight: {kb_fact}"
+                if kb_fact else ""
+            )
+
             prompt = (
                 f"You are a friendly fashion recommendation assistant. "
                 f"Generate a warm, conversational 1-2 sentence explanation of why "
@@ -94,9 +100,11 @@ class ExplanationGenerator:
                 f"- Color: {color}\n"
                 f"- Department: {department}\n"
                 f"- Category: {category}\n"
-                f"- Description: {detail_desc}\n\n"
+                f"- Description: {detail_desc}"
+                f"{kb_instruction}\n\n"
                 f"Respond with ONLY the recommendation explanation, nothing else. "
-                f"Do not start with 'I recommend' — be creative and natural."
+                f"Do not start with 'I recommend' — be creative and natural. "
+                f"If a psychology insight is provided, weave it naturally into your explanation."
             )
             
             result = self._call_llm(prompt)
