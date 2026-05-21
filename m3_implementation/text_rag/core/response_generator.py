@@ -152,20 +152,63 @@ Answer the question in 1-2 sentences. Do not invent information not in the facts
 
 
 def _build_comparison_prompt(evidence: dict, strictness: int = 0) -> str:
-    """Prompt for comparing two items."""
-    item_a  = evidence.get("item_a") or {}
-    item_b  = evidence.get("item_b") or {}
-    facts   = evidence.get("comparison_facts", {})
-    dim     = evidence.get("comparison_dimension", "overall")
-    user_msg= evidence.get("user_message", "")
-
-    facts_text = "\n".join(f"  {k}: {v}" for k, v in facts.items() if v)
+    """Prompt for comparing two or more items."""
+    item_a    = evidence.get("item_a") or {}
+    item_b    = evidence.get("item_b") or {}
+    facts     = evidence.get("comparison_facts", {})
+    dim       = evidence.get("comparison_dimension", "overall")
+    user_msg  = evidence.get("user_message", "")
+    items_all = evidence.get("items_all")
 
     strictness_instruction = {
         0: "Compare them helpfully and clearly.",
         1: "STRICT MODE: State ONLY facts present in the evidence below.",
         2: "STRICTEST MODE: Use bullet points, each citing a specific fact from evidence.",
     }[strictness]
+
+    # General multi-item comparison (non-price, >2 items — generic or named group)
+    if items_all and len(items_all) > 2 and dim != "price":
+        item_lines = []
+        for i, a in enumerate(items_all, 1):
+            name   = a.get("prod_name") or a.get("name", f"Option {i}")
+            colour = a.get("colour_group_name") or a.get("colour", "")
+            price  = a.get("avg_price")
+            price_str = f"£{float(price):.2f}" if price is not None else ""
+            desc   = (a.get("detail_desc") or "")[:100]
+            line   = f"  Option {i}: {name} | {colour}" + (f" | {price_str}" if price_str else "")
+            if desc:
+                line += f" | {desc}"
+            item_lines.append(line)
+        items_text = "\n".join(item_lines)
+        return (
+            FASHION_CONTEXT
+            + f'\nUser asked: "{user_msg}"\n\n'
+            + f"Compare all {len(items_all)} recommended items ({dim}):\n"
+            + items_text
+            + f"\n\n{strictness_instruction}\n"
+            + "Give a helpful overall comparison and your top recommendation. 3-4 sentences."
+        )
+
+    # Multi-item price comparison — list all prices, identify cheapest
+    if items_all and len(items_all) > 2 and dim == "price":
+        ranked = facts.get("all_items_ranked", [])
+        if ranked:
+            price_lines = "\n".join(
+                f"  {i+1}. {r['name']} ({r['colour']}) — {r['price']}"
+                for i, r in enumerate(ranked)
+            )
+            cheapest = ranked[0]
+            return (
+                FASHION_CONTEXT
+                + f'\nUser asked: "{user_msg}"\n\n'
+                + f"All {len(ranked)} recommended items from cheapest to most expensive:\n"
+                + price_lines
+                + f"\n\n{strictness_instruction}\n"
+                + f"State that {cheapest['name']} ({cheapest['colour']}) at {cheapest['price']} is the cheapest, "
+                + "then briefly list all other prices. Write 2-3 sentences."
+            )
+
+    facts_text = "\n".join(f"  {k}: {v}" for k, v in facts.items() if v)
 
     return FASHION_CONTEXT + f"""You are a fashion shopping assistant.
 {strictness_instruction}
@@ -183,6 +226,48 @@ Always refer to items by their actual names: {item_a.get('name','Option 1')} and
 Write a clear comparison in 2-3 sentences. State which clothing item is better for {dim} and why, using only the facts above."""
 
 
+def _build_explanation_all_prompt(evidence: dict, strictness: int = 0) -> str:
+    """Prompt when user asks 'why' with no specific product name — summarise all recommended items."""
+    articles  = evidence.get("articles", [])
+    all_prefs = evidence.get("matched_prefs", [])
+    user_msg  = evidence.get("user_message", "")
+
+    item_lines = []
+    for i, a in enumerate(articles, 1):
+        item_lines.append(
+            f"  Option {i}: {a.get('name','')} | "
+            f"{a.get('colour','')} {a.get('type','')} | {a.get('price','')}"
+        )
+
+    top_prefs = sorted(all_prefs, key=lambda x: x.get("weight", 0), reverse=True)[:3]
+    pref_text = ", ".join(
+        f"{p.get('attribute_value','')} {p.get('attribute_name','').replace('_group_name','').replace('_name','').replace('_','  ')}"
+        for p in top_prefs if p.get("attribute_value")
+    ) or "general fashion preferences"
+
+    strictness_instruction = {
+        0: "Give a natural, friendly group explanation in 2-3 sentences.",
+        1: "STRICT MODE: Only reference items and preferences listed below.",
+        2: "STRICTEST MODE: One sentence per item. No additional claims.",
+    }.get(strictness, "Give a natural, friendly group explanation in 2-3 sentences.")
+
+    return FASHION_CONTEXT + f"""You are a fashion shopping assistant.
+{strictness_instruction}
+
+USER QUESTION: "{user_msg}"
+
+RECOMMENDED ITEMS:
+{chr(10).join(item_lines)}
+
+USER PREFERENCES: {pref_text}
+
+TASK: Explain briefly why these items were recommended as a group.
+- Mention how the overall selection matches the user's preferences
+- You may reference individual items by name
+- Keep total response under 100 words
+- Do not invent details not listed above"""
+
+
 def _build_explanation_prompt(evidence: dict, strictness: int = 0) -> str:
     """
     Builds a rich explanation prompt combining:
@@ -191,6 +276,10 @@ def _build_explanation_prompt(evidence: dict, strictness: int = 0) -> str:
     - All user preferences ranked by weight
     - Prior claims (must not contradict)
     """
+    # All-items summary path (user asked "why" with no specific product name)
+    if evidence.get("articles"):
+        return _build_explanation_all_prompt(evidence, strictness)
+
     article       = evidence.get("article") or {}
     matches       = evidence.get("confirmed_matches", [])
     all_prefs     = evidence.get("matched_prefs", [])
@@ -586,10 +675,25 @@ class ResponseGenerator:
             return f"Here are the details for {name}: {article.get('colour','')} {article.get('type','')}."
 
         elif action == "item_compare":
-            facts = evidence.get("comparison_facts", {})
-            dim   = evidence.get("comparison_dimension", "overall")
-            a_name = facts.get("item_a_name", "Option 1")
-            b_name = facts.get("item_b_name", "Option 2")
+            facts     = evidence.get("comparison_facts", {})
+            dim       = evidence.get("comparison_dimension", "overall")
+            items_all = evidence.get("items_all")
+            a_name    = facts.get("item_a_name", "Option 1")
+            b_name    = facts.get("item_b_name", "Option 2")
+            # Multi-item price fallback
+            if dim == "price" and items_all and len(items_all) > 2:
+                ranked = facts.get("all_items_ranked", [])
+                if ranked:
+                    cheapest = ranked[0]
+                    others = ", ".join(
+                        f"{r['name']} ({r['colour']}) {r['price']}"
+                        for r in ranked[1:]
+                    )
+                    return (
+                        f"The cheapest is {cheapest['name']} ({cheapest['colour']}) "
+                        f"at {cheapest['price']}. "
+                        f"Other prices: {others}."
+                    )
             if dim == "price" and facts.get("cheaper_item"):
                 diff = facts.get("price_difference", "")
                 return (

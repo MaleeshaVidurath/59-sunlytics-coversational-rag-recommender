@@ -40,6 +40,7 @@ from memory.core.session_manager import SessionManager
 from memory.core.turn_manager import TurnManager
 from memory.core.user_manager import UserManager
 from memory.core.enrichment import EnrichmentLayer
+from memory.core.context_sufficiency_evaluator import get_cse
 from memory.core.entity_extractor import (
     extract_entities, is_fashion_relevant, is_fashion_relevant_async
 )
@@ -128,6 +129,8 @@ class MemoryPipeline:
             self.predictor = None
             print("[MemoryPipeline] Using fallback rule-based classifier.")
 
+        self._known_product_names: frozenset = self._load_product_names()
+
     async def process_turn(
         self,
         user_id: str,
@@ -178,6 +181,23 @@ class MemoryPipeline:
             session_id=active_session_id,
             current_message=message
         )
+
+        # ── Step 3.5: Consent check — user responding to "want new recs?" ──
+        # Must run before the fashion guard and classifier so that "yes"/"no"
+        # is not misclassified as FEEDBACK/CHITCHAT by the pre-classifier.
+        _consent_state = await self.session_mgr.get_dialogue_state(active_session_id)
+        if _consent_state.awaiting_new_recommendation_consent:
+            _consent_result = await self._handle_new_rec_consent(
+                message=message,
+                user_id=user_id,
+                session_id=active_session_id,
+                pending_excluded_ids=list(_consent_state.pending_new_rec_excluded_ids or []),
+                original_message=_consent_state.pending_original_message or "",
+                history=history,
+                classifier_input=classifier_input,
+            )
+            if _consent_result is not None:
+                return _consent_result
 
         # ── Step 3b: Not-relevant input guard (4-stage hybrid classifier) ────
         # is_fashion_relevant_async runs:
@@ -266,6 +286,13 @@ class MemoryPipeline:
             print("\n" + "="*60)
             print(f"[DBG-1] DISTILBERT: label={label} conf={confidence:.1%} strategy={retrieval_strategy}")
             print(f"[DBG-1] MSG: '{message[:60]}'")
+        else:
+            # No pre-classifier match and no DistilBERT predictor loaded — rule-based fallback
+            label, retrieval_strategy = self._fallback_classify(message, history)
+            confidence  = 0.0
+            used_rules  = True
+            print(f"[PIPELINE-4b] FALLBACK: label={label} strategy={retrieval_strategy}")
+            print(f"[DBG-1] MSG: '{message[:60]}'")
 
         # ── Step 4c: Product keyword override ───────────────────────────────────
         # DistilBERT misclassifies short product-keyword messages as CHITCHAT/FEEDBACK.
@@ -353,11 +380,98 @@ class MemoryPipeline:
                 confidence         = 0.80
                 used_rules         = True
 
-        else:
-            label, retrieval_strategy = self._fallback_classify(message, history)
-            confidence  = 0.0
-            used_rules  = True
+        # ── Step 4d: Session-context validation ───────────────────────────────────
+        # Prevents follow-up intents (REFINEMENT, COMPARISON, etc.) from
+        # proceeding when no prior INITIAL_REQUEST exists in the session.
+        _ctx_allowed, _ctx_stop_msg = await self._validate_session_context(
+            label, message, active_session_id
+        )
+        if not _ctx_allowed:
+            print(f"[PIPELINE-4d] SESSION-CTX BLOCK: label={label} — no prior INITIAL_REQUEST")
+            _blocked_turn = await self.turn_mgr.add_user_turn(
+                session_id=active_session_id,
+                user_id=user_id,
+                content=message,
+                classification=TurnClassification(
+                    label=label,
+                    retrieval_strategy="NO",
+                    confidence=confidence,
+                    used_rules=True
+                ),
+                entities={}
+            )
+            return {
+                "user_id":    user_id,
+                "session_id": active_session_id,
+                "turn_id":    _blocked_turn.turn_id,
+                "label":              label,
+                "retrieval_strategy": "NO",
+                "confidence":         confidence,
+                "used_rules":         True,
+                "retrieval_input":    None,
+                "memory_context": {
+                    "session_context_blocked": True,
+                    "refusal_message":         _ctx_stop_msg,
+                    "dialogue_state":          {},
+                    "long_term_preferences":   [],
+                    "style_profile":           {},
+                    "preference_summary":      {},
+                    "existing_explanation":    None,
+                },
+                "side_effects":     [f"Session-context validation blocked label={label}"],
+                "classifier_input": classifier_input,
+            }
 
+        # ── Step 4e: Context Sufficiency Evaluation (CSE) ──────────────────────
+        # Applies the formal information-theoretic tier assignment from
+        # Joren et al. ICLR 2025 (Sufficient Context predicate) and
+        # Jeong et al. NAACL 2024 (Adaptive-RAG 3-tier policy).
+        #
+        # Computes sufficiency_score across 5 dimensions:
+        #   D1: referent items in dialogue context?
+        #   D2: specific predicate/attribute already in state?
+        #   D3: ANN catalog search required?
+        #   D4: parametric LLM knowledge sufficient?
+        #   D5: candidate item set already known? 
+        #
+        # tier(q, C) = NO      if S >= 0.85  (parametrically sufficient)
+        #            = PARTIAL  if S >= 0.70  (context sufficient, bounded lookup)
+        #            = FULL     otherwise      (catalog search required)
+        #
+        # This replaces the hardcoded label→strategy map with a principled,
+        # measurable, and scientifically justified tier assignment.
+        try:
+            _dialogue_state = await self.session_mgr.get_dialogue_state(
+                active_session_id
+            )
+            _ds_dict = _dialogue_state.model_dump() if hasattr(
+                _dialogue_state, "model_dump") else (
+                _dialogue_state.__dict__ if hasattr(_dialogue_state, "__dict__")
+                else {}
+            )
+        except Exception:
+            _ds_dict = {}
+
+        _cse = get_cse()
+        _cse_result = await _cse.evaluate(
+            label=label,
+            message=message,
+            dialogue_state=_ds_dict,
+            history=history,
+            session_id=active_session_id,
+            confidence=confidence,
+        )
+
+        # Override retrieval strategy with CSE result
+        _prior_strategy = retrieval_strategy
+        retrieval_strategy = _cse_result.tier
+
+        print(f"[CSE] score={_cse_result.score:.4f} "
+              f"tier={_cse_result.tier} override={_cse_result.override} "
+              f"full_sub={_cse_result.full_subtype} partial_sub={_cse_result.partial_subtype}")
+        if _cse_result.override:
+            print(f"[CSE] *** STRATEGY OVERRIDE: "
+                  f"{_prior_strategy} → {retrieval_strategy} ***")
 
         print(f"[DBG-2] ENTITY EXTRACTION: label={label}")
         print(f"[PIPELINE-5] starting entity extraction for label={label}")
@@ -396,6 +510,46 @@ class MemoryPipeline:
             entities=entities
         )
 
+        # ── Merge CSE excluded_ids into retrieval_input ────────────────────
+        # For INITIAL_REQUEST FULL_WITH_EXCLUSIONS: article_ids from similar
+        # prior questions in this session are added to exclude_ids so the
+        # retrieval engine does not repeat already-seen products.
+        if _cse_result.excluded_ids and enriched.get("retrieval_input"):
+            _existing_excl = enriched["retrieval_input"].get("exclude_ids") or []
+            enriched["retrieval_input"]["exclude_ids"] = list(
+                set(_existing_excl + _cse_result.excluded_ids)
+            )
+            print(f"[PIPELINE] Merged {len(_cse_result.excluded_ids)} "
+                  f"CSE excluded_ids into retrieval_input")
+
+        # ── Cached recommendation injection (similar INITIAL_REQUEST) ──────
+        # When CSE detects a similar prior question and returns PARTIAL,
+        # inject the cached items into memory_context so the RAG can return
+        # them directly without a new catalog search, then ask the user if
+        # they want fresh results.
+        if (label == "INITIAL_REQUEST"
+                and _cse_result.tier == "PARTIAL"
+                and _cse_result.cached_recommendation):
+            _mc = enriched.setdefault("memory_context", {})
+            _mc["is_cached_recommendation"] = True
+            _mc["cached_recommendation"]    = _cse_result.cached_recommendation
+            # Store consent flag in dialogue state so the NEXT turn can
+            # detect the user's yes/no and act accordingly.
+            try:
+                await self.session_mgr.update_dialogue_state(
+                    active_session_id,
+                    {
+                        "awaiting_new_recommendation_consent": True,
+                        "pending_new_rec_excluded_ids": _cse_result.excluded_ids,
+                        "pending_original_message": message,
+                    }
+                )
+                print(f"[PIPELINE] Cached recommendation injected "
+                      f"({len(_cse_result.cached_recommendation)} items). "
+                      f"Consent flag stored with {len(_cse_result.excluded_ids)} exclusion IDs.")
+            except Exception as _cf_err:
+                print(f"[PIPELINE] Could not store consent flag (non-fatal): {_cf_err}")
+
         # ── Return clean, standardised output ─────────────────────────────
         # No duplication — every key appears exactly once.
         # retrieval_input is the single thing your RAG system reads.
@@ -423,6 +577,23 @@ class MemoryPipeline:
             # Memory updates that happened as a side effect of this turn
             # Always present, may be empty list
             "side_effects": enriched.get("side_effects", []),
+
+            # Context Sufficiency Evaluation result — scientific tier justification
+            # Dimensions: D_self D_items D_recency D_completeness
+            "cse": {
+                "score":               _cse_result.score,
+                "tier":                _cse_result.tier,
+                "prior_strategy":      _cse_result.prior_strategy,
+                "override":            _cse_result.override,
+                "full_subtype":        _cse_result.full_subtype,
+                "partial_subtype":     _cse_result.partial_subtype,
+                "excluded_ids":        _cse_result.excluded_ids,
+                "d_self_sufficient":   _cse_result.d_self_sufficient,
+                "d_items_available":   _cse_result.d_items_available,
+                "d_info_recency":      _cse_result.d_info_recency,
+                "d_info_completeness": _cse_result.d_info_completeness,
+                "rationale":           _cse_result.rationale,
+            },
             "_debug_enriched": enriched,  # temp debug key
 
             # Debug: what was fed to DistilBERT
@@ -463,8 +634,9 @@ class MemoryPipeline:
             for item_dict in recommended_items:
                 try:
                     items.append(ItemInContext(**item_dict))
-                except Exception:
-                    pass
+                except Exception as _e:
+                    print(f"[store_response] ItemInContext validation FAILED for "
+                          f"article_id={item_dict.get('article_id','?')}: {_e}")
 
             rec_doc = RecommendationDocument(
                 session_id=session_id,
@@ -479,15 +651,20 @@ class MemoryPipeline:
             )
             recommendation_id = rec_doc.recommendation_id
 
+            print(f"[store_response] {len(recommended_items)} passed in, "
+                  f"{len(items)} passed ItemInContext validation")
             if len(items) >= 1:
+                import string as _string
+                _discussing = {
+                    f"item_{_string.ascii_lowercase[i]}": item.model_dump()
+                    for i, item in enumerate(items)
+                }
+                if len(items) == 1:
+                    _discussing["item_b"] = None
+                print(f"[store_response] saving currently_discussing keys={list(_discussing.keys())}")
                 await self.session_mgr.update_dialogue_state(
                     session_id,
-                    {
-                        "currently_discussing": {
-                            "item_a": items[0].model_dump(),
-                            "item_b": items[1].model_dump() if len(items) >= 2 else None
-                        }
-                    }
+                    {"currently_discussing": _discussing}
                 )
 
         bot_turn = await self.turn_mgr.add_assistant_turn(
@@ -712,3 +889,230 @@ class MemoryPipeline:
                 break
 
         return entities
+
+    async def _handle_new_rec_consent(
+        self,
+        message:           str,
+        user_id:           str,
+        session_id:        str,
+        pending_excluded_ids: list,
+        original_message:  str,
+        history:           list,
+        classifier_input:  str,
+    ):
+        """
+        Called when the user is responding to "Would you like new recommendations?".
+
+        "Yes"-like response  → clear flag, run INITIAL_REQUEST FULL with exclusions.
+        "No"-like response   → clear flag, return CHITCHAT/NO immediately.
+        Ambiguous            → return None to let normal pipeline handle it.
+        """
+        _YES = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "please",
+                "new", "show", "find", "different", "others", "more"}
+        _NO  = {"no", "nope", "nah", "not", "fine", "good", "stay", "keep",
+                "these", "same", "don't", "do not"}
+
+        msg_words = set(message.lower().split())
+        is_yes = bool(msg_words & _YES)
+        is_no  = bool(msg_words & _NO) or (not is_yes and len(msg_words) <= 2)
+
+        if not is_yes and not is_no:
+            return None  # Ambiguous — let normal pipeline classify
+
+        # Clear the consent flag regardless of yes/no
+        try:
+            await self.session_mgr.update_dialogue_state(
+                session_id,
+                {
+                    "awaiting_new_recommendation_consent": False,
+                    "pending_new_rec_excluded_ids": [],
+                    "pending_original_message": None,
+                }
+            )
+        except Exception as _e:
+            print(f"[PIPELINE-CONSENT] Could not clear flag (non-fatal): {_e}")
+
+        if is_no:
+            print("[PIPELINE-CONSENT] User declined new recommendations → CHITCHAT/NO")
+            _no_turn = await self.turn_mgr.add_user_turn(
+                session_id=session_id,
+                user_id=user_id,
+                content=message,
+                classification=TurnClassification(
+                    label="CHITCHAT",
+                    retrieval_strategy="NO",
+                    confidence=1.0,
+                    used_rules=True,
+                ),
+                entities={}
+            )
+            return {
+                "user_id":    user_id,
+                "session_id": session_id,
+                "turn_id":    _no_turn.turn_id,
+                "label":              "CHITCHAT",
+                "retrieval_strategy": "NO",
+                "confidence":         1.0,
+                "used_rules":         True,
+                "retrieval_input":    None,
+                "memory_context": {
+                    "dialogue_state":        {},
+                    "long_term_preferences": [],
+                    "style_profile":         {},
+                    "preference_summary":    {},
+                    "existing_explanation":  None,
+                },
+                "side_effects":     ["User kept existing recommendations"],
+                "classifier_input": classifier_input,
+                "cse": {
+                    "score": 0.95, "tier": "NO", "override": False,
+                    "full_subtype": None, "partial_subtype": None,
+                    "excluded_ids": [], "d_self_sufficient": 1.0,
+                    "d_items_available": 1.0, "d_info_recency": 1.0,
+                    "d_info_completeness": 1.0, "rationale": "User declined new recommendations.",
+                },
+            }
+
+        # "Yes" — do a fresh INITIAL_REQUEST FULL with the pending exclusions.
+        # Use the stored original query (e.g. "I need 3 shoes") for entity
+        # extraction and enrichment — not the consent word "yes".
+        _orig = original_message or message
+        print(f"[PIPELINE-CONSENT] User wants new recommendations → INITIAL_REQUEST FULL "
+              f"with {len(pending_excluded_ids)} exclusions (orig='{_orig[:60]}')")
+        entities = await extract_entities(_orig, label="INITIAL_REQUEST")
+        _yes_turn = await self.turn_mgr.add_user_turn(
+            session_id=session_id,
+            user_id=user_id,
+            content=message,
+            classification=TurnClassification(
+                label="INITIAL_REQUEST",
+                retrieval_strategy="FULL",
+                confidence=1.0,
+                used_rules=True,
+            ),
+            entities=entities,
+        )
+        enriched = await self.enricher.enrich(
+            label="INITIAL_REQUEST",
+            retrieval_strategy="FULL",
+            session_id=session_id,
+            user_id=user_id,
+            current_message=_orig,
+            entities=entities,
+        )
+        # Inject the pending excluded IDs into the retrieval_input
+        if pending_excluded_ids and enriched.get("retrieval_input"):
+            _existing = enriched["retrieval_input"].get("exclude_ids") or []
+            enriched["retrieval_input"]["exclude_ids"] = list(
+                set(_existing + pending_excluded_ids)
+            )
+            print(f"[PIPELINE-CONSENT] Injected {len(pending_excluded_ids)} exclusion IDs")
+
+        return {
+            "user_id":    user_id,
+            "session_id": session_id,
+            "turn_id":    _yes_turn.turn_id,
+            "label":              "INITIAL_REQUEST",
+            "retrieval_strategy": "FULL",
+            "confidence":         1.0,
+            "used_rules":         True,
+            "retrieval_input":  enriched.get("retrieval_input"),
+            "memory_context":   enriched.get("memory_context", {}),
+            "side_effects":     enriched.get("side_effects", []) + ["New recommendations requested by user"],
+            "classifier_input": classifier_input,
+            "cse": {
+                "score": 0.10, "tier": "FULL", "override": False,
+                "full_subtype": "FULL_WITH_EXCLUSIONS", "partial_subtype": None,
+                "excluded_ids": pending_excluded_ids,
+                "d_self_sufficient": 0.0, "d_items_available": 0.0,
+                "d_info_recency": 0.0, "d_info_completeness": 0.0,
+                "rationale": "User explicitly requested new recommendations — FULL retrieval with prior exclusions.",
+            },
+        }
+
+    @staticmethod
+    def _load_product_names() -> frozenset:
+        """Loads prod_name values from sample_articles.csv into a frozenset."""
+        import csv
+        csv_path = os.path.normpath(
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                '..', '..', '..', 'shared', 'main_data_set', 'sample_articles.csv'
+            )
+        )
+        names: set[str] = set()
+        try:
+            with open(csv_path, newline='', encoding='utf-8') as f:
+                for row in csv.DictReader(f):
+                    name = row.get('prod_name', '').strip().lower()
+                    if len(name) >= 4:
+                        names.add(name)
+            print(f"[MemoryPipeline] Loaded {len(names)} product names for session-context validation.")
+        except Exception as exc:
+            print(f"[MemoryPipeline] Could not load product names: {exc}")
+        return frozenset(names)
+
+    def _message_contains_product_name(self, message: str) -> bool:
+        """Returns True if any known product name appears in the message."""
+        msg_lower = message.lower()
+        return any(name in msg_lower for name in self._known_product_names)
+
+    async def _validate_session_context(
+        self,
+        label: str,
+        message: str,
+        session_id: str
+    ) -> tuple[bool, str | None]:
+        """
+        Gate for follow-up intents: only allowed when a prior INITIAL_REQUEST
+        exists in the session.  Returns (allowed, stop_message).
+
+        Rules:
+          INITIAL_REQUEST / FEEDBACK / CHITCHAT  → always allowed
+          Any other label with prior IR           → allowed
+          REFINEMENT / EXPLANATION_WHY / COMPARISON with no prior IR → blocked
+          SELECTION_REFERENCE / ATTRIBUTE_QUESTION with no prior IR:
+            - product name found in message → allowed
+            - no product name              → blocked
+        """
+        if label in ("INITIAL_REQUEST", "FEEDBACK", "CHITCHAT"):
+            return True, None
+
+        all_turns = await self.turn_mgr.get_all_session_turns(session_id)
+        has_prior_ir = any(
+            (t.get("classification") or {}).get("label") == "INITIAL_REQUEST"
+            for t in all_turns
+        )
+        if has_prior_ir:
+            return True, None
+
+        if label == "REFINEMENT":
+            return False, (
+                "It looks like you're trying to refine a search, but we haven't found "
+                "any items yet! Tell me what you're looking for and I'll find some "
+                "great options for you."
+            )
+
+        if label == "EXPLANATION_WHY":
+            return False, (
+                "I haven't recommended anything yet, so there's nothing to explain! "
+                "Let me know what kind of fashion item you're looking for and I'll "
+                "get started."
+            )
+
+        if label == "COMPARISON":
+            return False, (
+                "There are no items to compare yet! Share what you're looking for "
+                "and I'll find some options you can compare."
+            )
+
+        if label in ("SELECTION_REFERENCE", "ATTRIBUTE_QUESTION"):
+            if self._message_contains_product_name(message):
+                return True, None
+            return False, (
+                "I'm not sure which item you're referring to. Could you tell me "
+                "the product name you'd like to know more about? Or let me know "
+                "what type of item you're looking for and I'll find some options!"
+            )
+
+        return True, None

@@ -23,33 +23,42 @@ from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
-def _extract_quantity(message: str) -> int:
+_WORD_TO_DIGIT = {
+    "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9",
+}
+
+def _extract_quantity(message: str, payload_qty: int = 0) -> int:
     """
     Extracts requested quantity from user message.
-    e.g. "5 t shirts in 5 colours" -> 5
-         "show me 3 dresses" -> 3
-         "I need a dress" -> 2 (default)
-    Max allowed: 5
+    e.g. "5 shirts"      -> 5  (honours the request exactly)
+         "six shirts"     -> 6  (English word recognised)
+         "I need a dress" -> 2  (default when no number given)
+    No artificial cap — returns whatever the user asked for.
+    Default: 2
+    Accepts an optional payload_qty already extracted by the LLM entity extractor.
     """
+    # Payload quantity from LLM entity extraction takes priority
+    if payload_qty and payload_qty >= 2:
+        return payload_qty
+
+    # Normalise English number words to digits before regex matching
     msg = message.lower()
+    for word, digit in _WORD_TO_DIGIT.items():
+        msg = re.sub(rf"\b{word}\b", digit, msg)
+
     patterns = [
-        # "5 colours" / "5 options"
         r"\b([2-9])\s+(?:different\s+)?(?:colours?|colors?|options?|items?|pieces?|styles?)\b",
-        # "5 t shirts" / "5 shirts" / "5 dresses" — handles "t shirt" too
-        r"\b([2-9])\s+(?:t[- ])?(?:dress|top|shirt|trouser|short|jacket|sweater|skirt|coat|blouse)s?\b",
-        # "show me 5" / "find me 3"
+        r"\b([2-9])\s+(?:t[- ])?(?:dress|top|shirt|trouser|short|jacket|sweater|skirt|coat|blouse|bra|bras|sock|socks|shoe|shoes|boot|boots|jean|jeans|short|shorts|hoodie|hoodies|cardigan|cardigans|blazer|blazers|legging|leggings)s?\b",
         r"\b(?:show|find|get|give)\s+(?:me\s+)?([2-9])\b",
-        # "need 5" / "want 3" / "buy 4"
         r"\b(?:need|want|buy)\s+([2-9])\b",
-        # starts with number "5 shorts"
         r"^([2-9])\s+",
     ]
     for pattern in patterns:
         m = re.search(pattern, msg)
         if m:
-            qty = int(m.group(1))
-            return min(qty, 5)
-    return 2  # default
+            return int(m.group(1))
+    return 2  # default when no quantity mentioned
 
 
 def _ensure_colour_diversity(articles: list, requested_qty: int) -> list:
@@ -83,6 +92,26 @@ def _format_price(price) -> str:
     if price is None:
         return "Price not available"
     return f"£{float(price):.2f}"
+
+
+def _ctx_to_article(ctx: dict) -> dict:
+    """
+    Convert a stored ItemInContext dict (from session memory) to the same
+    shape as a DB article dict. Only difference: stored context uses 'price',
+    DB uses 'avg_price'.
+    """
+    return {
+        "article_id":                str(ctx.get("article_id", "")),
+        "prod_name":                 ctx.get("prod_name", ""),
+        "product_type_name":         ctx.get("product_type_name", ""),
+        "colour_group_name":         ctx.get("colour_group_name", ""),
+        "graphical_appearance_name": ctx.get("graphical_appearance_name", ""),
+        "detail_desc":               ctx.get("detail_desc", ""),
+        "garment_group_name":        ctx.get("garment_group_name", ""),
+        "section_name":              ctx.get("section_name", ""),
+        "index_group_name":          ctx.get("index_group_name", ""),
+        "avg_price":                 ctx.get("price"),
+    }
 
 
 def _article_summary(art: dict) -> dict:
@@ -171,25 +200,16 @@ class EvidenceAssembler:
         soft_constraints = payload.get("soft_constraints", {})
         exclude_ids    = ri.get("exclude_ids", [])
         user_message   = ri.get("user_message", "")
+        payload_qty    = int(payload.get("quantity") or 0)
 
         # Step 1: Semantic search in Qdrant
-        # Build semantic query from user message + filter values
-        semantic_query = user_message
-        if filters.get("colour_group_name"):
-            semantic_query += f" {filters['colour_group_name']}"
-        if filters.get("product_type_name"):
-            semantic_query += f" {filters['product_type_name']}"
-        if soft_constraints.get("style"):
-            semantic_query += f" {soft_constraints['style']}"
-        if soft_constraints.get("occasion"):
-            semantic_query += f" {soft_constraints['occasion']}"
-
+        semantic_query = self._build_semantic_query(user_message, filters, soft_constraints)
         qdrant_results = semantic_search(
             query=semantic_query,
             filters=filters,
             exclude_ids=exclude_ids,
             penalties=payload.get("penalties", {}),
-            top_k=max(20, _extract_quantity(user_message) * 5)
+            top_k=max(20, _extract_quantity(user_message, payload_qty) * 5)
         )
 
         print(f"[ASSEMBLER-QDRANT] got {len(qdrant_results)} results")
@@ -197,7 +217,7 @@ class EvidenceAssembler:
         # Step 2: PostgreSQL filtered search for ranking diversity
         # Fetch larger pool when user requests multiple items
         print(f"\n[ASSEMBLER-CATALOG] ━━━ catalog search ━━━")
-        requested_qty = _extract_quantity(user_message)
+        requested_qty = _extract_quantity(user_message, payload_qty)
         print(f"[ASSEMBLER-CATALOG] qty={requested_qty} msg='{user_message[:60]}'")
         print(f"[ASSEMBLER-CATALOG] filters={filters}")
         print(f"[ASSEMBLER-CATALOG] exclude_ids={exclude_ids}")
@@ -233,6 +253,61 @@ class EvidenceAssembler:
             if aid not in seen_ids:
                 seen_ids.add(aid)
                 merged.append(art)
+
+        # Strip excluded IDs before selection — Qdrant's HasId filter can silently
+        # fail on some client versions, so enforce the exclusion here as a hard gate.
+        if exclude_ids:
+            exclude_set = {str(x) for x in exclude_ids if x}
+            before = len(merged)
+            merged = [a for a in merged if str(a.get("article_id", "")) not in exclude_set]
+            print(f"[ASSEMBLER-CATALOG] post-merge exclude filter: {before} → {len(merged)} items "
+                  f"(removed {before - len(merged)} excluded)")
+
+        # ── Filter relaxation fallback ──────────────────────────────────────
+        # If full filters returned 0 results, retry with progressively looser
+        # constraints so the user gets something rather than nothing.
+        if not merged:
+            # Pass 1: drop price constraints (most likely culprit)
+            _price_keys = {"price_min", "price_max"}
+            _relaxed = {k: v for k, v in filters.items() if k not in _price_keys}
+            if _relaxed != filters:
+                print(f"[ASSEMBLER-CATALOG] 0 results — retrying without price filters: {_relaxed}")
+                _qr2 = semantic_search(
+                    query=semantic_query, filters=_relaxed, exclude_ids=exclude_ids,
+                    penalties=penalties, top_k=max(20, requested_qty * 5)
+                )
+                _pg2 = await search_articles_filtered(
+                    filters=_relaxed, exclude_ids=exclude_ids,
+                    preference_boosts=preference_boosts, purchase_hints=purchase_hints,
+                    penalties=penalties, limit=search_limit
+                )
+                for art in _qr2 + _pg2:
+                    aid = str(art.get("article_id", ""))
+                    if aid not in seen_ids:
+                        seen_ids.add(aid)
+                        merged.append(art)
+                print(f"[ASSEMBLER-CATALOG] after price-relaxed retry: {len(merged)} results")
+
+        if not merged:
+            # Pass 2: keep only product_type_name (broadest search)
+            _minimal = {k: v for k, v in filters.items() if k == "product_type_name"}
+            if _minimal and _minimal != filters:
+                print(f"[ASSEMBLER-CATALOG] still 0 — retrying with product_type only: {_minimal}")
+                _qr3 = semantic_search(
+                    query=semantic_query, filters=_minimal, exclude_ids=exclude_ids,
+                    penalties=penalties, top_k=max(20, requested_qty * 5)
+                )
+                _pg3 = await search_articles_filtered(
+                    filters=_minimal, exclude_ids=exclude_ids,
+                    preference_boosts=preference_boosts, purchase_hints=purchase_hints,
+                    penalties=penalties, limit=search_limit
+                )
+                for art in _qr3 + _pg3:
+                    aid = str(art.get("article_id", ""))
+                    if aid not in seen_ids:
+                        seen_ids.add(aid)
+                        merged.append(art)
+                print(f"[ASSEMBLER-CATALOG] after product_type-only retry: {len(merged)} results")
 
         # Apply colour diversity for multi-item requests
         if requested_qty > 2:
@@ -313,27 +388,93 @@ class EvidenceAssembler:
     async def _assemble_comparison(
         self, ri: dict, mc: dict
     ) -> dict:
-        """Fetches both articles and assembles comparison evidence."""
-        payload    = ri.get("payload", {})
-        id_a       = payload.get("article_id_a")
-        id_b       = payload.get("article_id_b")
-        dimension  = payload.get("comparison_dimension", "overall")
+        """Fetches all context articles and assembles comparison evidence."""
+        payload      = ri.get("payload", {})
+        id_a         = payload.get("article_id_a")
+        id_b         = payload.get("article_id_b")
+        dimension    = payload.get("comparison_dimension", "overall")
         pref_weights = payload.get("preference_weights", {})
         user_message = ri.get("user_message", "")
+        ids_list     = payload.get("article_ids_list")  # all context items if >2
 
-        item_a, item_b = await get_articles_for_comparison(
-            str(id_a) if id_a else "",
-            str(id_b) if id_b else ""
-        )
+        ctx_a = payload.get("context_article_a") or {}
+        ctx_b = payload.get("context_article_b") or {}
+
+        if ctx_a.get("detail_desc") and ctx_b.get("detail_desc"):
+            print("[ASSEMBLER-COMPARE] using stored context for both items (no DB query)")
+            item_a = _ctx_to_article(ctx_a)
+            item_b = _ctx_to_article(ctx_b)
+        else:
+            print("[ASSEMBLER-COMPARE] context missing detail_desc — querying DB")
+            item_a, item_b = await get_articles_for_comparison(
+                str(id_a) if id_a else "",
+                str(id_b) if id_b else ""
+            )
+
+        # Build items_all for multi-item comparisons (>2 items)
+        items_all = None
+        ctx_items_list = payload.get("context_items_list")
+        if ctx_items_list and len(ctx_items_list) > 2:
+            if all(c.get("detail_desc") for c in ctx_items_list):
+                print(f"[ASSEMBLER-COMPARE] using stored context for all "
+                      f"{len(ctx_items_list)} items (no DB query)")
+                items_all = [_ctx_to_article(c) for c in ctx_items_list]
+            else:
+                print("[ASSEMBLER-COMPARE] context missing detail_desc — querying DB for all items")
+                all_ids = [c["article_id"] for c in ctx_items_list]
+                fetched = await get_articles_by_ids(all_ids)
+                id_to_ctx = {c["article_id"]: c for c in ctx_items_list}
+                items_all = []
+                for art in fetched:
+                    aid = str(art.get("article_id", ""))
+                    ctx = id_to_ctx.get(aid, {})
+                    if art.get("avg_price") is None and ctx.get("price") is not None:
+                        art = dict(art)
+                        art["avg_price"] = ctx["price"]
+                    items_all.append(art)
+        elif ids_list and len(ids_list) > 2:
+            # Legacy fallback: no context_items_list in payload
+            all_ids = [entry["article_id"] for entry in ids_list]
+            fetched = await get_articles_by_ids(all_ids)
+            id_to_ctx = {entry["article_id"]: entry for entry in ids_list}
+            items_all = []
+            for art in fetched:
+                aid = str(art.get("article_id", ""))
+                ctx = id_to_ctx.get(aid, {})
+                if art.get("avg_price") is None and ctx.get("price") is not None:
+                    art = dict(art)
+                    art["avg_price"] = ctx["price"]
+                items_all.append(art)
+
+        if items_all and dimension == "price":
+            items_all.sort(key=lambda x: float(x.get("avg_price") or 9999))
 
         # Build dimension-specific comparison facts
         comparison_facts = _build_comparison_facts(item_a, item_b, dimension)
+
+        # For multi-item price comparison, override with full ranked list
+        if items_all and dimension == "price":
+            comparison_facts["all_items_ranked"] = [
+                {
+                    "name":   a.get("prod_name", ""),
+                    "colour": a.get("colour_group_name", ""),
+                    "price":  _format_price(a.get("avg_price")),
+                }
+                for a in items_all
+            ]
+            if items_all:
+                cheapest = items_all[0]
+                comparison_facts["cheaper_item"] = (
+                    f"{cheapest.get('prod_name','')} ({cheapest.get('colour_group_name','')})"
+                )
+                comparison_facts["cheapest_price"] = _format_price(cheapest.get("avg_price"))
 
         return {
             "action":            "item_compare",
             "user_message":      user_message,
             "item_a":            _article_summary(item_a) if item_a else None,
             "item_b":            _article_summary(item_b) if item_b else None,
+            "items_all":         items_all,
             "comparison_dimension": dimension,
             "comparison_facts":  comparison_facts,
             "preference_weights":pref_weights,
@@ -350,31 +491,64 @@ class EvidenceAssembler:
         Fetches article from PostgreSQL and finds which user preferences match.
         """
         print(f"\n[ASSEMBLER-EXPLAIN] ━━━ _assemble_explanation ━━━")
-        payload      = ri.get("payload", {})
-        article_id   = payload.get("article_id")
-        prior_claims = payload.get("prior_claims", [])
-        matched_prefs= payload.get("matched_prefs", [])
-        user_message = ri.get("user_message", "")
-        items_ctx    = ri.get("items_in_context", {})
+        payload       = ri.get("payload", {})
+        article_id    = payload.get("article_id")
+        all_item_ids  = payload.get("all_item_ids")   # present when user asked "why" with no product name
+        prior_claims  = payload.get("prior_claims", [])
+        matched_prefs = payload.get("matched_prefs", [])
+        user_message  = ri.get("user_message", "")
+        items_ctx     = ri.get("items_in_context", {})
 
-        print(f"[ASSEMBLER-EXPLAIN] article_id={article_id}")
+        print(f"[ASSEMBLER-EXPLAIN] article_id={article_id} all_item_ids={all_item_ids}")
         print(f"[ASSEMBLER-EXPLAIN] matched_prefs count={len(matched_prefs)}")
         print(f"[ASSEMBLER-EXPLAIN] prior_claims count={len(prior_claims)}")
 
+        # ── All-items summary (no specific product named) ──────────────────
+        if not article_id and all_item_ids:
+            print(f"[ASSEMBLER-EXPLAIN] all-items summary for {len(all_item_ids)} items")
+            fetched = await get_articles_by_ids(all_item_ids)
+            articles_summary = [_article_summary(a) for a in fetched if a]
+            print(f"[ASSEMBLER-EXPLAIN] fetched {len(articles_summary)} articles for summary")
+            return {
+                "action":            "explanation_generate",
+                "user_message":      user_message,
+                "article":           {},
+                "articles":          articles_summary,   # multi-item path
+                "prior_claims":      [],
+                "confirmed_matches": [],
+                "matched_prefs":     matched_prefs,
+                "user_preferences":  mc.get("long_term_preferences", []),
+                "style_profile":     mc.get("style_profile", {}),
+            }
+
+        context_art = payload.get("context_article") or {}
         article = None
-        if article_id:
+
+        if context_art and context_art.get("detail_desc"):
+            # Rich data already in session context — skip DB query entirely
+            print(f"[ASSEMBLER-EXPLAIN] using stored context for article_id={article_id} (no DB query)")
+            article = {
+                "article_id":               str(context_art.get("article_id", "")),
+                "prod_name":                context_art.get("prod_name", ""),
+                "product_type_name":        context_art.get("product_type_name", ""),
+                "colour_group_name":        context_art.get("colour_group_name", ""),
+                "graphical_appearance_name":context_art.get("graphical_appearance_name", ""),
+                "detail_desc":              context_art.get("detail_desc", ""),
+                "garment_group_name":       context_art.get("garment_group_name", ""),
+                "section_name":             context_art.get("section_name", ""),
+                "index_group_name":         context_art.get("index_group_name", ""),
+                "avg_price":                context_art.get("price"),
+            }
+        elif article_id:
+            print(f"[ASSEMBLER-EXPLAIN] context missing detail_desc — querying DB for article_id={article_id}")
             article = await get_article_by_id(str(article_id))
-            print(f"[ASSEMBLER-EXPLAIN] get_article_by_id result: {article is not None}")
             if article:
-                print(f"[ASSEMBLER-EXPLAIN] article keys: {list(article.keys())[:10]}")
                 print(f"[ASSEMBLER-EXPLAIN] article: name={article.get('prod_name')} colour={article.get('colour_group_name')} type={article.get('product_type_name')}")
             else:
                 print(f"[ASSEMBLER-EXPLAIN] WARNING: article not found for id={article_id}")
-                # Try from items_in_context as fallback
                 for slot in ['item_a', 'item_b']:
                     ctx_item = items_ctx.get(slot) or {}
                     if str(ctx_item.get('article_id','')) == str(article_id):
-                        # Build a minimal article dict from context
                         article = {
                             'article_id':        str(article_id),
                             'prod_name':         ctx_item.get('prod_name',''),
@@ -422,13 +596,35 @@ class EvidenceAssembler:
     async def _assemble_detail_lookup(
         self, ri: dict, mc: dict
     ) -> dict:
-        """Fetches full article details."""
+        """
+        Fetches full article details.
+        Uses context data stored at recommendation time when available (no DB query).
+        Falls back to PostgreSQL only when detail_desc was not stored in context.
+        """
         payload      = ri.get("payload", {})
         article_id   = payload.get("article_id")
         user_message = ri.get("user_message", "")
+        context_art  = payload.get("context_article") or {}
 
         article = None
-        if article_id:
+
+        if context_art and context_art.get("detail_desc"):
+            # Rich data already in session context — skip DB query entirely
+            print(f"[ASSEMBLER-DETAIL] using stored context for article_id={article_id} (no DB query)")
+            article = {
+                "article_id":               str(context_art.get("article_id", "")),
+                "prod_name":                context_art.get("prod_name", ""),
+                "product_type_name":        context_art.get("product_type_name", ""),
+                "colour_group_name":        context_art.get("colour_group_name", ""),
+                "graphical_appearance_name":context_art.get("graphical_appearance_name", ""),
+                "detail_desc":              context_art.get("detail_desc", ""),
+                "garment_group_name":       context_art.get("garment_group_name", ""),
+                "section_name":             context_art.get("section_name", ""),
+                "index_group_name":         context_art.get("index_group_name", ""),
+                "avg_price":                context_art.get("price"),
+            }
+        elif article_id:
+            print(f"[ASSEMBLER-DETAIL] context missing detail_desc — querying DB for article_id={article_id}")
             article = await get_article_by_id(str(article_id))
 
         return {
@@ -438,6 +634,20 @@ class EvidenceAssembler:
         }
 
     # ── no retrieval (FEEDBACK / CHITCHAT) ────────────────────────────────────
+
+    @staticmethod
+    def _build_semantic_query(user_message: str, filters: dict, soft_constraints: dict) -> str:
+        """Appends key filter/constraint terms to the base message for Qdrant embedding."""
+        parts = [user_message]
+        for key in ("colour_group_name", "product_type_name"):
+            val = filters.get(key)
+            if val:
+                parts.append(val)
+        for key in ("style", "occasion"):
+            val = soft_constraints.get(key)
+            if val:
+                parts.append(val)
+        return " ".join(parts)
 
     async def _assemble_no_retrieval(self, mc: dict) -> dict:
         """For FEEDBACK and CHITCHAT — uses only memory_context."""

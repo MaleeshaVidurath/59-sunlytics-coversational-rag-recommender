@@ -154,6 +154,26 @@ class TurnManager:
             }
         )
 
+    async def get_all_session_turns(self, session_id: str) -> list[dict]:
+        """
+        Returns all turns in the Redis buffer (up to REDIS_TURNS_BUFFER).
+        Used for session-context validation — checks labels of all prior turns,
+        not just the last few formatted for DistilBERT.
+        Falls back to MongoDB if Redis is cold.
+        """
+        redis = get_redis()
+        cached = await redis.lrange(_session_turns_key(session_id), 0, -1)
+        if cached:
+            return [json.loads(t) for t in cached]
+        db = get_db()
+        doc = await db.sessions.find_one(
+            {"session_id": session_id},
+            {"turns": {"$slice": -REDIS_TURNS_BUFFER}}
+        )
+        if doc and "turns" in doc:
+            return doc["turns"]
+        return []
+
     async def get_recent_turns(
         self,
         session_id: str,

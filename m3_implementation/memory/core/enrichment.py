@@ -285,6 +285,75 @@ def _classify_feedback_sentiment(message: str) -> float:
     return 0.3
 
 
+# ── Price ceiling resolver for "cheaper than X" refinements ─────────────────
+# When the user says "cheaper" or "less expensive", the LLM entity extractor
+# guesses a price_max from general knowledge and gets it wrong.
+# This resolver reads the *actual price* of the named (or current) item from
+# context and sets price_max to strictly below that price.
+
+_CHEAPER_KEYWORDS = frozenset([
+    "cheaper", "cheapest", "cheap", "less expensive", "more affordable", "lower price",
+    "cheaper than", "not as expensive", "cost less", "budget option",
+    "something cheaper", "a cheaper one",
+])
+
+
+def _resolve_cheaper_price(
+    message: str,
+    constraints: dict,
+    *context_items,
+) -> dict:
+    """
+    Override price_max when the user asks for something cheaper.
+    Reads the real price from context items instead of trusting the LLM guess.
+
+    Priority:
+      1. If a specific item name is mentioned → use that item's price
+      2. Otherwise → use the minimum price among context items
+    Sets price_max = reference_price - 0.01 (strictly cheaper).
+    """
+    msg_lower = message.lower()
+    is_cheaper = (
+        any(kw in msg_lower for kw in _CHEAPER_KEYWORDS)
+        or any(w.startswith("cheap") for w in msg_lower.split())
+    )
+    if not is_cheaper:
+        return constraints
+
+    # Collect (item, price) pairs that have a known price
+    items_with_price = []
+    for item in context_items:
+        if item is None:
+            continue
+        price = getattr(item, "price", None)
+        if price is None and hasattr(item, "model_dump"):
+            price = item.model_dump().get("price")
+        if price:
+            items_with_price.append((item, float(price)))
+
+    if not items_with_price:
+        return constraints  # no known prices — keep LLM value
+
+    # Check whether a specific item is named in the message
+    msg_words = set(msg_lower.split())
+    reference_price = None
+    for item, price in items_with_price:
+        name_words = (item.prod_name or "").lower().split()
+        if any(w in msg_words for w in name_words if len(w) > 3):
+            reference_price = price
+            print(f"[ENRICH-REFINE] price_max override: '{item.prod_name}' "
+                  f"(£{price:.2f}) named in message")
+            break
+
+    if reference_price is None:
+        reference_price = min(price for _, price in items_with_price)
+        print(f"[ENRICH-REFINE] price_max override: using min context price £{reference_price:.2f}")
+
+    price_max = round(reference_price - 0.01, 2)
+    print(f"[ENRICH-REFINE] price_max: LLM={constraints.get('price_max')} → context-derived={price_max}")
+    return {**constraints, "price_max": price_max}
+
+
 # ── Item reference resolver ───────────────────────────────────────────────────
 
 def _resolve_item_reference(
@@ -319,6 +388,95 @@ def _resolve_item_reference(
 
     # Default: item_a is the primary focus
     return item_a
+
+
+# ── Comparison item resolver ──────────────────────────────────────────────────
+
+def _score_items_by_name(message: str, item_pool: list) -> list:
+    """
+    For each item in the pool check whether its product name appears in the
+    message. Full-name substring match scores 100; word-overlap scores by
+    count of matching name words (>=3 chars). Deduplicates by prod_name
+    (one item per unique product name), ordered by score descending.
+    Returns empty list if no item names are detected.
+
+    Why no splitting by 'and/vs'?
+    The user may write any connector or none at all. Checking item names
+    directly is more reliable and works for any phrasing.
+    """
+    if not item_pool:
+        return []
+
+    msg_lower = message.lower()
+    msg_words = {w for w in msg_lower.split() if len(w) >= 3}
+
+    scored = []
+    for item in item_pool:
+        name_lower = (item.prod_name or "").lower()
+        if name_lower and name_lower in msg_lower:
+            score = 100          # full product-name substring found
+        else:
+            name_words = {w for w in name_lower.split() if len(w) >= 3}
+            score = len(name_words & msg_words)
+        scored.append((score, item))
+
+    scored.sort(key=lambda x: -x[0])
+    if not scored or scored[0][0] == 0:
+        return []
+
+    top_score = scored[0][0]
+    # When strong full-name matches exist, drop items that only scored via
+    # incidental shared words (e.g. every leggings item matching "leggings").
+    min_score = (top_score // 2) if top_score >= 10 else 1
+
+    seen_names: set  = set()
+    result:     list = []
+    for score, item in scored:
+        if score < min_score:
+            break
+        name_key = (item.prod_name or "").lower()
+        if name_key not in seen_names:
+            seen_names.add(name_key)
+            result.append(item)
+
+    return result
+
+
+
+
+async def _collect_session_items(session_id: str) -> list:
+    """
+    Returns all unique ItemInContext objects recommended in this session
+    (INITIAL_REQUEST and REFINEMENT turns only), oldest first.
+    Used when named items are not found in the last-turn pool.
+    """
+    try:
+        db     = get_db()
+        cursor = db.recommendations.find(
+            {
+                "session_id":    session_id,
+                "trigger_label": {"$in": ["INITIAL_REQUEST", "REFINEMENT"]},
+            },
+            {"items": 1, "created_at": 1},
+        ).sort("created_at", 1)
+        docs = await cursor.to_list(length=50)
+
+        seen_ids:  set  = set()
+        all_items: list = []
+        for doc in docs:
+            for item_dict in (doc.get("items") or []):
+                aid = item_dict.get("article_id")
+                if aid and aid not in seen_ids:
+                    seen_ids.add(aid)
+                    try:
+                        all_items.append(ItemInContext(**item_dict))
+                    except Exception:
+                        pass
+        print(f"[ENRICH-COMPARE] session history: {len(all_items)} unique items")
+        return all_items
+    except Exception as e:
+        print(f"[ENRICH-COMPARE] session history query failed: {e}")
+        return []
 
 
 # ── Helper: build items_in_context dict ───────────────────────────────────────
@@ -485,10 +643,10 @@ class EnrichmentLayer:
 
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
 
-        # Extract hard constraints from entities
+        # Extract hard constraints from entities — quantity is NOT a DB filter
         new_constraints = {
             k: v for k, v in entities.items()
-            if k not in ("style", "occasion") and v is not None
+            if k not in ("style", "occasion", "quantity") and v is not None
         }
 
         if new_constraints:
@@ -534,7 +692,6 @@ class EnrichmentLayer:
                     # Hard constraints — mandatory WHERE conditions
                     "filters": merged_filters,
                     # Soft constraints from session state (style, occasion)
-                    # NOT mandatory — use to contextualise search and ranking
                     "soft_constraints": {
                         k: v for k, v in state.soft_constraints.items()
                         if v is not None
@@ -553,6 +710,8 @@ class EnrichmentLayer:
                     "purchase_history_hints": await self._get_purchase_hints(user_id),
                     # Disliked values — rank lower in results
                     "penalties": pref_summary.get("disliked_values", {}),
+                    # Quantity requested by user — from LLM entity extraction
+                    "quantity": entities.get("quantity") if entities else None,
                 }
             ),
             "memory_context": memory_ctx,
@@ -568,11 +727,27 @@ class EnrichmentLayer:
 
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
 
+        # Extract items for retrieval_input and price resolution
+        current_items = state.currently_discussing
+        item_a = current_items.get("item_a")
+        item_b = current_items.get("item_b")
+        all_ctx_items = [
+            v for k, v in sorted(current_items.items())
+            if k.startswith("item_") and v is not None
+        ]
+
         # New constraints from this message, merged on top of existing ones
         new_constraints = {
             k: v for k, v in entities.items()
-            if k not in ("style", "occasion") and v is not None
+            if k not in ("style", "occasion", "quantity") and v is not None
         }
+
+        # Override LLM-guessed price_max when user says "cheaper [than X]"
+        # Pass all currently_discussing items so min price covers all recommended items
+        new_constraints = _resolve_cheaper_price(
+            current_message, new_constraints, *all_ctx_items
+        )
+
         merged_constraints = {**state.hard_constraints, **new_constraints}
 
         if new_constraints:
@@ -598,10 +773,6 @@ class EnrichmentLayer:
         memory_ctx = await self._base_memory_context(user_id, state)
         memory_ctx["previous_constraints"] = state.hard_constraints
         memory_ctx["new_changes"]          = new_constraints
-
-        current_items = state.currently_discussing
-        item_a = current_items.get("item_a")
-        item_b = current_items.get("item_b")
 
         return {
             "label":              "REFINEMENT",
@@ -727,43 +898,40 @@ class EnrichmentLayer:
         item_a = current_items.get("item_a")
         item_b = current_items.get("item_b")
 
-        # ── Identify which specific item user is asking about ──────────────
-        target_item = item_a  # default: first item
+        # Collect ALL recommended items (item_a … item_z)
+        all_ctx_items = [
+            v for k, v in sorted(current_items.items())
+            if k.startswith("item_") and v is not None
+        ]
+
         msg_lower = current_message.lower()
+        msg_words = set(msg_lower.split())
 
-        # Check if user mentioned item_b by name or reference
-        if item_b:
-            item_b_name = (item_b.prod_name or "").lower()
-            # Direct name match — user typed part of item_b's name
-            if item_b_name and any(
-                word in msg_lower
-                for word in item_b_name.split()
-                if len(word) > 3  # skip short words like "the", "a"
-            ):
-                target_item = item_b
-
-            # Reference by position: "second", "option 2", "2nd"
-            elif any(ref in msg_lower for ref in [
-                "second", "option 2", "2nd", "number 2", "the other",
-                "latter", "last one", "#2"
-            ]):
-                target_item = item_b
-
-        # Check if user mentioned item_a by name explicitly
-        if item_a:
-            item_a_name = (item_a.prod_name or "").lower()
-            if item_a_name and any(
-                word in msg_lower
-                for word in item_a_name.split()
-                if len(word) > 3
-            ):
-                target_item = item_a
-
-        # Reference by position: "first", "option 1", "1st"
-        if any(ref in msg_lower for ref in [
-            "first", "option 1", "1st", "number 1", "#1"
-        ]):
+        # ── Identify which specific item user is asking about ──────────────
+        # Explicit ordinals first, then score ALL items by name-word overlap.
+        # Avoids false matches on generic category words (e.g. "shorts"
+        # appears in every item name when user asks "why JONES 5-PKT SHORTS").
+        # When no name is mentioned at all → target_item = None (explain all).
+        if any(ref in msg_lower for ref in ["first", "option 1", "1st", "number 1", "#1"]):
             target_item = item_a
+        elif any(ref in msg_lower for ref in [
+            "second", "option 2", "2nd", "number 2", "the other", "latter", "last one", "#2"
+        ]):
+            target_item = item_b
+        else:
+            best_item  = None
+            best_score = 0
+            for item in all_ctx_items:
+                name  = (item.prod_name or "").lower()
+                score = sum(1 for w in name.split() if len(w) > 3 and w in msg_words)
+                if score > best_score:
+                    best_score = score
+                    best_item  = item
+            target_item = best_item if best_score > 0 else None
+
+        print(f"[ENRICH-WHY] target_item="
+              f"'{target_item.prod_name if target_item else 'ALL ITEMS'}' "
+              f"(scored from {len(all_ctx_items)} context items)")
 
         # ── Fetch stored explanation for target item ───────────────────────
         existing_explanation = None
@@ -780,11 +948,6 @@ class EnrichmentLayer:
         memory_ctx = await self._base_memory_context(user_id, state)
         memory_ctx["existing_explanation"] = existing_explanation
 
-        # Log which item was targeted for debugging
-        target_name = (target_item.prod_name if target_item else "unknown")
-        print(f"[EnrichExplanation] User asked about: '{target_name}' "
-              f"(parsed from: '{current_message[:50]}')")
-
         return {
             "label":              "EXPLANATION_WHY",
             "retrieval_strategy": "PARTIAL",
@@ -792,11 +955,20 @@ class EnrichmentLayer:
                 action="explanation_generate",
                 retrieval_strategy="PARTIAL",
                 user_message=current_message,
-                item_a=target_item,
+                item_a=target_item if target_item else item_a,
                 item_b=item_b if target_item != item_b else item_a,
                 exclude_ids=state.rejected_items,
                 payload={
-                    "article_id":   target_item.article_id if target_item else None,
+                    # Single item explanation
+                    "article_id":     target_item.article_id if target_item else None,
+                    # Full item data stored at recommendation time — assembler uses
+                    # this to skip the DB query when detail_desc is already present.
+                    "context_article": target_item.model_dump() if target_item else None,
+                    # All-items summary: passed when user asks "why" with no product name
+                    "all_item_ids":   (
+                        None if target_item
+                        else [it.article_id for it in all_ctx_items]
+                    ),
                     "prior_claims": (
                         existing_explanation.get("claims", [])
                         if existing_explanation else []
@@ -814,14 +986,75 @@ class EnrichmentLayer:
         print(f"[ENRICH-COMPARE] ━━━ called msg='{current_message[:50]}' entities={entities}")
         """COMPARISON → action: item_compare"""
         current_items = state.currently_discussing
-        item_a = current_items.get("item_a")
-        item_b = current_items.get("item_b")
+
+        # Collect ALL items stored in currently_discussing (item_a … item_z)
+        all_ctx_items = [
+            v for k, v in sorted(current_items.items())
+            if k.startswith("item_") and v is not None
+        ]
+        print(f"[ENRICH-COMPARE] currently_discussing keys={list(current_items.keys())} "
+              f"non-null items={len(all_ctx_items)}")
 
         # Identify comparison dimension using hybrid similarity
         dimension = _identify_comparison_dimension(current_message)
 
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
         memory_ctx = await self._base_memory_context(user_id, state)
+
+        # Step 1: try to match named items from the last-turn pool.
+        resolved = _score_items_by_name(current_message, all_ctx_items)
+        print(f"[ENRICH-COMPARE] name-match (last turn): {[it.prod_name for it in resolved]}")
+
+        # Step 2: if last-turn pool gave <2 matches, check session history.
+        # Covers the case where the user names items from an earlier turn.
+        # If no names were mentioned either, session history also returns empty
+        # so the generic fallback below still fires correctly.
+        if len(resolved) < 2:
+            hist_pool = await _collect_session_items(session_id)
+            if hist_pool:
+                hist_resolved = _score_items_by_name(current_message, hist_pool)
+                if len(hist_resolved) >= 2:
+                    resolved = hist_resolved
+                    print(f"[ENRICH-COMPARE] name-match (session history): "
+                          f"{[it.prod_name for it in resolved]}")
+
+        if len(resolved) >= 2:
+            compare_a    = resolved[0]
+            compare_b    = resolved[1]
+            compare_list = resolved
+            print(f"[ENRICH-COMPARE] named {len(resolved)} item(s): "
+                  f"{[it.prod_name for it in resolved]}")
+        else:
+            # No names mentioned — compare all last-turn items only
+            compare_a    = all_ctx_items[0] if all_ctx_items else None
+            compare_b    = all_ctx_items[1] if len(all_ctx_items) > 1 else None
+            compare_list = all_ctx_items
+            print(f"[ENRICH-COMPARE] generic: comparing all {len(all_ctx_items)} last-turn items")
+
+        payload = {
+            "article_id_a":         compare_a.article_id if compare_a else None,
+            "article_id_b":         compare_b.article_id if compare_b else None,
+            "context_article_a":    compare_a.model_dump() if compare_a else None,
+            "context_article_b":    compare_b.model_dump() if compare_b else None,
+            "comparison_dimension": dimension,
+            "preference_weights": {
+                p["attribute_name"]: p["weight"]
+                for p in pref_summary.get("liked_attributes", [])
+            },
+        }
+        if len(compare_list) > 2:
+            payload["article_ids_list"] = [
+                {
+                    "article_id": it.article_id,
+                    "prod_name":  it.prod_name,
+                    "colour":     it.colour_group_name,
+                    "price":      getattr(it, "price", None),
+                }
+                for it in compare_list
+            ]
+            payload["context_items_list"] = [
+                it.model_dump() for it in compare_list
+            ]
 
         return {
             "label":              "COMPARISON",
@@ -830,18 +1063,10 @@ class EnrichmentLayer:
                 action="item_compare",
                 retrieval_strategy="PARTIAL",
                 user_message=current_message,
-                item_a=item_a,
-                item_b=item_b,
+                item_a=compare_a,
+                item_b=compare_b,
                 exclude_ids=state.rejected_items,
-                payload={
-                    "article_id_a":        item_a.article_id if item_a else None,
-                    "article_id_b":        item_b.article_id if item_b else None,
-                    "comparison_dimension": dimension,
-                    "preference_weights": {
-                        p["attribute_name"]: p["weight"]
-                        for p in pref_summary.get("liked_attributes", [])
-                    },
-                }
+                payload=payload,
             ),
             "memory_context": memory_ctx,
             "side_effects":   [],
@@ -881,7 +1106,33 @@ class EnrichmentLayer:
                 "side_effects":       ["Reclassified: no items in context"],
             }
 
-        selected_item = _resolve_item_reference(current_message, item_a, item_b)
+        # Score ALL items in currently_discussing (item_a … item_z) by name-word overlap.
+        # Pick the item with the highest score — avoids false matches on generic category
+        # words like "sneaker" or "dress" that appear in multiple item names.
+        all_ctx_items = [
+            v for k, v in sorted(current_items.items())
+            if k.startswith("item_") and v is not None
+        ]
+        msg_lower = current_message.lower()
+        msg_words = set(msg_lower.split())
+        best_item  = None
+        best_score = 0
+        for item in all_ctx_items:
+            name = (item.prod_name or "").lower()
+            score = sum(1 for w in name.split() if len(w) > 3 and w in msg_words)
+            if score > best_score:
+                best_score = score
+                best_item  = item
+        if best_item is not None:
+            selected_item = best_item
+            print(f"[ENRICH-SELECT] name-scored '{selected_item.prod_name}' "
+                  f"(article_id={selected_item.article_id}, score={best_score}) "
+                  f"from {len(all_ctx_items)} context items")
+        else:
+            # Fallback: handles ordinals ("second one"), colours, "the other one"
+            selected_item = _resolve_item_reference(current_message, item_a, item_b)
+            print(f"[ENRICH-SELECT] fallback resolved to "
+                  f"'{selected_item.prod_name if selected_item else None}'")
 
         # If user selected item_b, swap so item_a is always the focus
         side_effects = []
@@ -910,7 +1161,10 @@ class EnrichmentLayer:
                 item_b=item_b,
                 exclude_ids=state.rejected_items,
                 payload={
-                    "article_id": selected_item.article_id if selected_item else None,
+                    "article_id":     selected_item.article_id if selected_item else None,
+                    # Full item data stored at recommendation time — assembler uses
+                    # this to skip the DB query when detail_desc is already present.
+                    "context_article": selected_item.model_dump() if selected_item else None,
                 }
             ),
             "memory_context": memory_ctx,
