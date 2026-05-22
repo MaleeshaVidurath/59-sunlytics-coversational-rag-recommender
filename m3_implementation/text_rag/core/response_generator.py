@@ -8,7 +8,7 @@
 #   3. Concise: responses should be clear but not lengthy
 #   4. Justification-first: for recommendations, always explain WHY
 #   5. Three prompt tiers: normal → strict → strictest (for regeneration)
-
+ 
 import json
 import os
 import sys
@@ -73,6 +73,9 @@ def _build_catalog_search_prompt(evidence: dict, strictness: int = 0) -> str:
             f"Colour: {item.get('colour','')} | "
             f"Price: {price} | "
             f"Pattern: {item.get('pattern','')} | "
+            f"Category: {item.get('index_group','')} | "
+            f"Section: {item.get('section','')} | "
+            f"Garment group: {item.get('garment_group','')} | "
             f"Description: {desc}"
         )
 
@@ -96,9 +99,12 @@ def _build_catalog_search_prompt(evidence: dict, strictness: int = 0) -> str:
 
     strictness_instruction = {
         0: "Write a friendly, natural recommendation.",
-        1: "STRICT MODE: Only state facts present in the evidence below. Do not infer or add details.",
+        1: "STRICT MODE: Copy item name, colour, price, and pattern exactly from the evidence. Keep a friendly tone and include one sentence about why the item suits the user.",
         2: "STRICTEST MODE: Write ONLY bullet points. Each bullet states ONLY: item name, colour, type, and price. No explanations, no reasoning, no opinions.",
     }[strictness]
+
+    n_items = len(items)
+    intro_phrase = "both options" if n_items == 2 else f"all {n_items} options"
 
     return FASHION_CONTEXT + f"""You are a fashion shopping assistant for H&M.
 {strictness_instruction}
@@ -112,7 +118,7 @@ EVIDENCE — use ONLY these facts:
 {history_text}
 
 Write a recommendation response:
-- Introduce both options briefly
+- Introduce {intro_phrase} briefly
 - For each item state: name, colour, price, and ONE sentence why it suits this user
 - Keep total response under 100 words
 - Do not mention internal IDs or article numbers
@@ -578,18 +584,21 @@ class ResponseGenerator:
 
     async def generate(
         self,
-        evidence: dict,
-        strictness: int = 0
+        evidence:             dict,
+        strictness:           int        = 0,
+        contradicted_fields:  list[str]  = None,
     ) -> str:
         """
         Generates a response for the given evidence bundle.
 
         Args:
-            evidence:   Evidence bundle from EvidenceAssembler
-            strictness: 0=normal, 1=strict, 2=strictest
-                        Higher strictness used in regeneration attempts
+            evidence:            Evidence bundle from EvidenceAssembler
+            strictness:          0=normal, 1=strict, 2=strictest
+            contradicted_fields: Fields that failed the hallucination check on
+                                 the previous attempt — injected into the prompt
+                                 on retries so the LLM knows what to fix.
 
-        Returns generated response text.
+        Returns the cleaned response string.
         """
         print(f"\n[RESPONSE-GEN] ━━━ generate() called ━━━")
         action = evidence.get("action", "no_retrieval")
@@ -615,18 +624,25 @@ class ResponseGenerator:
         else:
             prompt = _build_chitchat_prompt(evidence)
 
+        # On retries: tell the LLM exactly which fields were wrong last time
+        if contradicted_fields and strictness > 0:
+            field_list = ", ".join(contradicted_fields)
+            prompt += (
+                f"\nCORRECTION: Your previous response had incorrect values for: "
+                f"{field_list}. Verify these fields very carefully in the evidence above."
+            )
+
         print(f"[DBG-5a] PROMPT action={action} strictness={strictness} prompt_len={len(prompt)}")
         print(f"[DBG-5a] PROMPT PREVIEW: {prompt[:200].replace(chr(10), ' ')!r}")
         response = await call_ollama(prompt)
 
-        # Basic cleanup and markdown removal
         response = response.strip()
         if not response:
             print("[DBG-5b] OLLAMA: no response → using fallback")
             return _clean_response(self._fallback_response(evidence))
 
         _cleaned = _clean_response(response)
-        print(f"[RESPONSE-GEN] Ollama: RESPONSE len={len(response)}")
+        print(f"[RESPONSE-GEN] RESPONSE len={len(response)}")
         print(f"[RESPONSE-GEN] Cleaned: {repr(_cleaned[:200])}")
         return _cleaned
 

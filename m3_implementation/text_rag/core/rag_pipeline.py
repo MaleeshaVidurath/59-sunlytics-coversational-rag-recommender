@@ -220,15 +220,16 @@ class TextRAGPipeline:
         [print(f"  [DBG-4] ITEM: {it.get('article_id','?')} | {str(it.get('name','?'))[:30]} | {it.get('colour','?')} | {it.get('price','')}" ) for it in _ev_items]
 
         # ── Step 3 + 4 + 5: Generate → Check → Regenerate loop ─────────────
-        skip_checking  = action in _SKIP_HALLUCINATION_CHECK
+        skip_checking       = action in _SKIP_HALLUCINATION_CHECK
         print(f"[RAG] skip_hallucination={skip_checking} (action={action})")
-        response_text  = ""
-        check_result   = {}
-        attempt_count  = 0
-        final_response = ""
-        final_flag     = False
-        final_flagged  = []
-        final_score    = 0.0
+        response_text       = ""
+        check_result        = {}
+        attempt_count       = 0
+        final_response      = ""
+        final_flag          = False
+        final_flagged       = []
+        final_score         = 0.0
+        contradicted_fields = []
 
         for attempt in range(MAX_REGENERATION_ATTEMPTS):
             attempt_count = attempt + 1
@@ -253,6 +254,7 @@ class TextRAGPipeline:
                 response_text = await self.generator.generate(
                     evidence=evidence,
                     strictness=strictness,
+                    contradicted_fields=contradicted_fields if strictness > 0 else None,
                 )
             except Exception as e:
                 print(f"[TextRAGPipeline] Generation error (attempt {attempt_count}): {e}")
@@ -273,7 +275,8 @@ class TextRAGPipeline:
             except Exception as e:
                 print(f"[TextRAGPipeline] Hallucination check error: {e}")
                 check_result = {"passed": True, "has_hallucination": False,
-                                "flagged_sentences": [], "hallucination_score": 0.0}
+                                "flagged_sentences": [], "hallucination_score": 0.0,
+                                "contradicted_fields": []}
 
             if check_result.get("passed", True):
                 # Passed — no hallucinations
@@ -285,13 +288,15 @@ class TextRAGPipeline:
                 print(f"[DBG-6] HALL PASS: response_len={len(response_text)} chars")
                 break
             else:
-                # Failed — log and try again with stricter prompt
-                final_flagged  = check_result.get("flagged_sentences", [])
-                final_score    = check_result.get("hallucination_score", 0.0)
+                # Failed — capture which fields were wrong for the next attempt's prompt
+                contradicted_fields = check_result.get("contradicted_fields", [])
+                final_flagged       = check_result.get("flagged_sentences", [])
+                final_score         = check_result.get("hallucination_score", 0.0)
                 print(
                     f"[TextRAGPipeline] Hallucination detected on attempt {attempt_count}. "
                     f"Score: {final_score:.3f}. "
                     f"Flagged: {check_result.get('n_flagged', 0)} sentences. "
+                    f"Contradicted fields: {contradicted_fields}. "
                     f"Retrying with strictness={strictness + 1}..."
                 )
                 final_response = response_text
