@@ -437,7 +437,7 @@ class HallucinationChecker:
             # sentence has long descriptive tails after the structured "Name, Colour, £price" part.
             # If the exact value is present verbatim in the sentence it cannot be a hallucination.
             if fact_field == "name":
-                name_m = re.match(r"The item is called (.+?)\.", fact_text)
+                name_m = re.search(r"The item is called (.+?)\.", fact_text)
                 if name_m and name_m.group(1).lower() in best_sentence.lower():
                     print(f"[HALL-CHECK] PASS [name] verbatim: '{name_m.group(1)[:50]}'")
                     results.append({
