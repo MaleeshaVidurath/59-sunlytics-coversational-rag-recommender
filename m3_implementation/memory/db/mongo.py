@@ -68,6 +68,48 @@ async def _create_indexes():
     await db.contradiction_log.create_index("session_id")
     await db.contradiction_log.create_index([("user_id", 1), ("detected_at", -1)])
 
+    # session_model_locks — one document per session, stores which model was selected.
+    # Standalone collection — never touches sessions/users/recommendations.
+    # {session_id, selected_model, user_id, locked_at}
+    await db.session_model_locks.create_index("session_id", unique=True)
+    await db.session_model_locks.create_index("user_id")
+
+    # ── M2 member collections (full set, same structure as M3) ───────────────
+    await db.m2_session_graphs.create_index("session_id", unique=True)
+
+    await db.m2_contradiction_log.create_index("session_id")
+    await db.m2_contradiction_log.create_index([("user_id", 1), ("detected_at", -1)])
+
+    await db.m2_recommendations.create_index("session_id")
+    await db.m2_recommendations.create_index([("user_id", 1), ("created_at", -1)])
+
+    await db.m2_explanations.create_index("session_id")
+    await db.m2_explanations.create_index("recommendation_id")
+    await db.m2_explanations.create_index([("user_id", 1), ("created_at", -1)])
+
+    # m2_turns — standalone (M3 turns are embedded in sessions; M2 gets its own collection)
+    await db.m2_turns.create_index("turn_id", unique=True)
+    await db.m2_turns.create_index("session_id")
+    await db.m2_turns.create_index([("user_id", 1), ("created_at", -1)])
+
+    # ── M1 member collections (full set, same structure as M3) ───────────────
+    await db.m1_session_graphs.create_index("session_id", unique=True)
+
+    await db.m1_contradiction_log.create_index("session_id")
+    await db.m1_contradiction_log.create_index([("user_id", 1), ("detected_at", -1)])
+
+    await db.m1_recommendations.create_index("session_id")
+    await db.m1_recommendations.create_index([("user_id", 1), ("created_at", -1)])
+
+    await db.m1_explanations.create_index("session_id")
+    await db.m1_explanations.create_index("recommendation_id")
+    await db.m1_explanations.create_index([("user_id", 1), ("created_at", -1)])
+
+    # m1_turns — standalone (same reasoning as m2_turns)
+    await db.m1_turns.create_index("turn_id", unique=True)
+    await db.m1_turns.create_index("session_id")
+    await db.m1_turns.create_index([("user_id", 1), ("created_at", -1)])
+
     print("MongoDB indexes created/verified.")
 
 
@@ -77,6 +119,49 @@ async def close_mongodb_connection():
     if _client:
         _client.close()
         print("MongoDB connection closed.")
+
+
+# ── Multi-member collection name helpers ─────────────────────────────────────
+# M3 is the backbone and uses the default collection names.
+# M1 and M2 each have their own prefixed session_graphs and contradiction_log
+# so their cross-turn memory never mixes with M3's or each other's.
+# All other collections (users, sessions, recommendations, etc.) remain shared
+# under M3 because M3 is the backbone that owns the session lifecycle.
+
+_MEMBER_COLLECTION_MAP: dict[str, dict[str, str]] = {
+    "m3": {
+        "session_graphs":    "session_graphs",
+        "contradiction_log": "contradiction_log",
+        "recommendations":   "recommendations",
+    },
+    "m2": {
+        "session_graphs":    "m2_session_graphs",
+        "contradiction_log": "m2_contradiction_log",
+        "recommendations":   "m2_recommendations",
+    },
+    "m1": {
+        "session_graphs":    "m1_session_graphs",
+        "contradiction_log": "m1_contradiction_log",
+        "recommendations":   "m1_recommendations",
+    },
+}
+
+
+def get_collection_name(base: str, model: str = "m3") -> str:
+    """
+    Returns the MongoDB collection name for a given base name and model member.
+
+    Args:
+        base:  "session_graphs" or "contradiction_log"
+        model: "m3" (default), "m2", or "m1"
+
+    Examples:
+        get_collection_name("session_graphs", "m3") → "session_graphs"
+        get_collection_name("session_graphs", "m2") → "m2_session_graphs"
+        get_collection_name("contradiction_log", "m1") → "m1_contradiction_log"
+    """
+    member_map = _MEMBER_COLLECTION_MAP.get(model, _MEMBER_COLLECTION_MAP["m3"])
+    return member_map.get(base, base)
 
 
 def get_db() -> AsyncIOMotorDatabase:

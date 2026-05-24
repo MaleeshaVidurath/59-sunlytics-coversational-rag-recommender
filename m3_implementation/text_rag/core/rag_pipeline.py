@@ -70,9 +70,10 @@ class TextRAGPipeline:
 
     async def process(
         self,
-        pipeline_output:  dict,
+        pipeline_output:   dict,
         memory_pipeline=None,
-        store_response:   bool = True,
+        store_response:    bool = True,
+        collection_prefix: str  = "m3",
     ) -> dict:
         """
         Processes one turn through the complete Text RAG pipeline.
@@ -320,6 +321,7 @@ class TextRAGPipeline:
                 session_id=session_id,
                 user_id=user_id,
                 turn_id=pipeline_output.get("turn_id", ""),
+                collection_prefix=collection_prefix,
             )
             # Use corrected response if contradiction was found and fixed
             final_response          = contra_result["response_text"]

@@ -40,7 +40,7 @@ from memory.core.session_manager import SessionManager
 from memory.core.turn_manager import TurnManager
 from memory.core.user_manager import UserManager
 from memory.core.enrichment import EnrichmentLayer
-from memory.core.context_sufficiency_evaluator import get_cse
+from memory.core.context_sufficiency_evaluator import get_cse, get_cse_for_model
 from memory.core.entity_extractor import (
     extract_entities, is_fashion_relevant, is_fashion_relevant_async
 )
@@ -48,7 +48,7 @@ from memory.models.schemas import (
     TurnClassification, ItemInContext,
     RecommendationDocument, now_utc
 )
-from memory.db.mongo import get_db
+from memory.db.mongo import get_db, get_collection_name
 
 
 def _load_distilbert_predictor():
@@ -136,7 +136,8 @@ class MemoryPipeline:
         user_id: str,
         message: str,
         session_id: Optional[str] = None,
-        customer_id: Optional[str] = None
+        customer_id: Optional[str] = None,
+        member_model: str = "m3",
     ) -> dict:
         """
         Processes one user message through the complete memory pipeline.
@@ -452,7 +453,7 @@ class MemoryPipeline:
         except Exception:
             _ds_dict = {}
 
-        _cse = get_cse()
+        _cse = get_cse_for_model(member_model)
         _cse_result = await _cse.evaluate(
             label=label,
             message=message,
@@ -607,7 +608,8 @@ class MemoryPipeline:
         bot_response: str,
         recommended_items: Optional[list[dict]] = None,
         trigger_label: str = "UNKNOWN",
-        retrieval_strategy: str = "UNKNOWN"
+        retrieval_strategy: str = "UNKNOWN",
+        collection_prefix: str = "m3",
     ) -> dict:
         """
         Stores the assistant's response after RAG generates it.
@@ -646,7 +648,8 @@ class MemoryPipeline:
                 retrieval_strategy=retrieval_strategy,
                 items=items
             )
-            await db.recommendations.insert_one(
+            _recs_coll = get_collection_name("recommendations", collection_prefix)
+            await db[_recs_coll].insert_one(
                 rec_doc.model_dump(mode="json")
             )
             recommendation_id = rec_doc.recommendation_id
@@ -675,7 +678,8 @@ class MemoryPipeline:
         )
 
         if recommendation_id:
-            await db.recommendations.update_one(
+            _recs_coll = get_collection_name("recommendations", collection_prefix)
+            await db[_recs_coll].update_one(
                 {"recommendation_id": recommendation_id},
                 {"$set": {"turn_id": bot_turn.turn_id}}
             )
