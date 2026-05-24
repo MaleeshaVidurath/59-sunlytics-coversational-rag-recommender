@@ -11,7 +11,7 @@ It uses three components together:
 | Component | Role |
 |---|---|
 | **NetworkX DiGraph** | Session memory graph — one per session, persisted in MongoDB across turns |
-| **Groq (llama-3.1-8b-instant)** | Extracts what name/colour/price the LLM actually wrote in the response |
+| **Groq (llama-3.1-8b-instant)** | Extracts what attribute values the LLM actually wrote in the response |
 | **DeBERTa NLI (cross-encoder/nli-deberta-v3-base)** | Confirms a suspected mismatch is a real semantic contradiction, not a surface difference |
 
 The detector is called from `rag_pipeline.py` after the hallucination checker
@@ -39,6 +39,53 @@ Turn 4: "SC COLUMBUS blouse — Navy — £57.14"    ← Groq extracts "Navy"
 
 ---
 
+## Attributes Tracked Per Product (graph node fields)
+
+Every product node in the session graph stores these fields from DB evidence:
+
+| Field | DB source key | Assembler summary key | Notes |
+|---|---|---|---|
+| `name` | `prod_name` | `name` | |
+| `colour` | `colour_group_name` | `colour` | fallback tried in order |
+| `price` | `avg_price` | `price` | formatted as `£XX.XX` |
+| `product_type` | `product_type_name` | `type` | fallback tried in order |
+| `pattern` | `graphical_appearance_name` | `pattern` | stored but **not checked** (see below) |
+| `index_group` | `index_group_name` | `index_group` | |
+| `section` | `section_name` | `section` | |
+| `garment_group` | `garment_group_name` | `garment_group` | |
+
+### Field naming — why two columns
+
+The evidence assembler (`evidence_assembler.py`) uses shortened internal key
+names in `_article_summary()` — e.g. `"type"` instead of `"product_type_name"`,
+`"colour"` instead of `"colour_group_name"`. Context items stored in session
+memory use the PostgreSQL column names. `_item_to_ref()` tries both:
+
+```python
+colour       = item.get("colour_group_name") or item.get("colour", "")
+product_type = item.get("product_type_name") or item.get("type", "")
+```
+
+### `_CHECKABLE_FIELDS` — what is actually compared
+
+Not all stored fields are checked. The tuple controls the comparison loop:
+
+```python
+_CHECKABLE_FIELDS = (
+    "colour", "price", "name",
+    "product_type", "index_group", "section", "garment_group",
+)
+```
+
+**`pattern` is intentionally excluded.** The LLM describes product style/shape
+using words like *"short"*, *"calf-length"*, *"one-shoulder design"* — Groq
+reads these as the pattern value. The real pattern field (e.g. `"All over
+pattern"`) is never written literally in responses, so checking it would produce
+only false positives. Pattern is stored in the graph for completeness but never
+compared.
+
+---
+
 ## Session Graph — Structure
 
 One MongoDB document per session in `db.session_graphs`:
@@ -50,19 +97,23 @@ One MongoDB document per session in `db.session_graphs`:
     "nodes": [
       {
         "id": "733839003",
-        "name": "SC COLUMBUS blouse",
-        "colour": "Black",
-        "price": "£57.14",
+        "name":          "SC COLUMBUS blouse",
+        "colour":        "Black",
+        "price":         "£57.14",
+        "product_type":  "Blouse",
+        "pattern":       "Solid",
+        "index_group":   "Ladieswear",
+        "section":       "Special Collections",
+        "garment_group": "Unknown",
         "first_seen_turn": "turn_bd25beee",
         "last_seen_turn":  "turn_bd25beee",
-        "session_id": "sess_eea8c1bf"
-      },
-      ...
+        "session_id":      "sess_eea8c1bf"
+      }
     ],
     "links": [
       {
-        "source": "733839003",
-        "target": "733839003_contra_colour_turn_xyz",
+        "source":    "733839003",
+        "target":    "733839003_contra_colour_turn_xyz",
         "attribute": "colour",
         "old_value": "Navy",
         "new_value": "Black",
@@ -90,15 +141,24 @@ Evidence bundle (PostgreSQL / Qdrant — always accurate)
 _extract_product_refs(evidence)
         ↓
 [
-  { article_id: "733839003", name: "SC COLUMBUS blouse", colour: "Black",       price: "£57.14" },
-  { article_id: "733838002", name: "SC UTAH blouse",     colour: "Light Beige", price: "£70.59" }
+  {
+    article_id:    "733839003",
+    name:          "SC COLUMBUS blouse",
+    colour:        "Black",
+    price:         "£57.14",
+    product_type:  "Blouse",
+    pattern:       "Solid",
+    index_group:   "Ladieswear",
+    section:       "Special Collections",
+    garment_group: "Unknown"
+  },
+  ...
 ]
 ```
 
-Handles field naming differences between sources:
-- `colour_group_name` (PostgreSQL field) OR `colour` (internal assembler key)
-- `prod_name` OR `name`
-- `price` OR `avg_price`
+All available fields are captured. Fields not present in the evidence item
+default to empty string — empty evidence values are never checked
+(`values_contradict()` returns False when evidence is empty).
 
 ---
 
@@ -126,16 +186,21 @@ _update_graph_nodes(graph, product_refs, turn_id, session_id)
 ```
 
 **If the product node already exists** (seen in a prior turn):
-values are **overwritten** with the latest DB evidence. The DB is always right.
+all 8 field values are **overwritten** with the latest DB evidence. The DB is always right.
 
 **If the product node is new**:
-a new node is created with all evidence fields.
+a new node is created with all 8 evidence fields plus metadata.
 
 ```
 node "733839003" = {
-    name:            "SC COLUMBUS blouse"
-    colour:          "Black"
-    price:           "£57.14"
+    name:          "SC COLUMBUS blouse"
+    colour:        "Black"
+    price:         "£57.14"
+    product_type:  "Blouse"
+    pattern:       "Solid"
+    index_group:   "Ladieswear"
+    section:       "Special Collections"
+    garment_group: "Unknown"
     first_seen_turn: "turn_bd25beee"
     last_seen_turn:  "turn_bd25beee"
     session_id:      "sess_eea8c1bf"
@@ -146,21 +211,35 @@ node "733839003" = {
 
 ### Step 4 — Extract LLM claims via Groq
 
+The Groq prompt includes the DB attribute values per product so Groq knows
+what to look for, and instructs it to **only extract fields explicitly
+mentioned in the response**:
+
 ```
-response_text  +  product list (article_id → name)
-        ↓
-Groq API  —  llama-3.1-8b-instant  temperature=0.0
-        ↓
+Products shown in this response (with their correct database values):
+- 733839003: SC COLUMBUS blouse
+  [colour=Black, price=£57.14, product_type=Blouse, pattern=Solid,
+   index_group=Ladieswear, section=Special Collections, garment_group=Unknown]
+
+Bot response text:
+...
+
+Extract the values the bot wrote for each product.
+IMPORTANT: Only extract a field if it is explicitly mentioned in the response.
+```
+
+Groq returns article_id-keyed JSON:
+
+```json
 {
-  "733839003": { "name": "SC COLUMBUS blouse", "colour": "Black",       "price": "£57.14" },
+  "733839003": { "name": "SC COLUMBUS blouse", "colour": "Black", "price": "£57.14", "product_type": "Blouse" },
   "733838002": { "name": "SC UTAH blouse",     "colour": "Light Beige", "price": "£70.59" }
 }
 ```
 
-The prompt gives Groq the article IDs and product names explicitly so it can
-return **article_id-keyed JSON**. This avoids all name-matching ambiguity —
-even if two products share the same name (e.g. two variants of "Charlotte
-lowback bra"), Groq keys the output by article_id.
+**Groq only returns fields it found mentioned.** If the LLM didn't mention
+`index_group`, Groq omits it — and the comparison loop skips it automatically.
+This prevents false positives for unmentioned fields.
 
 If Groq fails or returns invalid JSON → check is skipped gracefully.
 The original response is returned to the user with no crash.
@@ -169,29 +248,26 @@ The original response is returned to the user with no crash.
 
 ### Step 5 — Compare extracted claims vs graph node values
 
-For every product Groq extracted, compare `colour`, `price`, and `name`
-against the graph node (which holds the DB ground truth):
+The comparison loop iterates over `_CHECKABLE_FIELDS` dynamically:
 
-```
-article_id = "733839003"
+```python
+for attribute in _CHECKABLE_FIELDS:        # colour, price, name, product_type, ...
+    extracted_val = extracted_fields.get(attribute, "")
+    if not extracted_val:
+        continue    # Groq didn't find this field mentioned — skip
 
-  graph node  (evidence truth):
-      colour = "Black"    price = "£57.14"    name = "SC COLUMBUS blouse"
+    evidence_val = node.get(attribute, "")
 
-  groq extracted:
-      colour = "Black"    price = "£57.14"    name = "SC COLUMBUS blouse"
+    if not values_contradict(evidence_val, extracted_val):
+        continue    # values match — skip
 
-  values_contradict("Black",           "Black")           → False  ✓ skip
-  values_contradict("£57.14",          "£57.14")          → False  ✓ skip
-  values_contradict("SC COLUMBUS blouse","SC COLUMBUS blouse") → False  ✓ skip
-
-→ No contradiction for this product.
+    → CANDIDATE  (proceed to NLI confirmation)
 ```
 
 **`values_contradict()` normalisation rules:**
 
 - Both values lowercased, stripped, whitespace/hyphen-collapsed
-- `£` whitespace normalised (£ 57.14 → £57.14)
+- `£` whitespace normalised (`£ 57.14` → `£57.14`)
 - Prices: float comparison with tolerance ±0.05 (avoids rounding false positives)
 - Text: exact equality after normalisation
 - Either value empty → always False (can't contradict what is unknown)
@@ -200,30 +276,44 @@ article_id = "733839003"
 
 ### Step 5b — NLI confirmation gate
 
-`values_contradict()` is strict — it catches `"Utah" ≠ "Utah blouse"` as a
-mismatch even though they refer to the same product. DeBERTa NLI runs as a
-second gate to confirm the mismatch is semantically contradictory:
+`values_contradict()` is a strict string comparison — it catches surface
+differences that are not real contradictions. DeBERTa NLI runs as a second
+gate to confirm the mismatch is semantically contradictory.
+
+The **premise** is built from all available node fields (richer context = better NLI scores):
 
 ```
-Premise:    "The SC UTAH blouse is Light Beige and costs £70.59."
-Hypothesis: "The SC UTAH blouse is Blue in colour."   ← extracted wrong value
+premise = "The SC UTAH blouse is Light Beige and is a Blouse and costs £70.59."
+```
 
-DeBERTa NLI scores:
-  Label 0 = CONTRADICTION score
-  Label 1 = NEUTRAL score
-  Label 2 = ENTAILMENT score
+The **hypothesis** is attribute-specific:
 
+| Attribute | Hypothesis template |
+|---|---|
+| `colour` | `The {name} is {extracted_val} in colour.` |
+| `price` | `The {name} costs {extracted_val}.` |
+| `name` | `The product is called {extracted_val}.` |
+| `product_type` | `The {name} is a {extracted_val}.` |
+| `index_group` | `The {name} is from the {extracted_val} category.` |
+| `section` | `The {name} belongs to the {extracted_val} section.` |
+| `garment_group` | `The {name} is in the {extracted_val} garment group.` |
+
+```
 contra_score > 0.5  → CONFIRMED contradiction
 contra_score ≤ 0.5  → false positive, skip
 ```
 
-**Example of NLI correctly rejecting a false positive (from real log):**
+**Examples of NLI correctly rejecting false positives (from real logs):**
+
 ```
 [CONTRA-CANDIDATE] 877274003 | name | evidence='Utah' extracted='Utah blouse'
 [CONTRA] NLI not confirmed (score=-3.889) — skip
+→ "Utah blouse" is not a contradiction of "Utah" — it's the same product
+
+[CONTRA-CANDIDATE] 858407002 | product_type | evidence='Bra' extracted='sports bra'
+[CONTRA] NLI not confirmed (score=-2.637) — skip
+→ "sports bra" is a subtype of "Bra" — NLI sees entailment, not contradiction
 ```
-"Utah" vs "Utah blouse" — `values_contradict()` flagged it, NLI score=-3.889
-(deep in ENTAILMENT territory) → correctly skipped, no correction applied.
 
 ---
 
@@ -285,7 +375,7 @@ LLM response text  +  evidence bundle (DB ground truth)
         │
         ▼
 Step 1: _extract_product_refs(evidence)
-        → normalised refs: [{ article_id, name, colour, price }, ...]
+        → normalised refs with all 8 fields per product
 
         ▼
 Step 2: _load_graph(session_id)
@@ -294,22 +384,27 @@ Step 2: _load_graph(session_id)
 
         ▼
 Step 3: _update_graph_nodes(graph, product_refs)
-        → add new product nodes, overwrite existing ones with latest DB values
+        → add new product nodes (all 8 fields)
+        → overwrite existing nodes with latest DB values
 
         ▼
 Step 4: _extract_claims_groq(response_text, product_refs)
-        → Groq reads the LLM response
-        → returns { article_id: { colour, price, name } }
+        → prompt includes DB values for all fields per product
+        → Groq extracts only fields explicitly mentioned in response
+        → returns { article_id: { field: value, ... } }
         → failure → skip check, save graph, return original response
 
         ▼
 Step 5: for each product in extracted claims:
+          for each attribute in _CHECKABLE_FIELDS:
           │
-          ├─ values_contradict(graph_node_value, extracted_value)?
-          │       NO  → skip attribute
+          ├─ extracted_val missing → skip (field not mentioned)
+          │
+          ├─ values_contradict(node_value, extracted_value)?
+          │       NO  → skip
           │       YES ↓
           │
-          ├─ _confirm_with_nli(premise, hypothesis)
+          ├─ _confirm_with_nli(node_dict, extracted_val, attribute)
           │       contra_score ≤ 0.5  → false positive, skip
           │       contra_score > 0.5  ↓
           │
@@ -328,61 +423,50 @@ Return corrected response text to user
 
 ---
 
-## Cross-Turn Example — 3 Turns in One Session
+## Cross-Turn Example — 5-Item Catalog Then Detail Lookup
 
 ```
 ────────────────────────────────────────────────────────
-TURN 1   "I need blouse"   →  catalog_search
+TURN 1   "I need 5 bras"   →  catalog_search
 ────────────────────────────────────────────────────────
-Evidence:  733839003 SC COLUMBUS blouse  Black      £57.14
-           733838002 SC UTAH blouse      Light Beige £70.59
+Evidence (5 items):
+  858407002  Solo Assymetric bra   Black      Bra  £13.10
+  640497002  ABBY bra              Other Pink Bra  £14.11
+  644763002  Eden cut padding      Dark Pink  Bra  £9.07
+  684087008  Kelly Softbra 2pk     Dark Red   Bra  £14.31
+  704767004  Pumpkin bra           Dark Blue  Bra  £16.16
 
-Graph before: nodes=4  (products from earlier session turns)
-Graph after:  nodes=6  (2 blouses added as new nodes)
+Graph before: nodes=7   (products from earlier session turns)
+Graph after:  nodes=12  (5 bra nodes added)
+
+Groq extracted (LLM used descriptive language for product_type):
+  858407002 → colour=Black      price=£13.10  product_type="sports bra"
+  640497002 → colour=Other Pink price=£14.11  product_type="fully lined sports top"
+  ...
+
+  product_type "Bra" ≠ "sports bra" → CANDIDATE for every product
+  NLI scores: -2.637, -0.387, -2.686, -1.659, -2.127 → all ≤ 0.5 → all skipped
+
+  colour and price: all 5 match exactly → no candidates
+
+Result: found=False  NLI correctly filters LLM subtype descriptions.
+
+────────────────────────────────────────────────────────
+TURN 2   "tell me more about Kelly Softbra 2pk"  →  item_detail_lookup
+────────────────────────────────────────────────────────
+Evidence:  684087008 Kelly Softbra 2pk  Dark Red  Bra  £14.31
+
+Graph before: nodes=12
+Graph after:  nodes=12  (684087008 already exists — values refreshed)
 
 Groq extracted:
-  733839003 → colour=Black      price=£57.14   ✓ matches graph
-  733838002 → colour=Light Beige price=£70.59  ✓ matches graph
+  684087008 → colour=Dark Red  price=£14.31  product_type=Bra  pattern=Solid
 
-Result: found=False  No contradiction.
-
-────────────────────────────────────────────────────────
-TURN 2   "why SC UTAH blouse"   →  catalog_search (misclassified)
-────────────────────────────────────────────────────────
-Evidence:  733838002 SC UTAH blouse   Light Beige £70.59
-           877274003 Utah             White       £20.13
-
-Graph before: nodes=6
-Graph after:  nodes=7  (877274003 Utah added)
-
-Groq extracted:
-  733838002 → colour=light beige  price=£70.59
-              normalise("Light Beige") = normalise("light beige") = "light beige"
-              → values_contradict = False  ✓ matches
-
-  877274003 → name=Utah blouse
-              normalise("Utah") ≠ normalise("Utah blouse")
-              → values_contradict = True → CANDIDATE
-              → NLI: contra_score = -3.889  ≤ 0.5  → false positive, skip
-
-Result: found=False  NLI correctly rejected the name surface difference.
-
-────────────────────────────────────────────────────────
-TURN 3   "why this Utah blouse"   →  explanation_generate
-────────────────────────────────────────────────────────
-Evidence:  733838002 SC UTAH blouse  Light Beige £70.59
-
-Graph before: nodes=7
-Graph after:  nodes=7  (node 733838002 already exists — values refreshed)
-
-Groq extracted:
-  733838002 → colour=Light Beige  price=£70.59  ✓ matches graph
+  LLM wrote "* Type: Bra" in structured bullet format
+  → Groq extracted exact DB value "Bra" this time
+  → values_contradict("Bra", "Bra") = False → no candidate
 
 Result: found=False  Clean pass.
-
-Graph after 3 turns:
-  nodes = 7  (all products seen across this session)
-  edges = 0  (no confirmed contradictions)
 ```
 
 ---
@@ -390,15 +474,15 @@ Graph after 3 turns:
 ## What Happens When a Contradiction IS Detected
 
 ```
-Hypothetical Turn 4:  LLM drifts and writes "Navy" instead of "Black"
-────────────────────────────────────────────────────────────────────────
-Graph node 733839003:  colour = "Black"   (stored from Turn 1)
+Hypothetical Turn:  LLM drifts and writes "Navy" instead of "Black"
+────────────────────────────────────────────────────────────────────
+Graph node 733839003:  colour = "Black"   (stored from earlier turn)
 Groq extracts:         colour = "Navy"
 
 values_contradict("Black", "Navy") → True  → CANDIDATE
 
 NLI:
-  Premise:    "The SC COLUMBUS blouse is Black and costs £57.14."
+  Premise:    "The SC COLUMBUS blouse is Black and is a Blouse and costs £57.14."
   Hypothesis: "The SC COLUMBUS blouse is Navy in colour."
   contra_score = 0.87  >  0.5  → CONFIRMED
 
@@ -418,13 +502,49 @@ User receives corrected response with "Black" — drift invisible to user.
 
 ---
 
+## Known Behaviours and Limitations
+
+### product_type generates frequent false positive candidates in catalog_search
+
+The LLM uses descriptive subtype language in catalog responses — *"This sports
+bra has..."*, *"This lace bra offers..."*. Groq extracts `"sports bra"` or
+`"lace bra"` as the `product_type` value. The DB stores `"Bra"`.
+`values_contradict()` fires every time. NLI correctly rejects all of them
+(a sports bra is a subtype of Bra — entailment, not contradiction).
+
+In `item_detail_lookup` responses the LLM uses structured format (`* Type: Bra`)
+so Groq extracts the exact DB value and no candidate is raised.
+
+### pattern is stored but not checked
+
+`pattern` is captured in graph nodes and shown to Groq in the prompt, but it
+is excluded from `_CHECKABLE_FIELDS`. The LLM uses words like *"short"*,
+*"calf-length"* or *"one-shoulder design"* which Groq reads as the pattern
+value — these would produce only false positives against the real DB value
+(e.g. `"All over pattern"`).
+
+### Only 3 core attributes reliably detected across all action types
+
+| Attribute | catalog_search | item_detail_lookup | explanation_generate |
+|---|---|---|---|
+| colour | reliable | reliable | reliable |
+| price | reliable | reliable | reliable |
+| name | reliable (NLI filters "X" vs "X skirt") | reliable | reliable |
+| product_type | noisy (subtype language) | reliable (structured format) | reliable |
+| index_group / section / garment_group | rarely mentioned by LLM | sometimes | rarely |
+
+---
+
 ## Design Decisions
 
 | Decision | Reason |
 |---|---|
 | DB evidence is always truth | PostgreSQL / Qdrant never hallucinate — only the LLM does |
-| Groq returns article_id-keyed JSON | No name-matching needed — avoids same-name variant confusion |
-| `values_contradict()` + NLI two-gate system | String comparison catches mismatches; NLI filters false positives like "Utah" vs "Utah blouse" |
+| Groq returns article_id-keyed JSON | No name-matching needed — avoids same-name variant confusion (e.g. two bra variants) |
+| Groq prompt includes DB values per field | Groq knows what to look for; extracts only explicitly mentioned fields |
+| `_CHECKABLE_FIELDS` controls what is compared | Pattern excluded — LLM description words cause only false positives |
+| `values_contradict()` + NLI two-gate system | String comparison catches mismatches; NLI filters false positives like "Bra" vs "sports bra" |
+| NLI premise built from all node fields | Richer context improves NLI accuracy vs single-field premise |
 | Graph node values overwritten each turn | Latest DB query is always more reliable than a value stored 5 turns ago |
 | Graph persisted across turns (MongoDB) | Enables detection of drift that spans multiple turns in the same session |
 | Groq failure → graceful skip | System never crashes — user gets original (uncorrected) response |
