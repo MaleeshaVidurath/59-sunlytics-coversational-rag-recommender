@@ -138,13 +138,19 @@ async def _save_graph(session_id: str, graph: nx.DiGraph) -> None:
 def _item_to_ref(item: dict) -> Optional[dict]:
     """
     Converts one evidence item dict into a normalised product ref.
-    Handles field naming differences between catalog_search and context items.
+    Captures all available fields so every attribute the LLM might mention
+    can be checked against DB ground truth.
     Returns None if article_id or name is missing.
     """
-    aid   = str(item.get("article_id", "")).strip()
-    name  = item.get("name") or item.get("prod_name", "")
-    colour = item.get("colour_group_name") or item.get("colour", "")
-    price  = item.get("price") or item.get("avg_price", "")
+    aid           = str(item.get("article_id", "")).strip()
+    name          = item.get("name") or item.get("prod_name", "")
+    colour        = item.get("colour_group_name") or item.get("colour", "")
+    price         = item.get("price") or item.get("avg_price", "")
+    product_type  = item.get("product_type_name") or item.get("type", "")
+    pattern       = item.get("graphical_appearance_name", "")
+    index_group   = item.get("index_group_name", "")
+    section       = item.get("section_name", "")
+    garment_group = item.get("garment_group_name", "")
 
     if not aid or not name:
         return None
@@ -158,11 +164,17 @@ def _item_to_ref(item: dict) -> Optional[dict]:
             price_str = f"£{float(price):.2f}"
         except (ValueError, TypeError):
             price_str = str(price).strip()
+
     return {
-        "article_id": aid,
-        "name":       str(name).strip(),
-        "colour":     str(colour).strip(),
-        "price":      price_str,
+        "article_id":    aid,
+        "name":          str(name).strip(),
+        "colour":        str(colour).strip(),
+        "price":         price_str,
+        "product_type":  str(product_type).strip(),
+        "pattern":       str(pattern).strip(),
+        "index_group":   str(index_group).strip(),
+        "section":       str(section).strip(),
+        "garment_group": str(garment_group).strip(),
     }
 
 
@@ -213,9 +225,9 @@ def _update_graph_nodes(
         aid = ref["article_id"]
         if graph.has_node(aid):
             attrs = graph.nodes[aid]
-            attrs["name"]           = ref["name"]
-            attrs["colour"]         = ref["colour"]
-            attrs["price"]          = ref["price"]
+            for field in ("name", "colour", "price", "product_type",
+                          "pattern", "index_group", "section", "garment_group"):
+                attrs[field] = ref.get(field, "")
             attrs["turn_id"]        = turn_id
             attrs["last_seen_turn"] = turn_id
         else:
@@ -223,6 +235,11 @@ def _update_graph_nodes(
                 "name":            ref["name"],
                 "colour":          ref["colour"],
                 "price":           ref["price"],
+                "product_type":    ref["product_type"],
+                "pattern":         ref["pattern"],
+                "index_group":     ref["index_group"],
+                "section":         ref["section"],
+                "garment_group":   ref["garment_group"],
                 "turn_id":         turn_id,
                 "first_seen_turn": turn_id,
                 "last_seen_turn":  turn_id,
@@ -235,24 +252,33 @@ def _update_graph_nodes(
 _GROQ_EXTRACT_PROMPT = """\
 You are a claim extractor for a fashion recommender system.
 
-Products shown in this response:
+Products shown in this response (with their correct database values):
 {product_list}
 
 Bot response text:
 {response_text}
 
-Extract the name, colour, and price mentioned for each product in the response.
+Extract the values the bot wrote for each product.
+IMPORTANT: Only extract a field if it is explicitly mentioned in the response text.
+If a field is not mentioned in the response, omit it from the output entirely.
 Return ONLY valid JSON with no explanation, no markdown, no extra text.
+
 Format:
 {{
   "ARTICLE_ID": {{
     "name": "product name as written in response",
     "colour": "colour as written in response",
-    "price": "£XX.XX"
+    "price": "£XX.XX",
+    "product_type": "product type as written in response",
+    "pattern": "pattern or appearance as written in response",
+    "index_group": "index group as written in response",
+    "section": "section as written in response",
+    "garment_group": "garment group as written in response"
   }}
 }}
+
 Only include fields that are explicitly mentioned in the response.
-If a product is not mentioned, omit its article_id entirely.\
+If a product is not mentioned at all, omit its article_id entirely.\
 """
 
 
@@ -267,10 +293,15 @@ async def _extract_claims_groq(
     Returns { article_id: { "name": ..., "colour": ..., "price": ... } }
     Returns {} on any failure — errors are logged but never propagated.
     """
-    product_list = "\n".join(
-        f"- {ref['article_id']}: {ref['name']}"
-        for ref in product_refs
-    )
+    _SHOW_FIELDS = ("colour", "price", "product_type", "pattern",
+                    "index_group", "section", "garment_group")
+    lines = []
+    for ref in product_refs:
+        attrs = ", ".join(
+            f"{f}={ref[f]}" for f in _SHOW_FIELDS if ref.get(f)
+        )
+        lines.append(f"- {ref['article_id']}: {ref['name']}\n  [{attrs}]")
+    product_list = "\n".join(lines)
     prompt = _GROQ_EXTRACT_PROMPT.format(
         product_list=product_list,
         response_text=response_text[:1500],
@@ -319,37 +350,67 @@ async def _extract_claims_groq(
         return {}
 
 
+# All evidence fields stored in graph nodes that Groq may extract and we check.
+# Order: most commonly mentioned first so logs are easy to read.
+_CHECKABLE_FIELDS = (
+    "colour", "price", "name",
+    "product_type", "index_group", "section", "garment_group",
+)
+
+
 # ── NLI confirmation ──────────────────────────────────────────────────────────
 
 def _confirm_with_nli(
-    node_name:     str,
-    node_colour:   str,
-    node_price:    str,
+    node:          dict,
     extracted_val: str,
     attribute:     str,
 ) -> tuple[bool, float]:
     """
     Confirms a suspected contradiction using DeBERTa NLI.
 
-    Premise  = what the evidence says (ground truth from DB).
-    Hypothesis = what the LLM appears to have written.
+    Premise   = factual statement built from the graph node (DB ground truth).
+    Hypothesis = what the LLM appears to have written for this attribute.
 
     Returns (is_contradiction, contradiction_score).
     Returns (False, 0.0) on any failure — never raises.
     """
     try:
-        premise = f"The {node_name} is {node_colour} and costs {node_price}."
+        name   = node.get("name", "product")
+        colour = node.get("colour", "")
+        ptype  = node.get("product_type", "")
+        price  = node.get("price", "")
 
-        if attribute == "colour":
-            hypothesis = f"The {node_name} is {extracted_val} in colour."
-        elif attribute == "price":
-            hypothesis = f"The {node_name} costs {extracted_val}."
-        else:
-            hypothesis = f"The product is called {extracted_val}."
+        # Build premise from all available node fields
+        details = []
+        if colour:
+            details.append(f"is {colour}")
+        if ptype:
+            details.append(f"is a {ptype}")
+        if price:
+            details.append(f"costs {price}")
+        premise = (
+            f"The {name} " + " and ".join(details) + "."
+            if details else f"This is the {name}."
+        )
+
+        # Build hypothesis per attribute type
+        _hypotheses = {
+            "colour":        f"The {name} is {extracted_val} in colour.",
+            "price":         f"The {name} costs {extracted_val}.",
+            "name":          f"The product is called {extracted_val}.",
+            "product_type":  f"The {name} is a {extracted_val}.",
+            "pattern":       f"The {name} has a {extracted_val} pattern.",
+            "index_group":   f"The {name} is from the {extracted_val} category.",
+            "section":       f"The {name} belongs to the {extracted_val} section.",
+            "garment_group": f"The {name} is in the {extracted_val} garment group.",
+        }
+        hypothesis = _hypotheses.get(
+            attribute, f"The {name} has {attribute} = {extracted_val}."
+        )
 
         nli    = _get_nli()
         scores = nli.predict([(premise, hypothesis)])
-        contra_score    = float(scores[0][0])
+        contra_score     = float(scores[0][0])
         is_contradiction = contra_score > _NLI_CONFIRMATION_THRESHOLD
         return is_contradiction, contra_score
 
@@ -514,22 +575,22 @@ class ContradictionDetector:
                 print(f"[CONTRA] {article_id} not in graph — skipping")
                 continue
 
-            node        = graph.nodes[article_id]
-            node_name   = node.get("name",   "")
-            node_colour = node.get("colour", "")
-            node_price  = node.get("price",  "")
+            node      = graph.nodes[article_id]
+            node_name = node.get("name", "")
 
             print(f"[CONTRA] checking {article_id} ({node_name})")
-            print(f"  evidence : colour={node_colour!r}  price={node_price!r}")
+            print(f"  evidence : colour={node.get('colour')!r}  "
+                  f"price={node.get('price')!r}  "
+                  f"product_type={node.get('product_type')!r}  "
+                  f"pattern={node.get('pattern')!r}")
             print(f"  extracted: {extracted_fields}")
 
-            for attribute, evidence_val, extracted_val in (
-                ("colour", node_colour, extracted_fields.get("colour", "")),
-                ("price",  node_price,  extracted_fields.get("price",  "")),
-                ("name",   node_name,   extracted_fields.get("name",   "")),
-            ):
+            for attribute in _CHECKABLE_FIELDS:
+                extracted_val = extracted_fields.get(attribute, "")
                 if not extracted_val:
-                    continue
+                    continue  # Groq didn't find this field mentioned — skip
+
+                evidence_val = node.get(attribute, "")
 
                 if not values_contradict(evidence_val, extracted_val):
                     continue
@@ -539,9 +600,7 @@ class ContradictionDetector:
 
                 # ── Step 4b: NLI confirmation ─────────────────────────────
                 is_contra, nli_score = _confirm_with_nli(
-                    node_name=node_name,
-                    node_colour=node_colour,
-                    node_price=node_price,
+                    node=node,
                     extracted_val=extracted_val,
                     attribute=attribute,
                 )
