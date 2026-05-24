@@ -50,7 +50,7 @@ from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
-from memory.db.mongo import get_db
+from memory.db.mongo import get_db, get_collection_name
 
 # ── NLI model (shared singleton with hallucination checker) ───────────────────
 _nli_model = None
@@ -99,14 +99,16 @@ def values_contradict(evidence_val: str, extracted_val: str) -> bool:
 
 # ── Session Graph — persistence ───────────────────────────────────────────────
 
-async def _load_graph(session_id: str) -> nx.DiGraph:
+async def _load_graph(session_id: str, collection_prefix: str = "m3") -> nx.DiGraph:
     """
     Load session graph from MongoDB.
     Returns an empty DiGraph if this is the first turn of the session.
+    collection_prefix selects which member's graph collection to use.
     """
     db = get_db()
+    coll_name = get_collection_name("session_graphs", collection_prefix)
     try:
-        doc = await db.session_graphs.find_one({"session_id": session_id})
+        doc = await db[coll_name].find_one({"session_id": session_id})
         if doc and "graph_data" in doc:
             graph = nx.node_link_graph(doc["graph_data"])
             return graph
@@ -115,12 +117,17 @@ async def _load_graph(session_id: str) -> nx.DiGraph:
     return nx.DiGraph()
 
 
-async def _save_graph(session_id: str, graph: nx.DiGraph) -> None:
+async def _save_graph(
+    session_id:        str,
+    graph:             nx.DiGraph,
+    collection_prefix: str = "m3",
+) -> None:
     """Persist session graph to MongoDB for the next turn."""
     db = get_db()
+    coll_name = get_collection_name("session_graphs", collection_prefix)
     try:
         graph_data = nx.node_link_data(graph)
-        await db.session_graphs.update_one(
+        await db[coll_name].update_one(
             {"session_id": session_id},
             {"$set": {
                 "session_id": session_id,
@@ -447,17 +454,19 @@ def _fix_response_text(
 # ── MongoDB contradiction log ─────────────────────────────────────────────────
 
 async def _log_contradiction(
-    session_id:      str,
-    turn_id:         str,
-    article_id:      str,
-    article_name:    str,
-    attribute:       str,
-    evidence_value:  str,
-    extracted_value: str,
-    nli_score:       float,
+    session_id:        str,
+    turn_id:           str,
+    article_id:        str,
+    article_name:      str,
+    attribute:         str,
+    evidence_value:    str,
+    extracted_value:   str,
+    nli_score:         float,
+    collection_prefix: str = "m3",
 ) -> None:
-    """Writes a contradiction event to db.contradiction_log."""
+    """Writes a contradiction event to the appropriate contradiction_log collection."""
     db = get_db()
+    coll_name = get_collection_name("contradiction_log", collection_prefix)
     entry = {
         "session_id":      session_id,
         "turn_id":         turn_id,
@@ -469,9 +478,10 @@ async def _log_contradiction(
         "extracted_value": extracted_value,
         "nli_score":       nli_score,
         "resolution":      "response_corrected",
+        "member_model":    collection_prefix,
     }
     try:
-        await db.contradiction_log.insert_one(entry)
+        await db[coll_name].insert_one(entry)
     except Exception as e:
         print(f"[CONTRA] Failed to log contradiction event: {e}")
 
@@ -490,11 +500,12 @@ class ContradictionDetector:
 
     async def check_and_resolve(
         self,
-        response_text: str,
-        evidence:      dict,
-        session_id:    str,
-        user_id:       str,
-        turn_id:       str,
+        response_text:     str,
+        evidence:          dict,
+        session_id:        str,
+        user_id:           str,
+        turn_id:           str,
+        collection_prefix: str = "m3",
     ) -> dict:
         """
         Main entry point. Called from rag_pipeline.py after hallucination check.
@@ -524,7 +535,8 @@ class ContradictionDetector:
 
         try:
             return await self._run_check(
-                response_text, evidence, session_id, user_id, turn_id, action
+                response_text, evidence, session_id, user_id, turn_id, action,
+                collection_prefix,
             )
         except Exception as e:
             print(f"[CONTRA] Unexpected error in check_and_resolve: {e}")
@@ -532,12 +544,13 @@ class ContradictionDetector:
 
     async def _run_check(
         self,
-        response_text: str,
-        evidence:      dict,
-        session_id:    str,
-        user_id:       str,
-        turn_id:       str,
-        action:        str,
+        response_text:     str,
+        evidence:          dict,
+        session_id:        str,
+        user_id:           str,
+        turn_id:           str,
+        action:            str,
+        collection_prefix: str = "m3",
     ) -> dict:
 
         # ── Step 1: Extract product refs from evidence (ground truth) ────────
@@ -550,7 +563,7 @@ class ContradictionDetector:
         product_names = [r["name"]       for r in product_refs]
 
         # ── Step 2: Load and update session graph ────────────────────────────
-        graph = await _load_graph(session_id)
+        graph = await _load_graph(session_id, collection_prefix)
         print(f"[GRAPH] nodes={graph.number_of_nodes()} edges={graph.number_of_edges()}")
 
         _update_graph_nodes(graph, product_refs, turn_id, session_id)
@@ -561,7 +574,7 @@ class ContradictionDetector:
 
         if not extracted:
             print(f"[CONTRA] Groq returned no claims — saving graph, skipping check")
-            await _save_graph(session_id, graph)
+            await _save_graph(session_id, graph, collection_prefix)
             return self._build_result(
                 response_text, [], len(product_refs), article_ids, product_names,
             )
@@ -653,10 +666,11 @@ class ContradictionDetector:
                     evidence_value=evidence_val,
                     extracted_value=extracted_val,
                     nli_score=nli_score,
+                    collection_prefix=collection_prefix,
                 )
 
         # ── Step 5: Persist updated graph ────────────────────────────────────
-        await _save_graph(session_id, graph)
+        await _save_graph(session_id, graph, collection_prefix)
 
         contradiction_found = len(contradictions) > 0
         print(f"[CONTRA] result: found={contradiction_found} "

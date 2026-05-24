@@ -628,6 +628,7 @@ class ContextSufficiencyEvaluator:
             return [], []
 
         turn_map = {t.get("turn_number"): t for t in all_turns}
+        coll_name = self._recommendations_coll_name()
 
         excluded_ids: list[str] = []
         cached_items: list[dict] = []
@@ -638,7 +639,7 @@ class ContextSufficiencyEvaluator:
             rec_id = bot_turn.get("recommendation_id")
             if not rec_id:
                 continue
-            rec = await db.recommendations.find_one(
+            rec = await db[coll_name].find_one(
                 {"recommendation_id": rec_id},
                 {"items": 1},
             )
@@ -677,39 +678,35 @@ class ContextSufficiencyEvaluator:
                     return True
         return any(kw in bot_content for kw in ["option 1", "option 2", "here are", "£"])
 
+    def _recommendations_coll_name(self) -> str:
+        """Returns the recommendations collection name for this CSE instance.
+        M3 uses "recommendations"; M2/M1 subclasses override this."""
+        return "recommendations"
+
     async def _find_items_in_full_session(self, session_id: str) -> list:
         """
-        Checks MongoDB's recommendations collection for any items that were
-        recommended during this session. Used as fallback when
-        dialogue_state.currently_discussing is empty.
-
-        Returns the items list from the most recent recommendation, or [].
+        Checks the recommendations collection for any items recommended during
+        this session. Used as fallback when dialogue_state.currently_discussing
+        is empty. Returns the items list from the most recent recommendation, or [].
         """
         from memory.db.mongo import get_db
         db = get_db()
-
-        rec = await db.recommendations.find_one(
+        rec = await db[self._recommendations_coll_name()].find_one(
             {"session_id": session_id},
             {"items": 1},
             sort=[("created_at", -1)],
         )
-        if rec:
-            return rec.get("items", [])
-        return []
+        return rec.get("items", []) if rec else []
 
     async def _all_session_article_ids(self, session_id: str) -> list[str]:
         """
         Returns every article_id recommended across ALL turns in this session.
-
-        Queries all documents in db.recommendations for this session_id and
-        collects every article_id, deduplicated. Used by REFINEMENT so that
-        the re-search never surfaces a product the user has already seen,
-        regardless of how many turns have passed since it was recommended.
+        Used by REFINEMENT so the re-search never surfaces a product the user
+        has already seen.
         """
         from memory.db.mongo import get_db
         db = get_db()
-
-        cursor = db.recommendations.find(
+        cursor = db[self._recommendations_coll_name()].find(
             {"session_id": session_id},
             {"items": 1},
         )
@@ -719,7 +716,6 @@ class ContextSufficiencyEvaluator:
                 aid = str(item.get("article_id", "")).strip()
                 if aid and aid not in excluded:
                     excluded.append(aid)
-
         print(f"[CSE-REFINE] _all_session_article_ids: found {len(excluded)} unique IDs "
               f"across all recommendations in session={session_id}")
         return excluded
@@ -941,6 +937,53 @@ _cse_instance: Optional[ContextSufficiencyEvaluator] = None
 
 def get_cse() -> ContextSufficiencyEvaluator:
     global _cse_instance
+    if _cse_instance is None:
+        _cse_instance = ContextSufficiencyEvaluator()
+    return _cse_instance
+
+
+# ── Member-specific CSE subclasses ─────────────────────────────────────────────
+# Each member gets its own CSE instance that reads from its own recommendations
+# collection.  The base class handles all logic; only the collection name differs.
+# M3 uses the default base class.  M2 and M1 use the subclasses below.
+
+class ContextSufficiencyEvaluatorM2(ContextSufficiencyEvaluator):
+    """CSE for the M2 · Multimodal RAG member.
+    Reads recommendations from 'm2_recommendations' so follow-up turns
+    (ATTRIBUTE_QUESTION, EXPLANATION_WHY, etc.) find the right items."""
+
+    def _recommendations_coll_name(self) -> str:
+        return "m2_recommendations"
+
+
+class ContextSufficiencyEvaluatorM1(ContextSufficiencyEvaluator):
+    """CSE for the M1 · Graph RAG member.
+    Reads recommendations from 'm1_recommendations'."""
+
+    def _recommendations_coll_name(self) -> str:
+        return "m1_recommendations"
+
+
+_cse_m2_instance: Optional[ContextSufficiencyEvaluatorM2] = None
+_cse_m1_instance: Optional[ContextSufficiencyEvaluatorM1] = None
+
+
+def get_cse_for_model(model: str = "m3") -> ContextSufficiencyEvaluator:
+    """Returns the singleton CSE for the given model member.
+
+    Args:
+        model: "m3" (default), "m2", or "m1"
+    """
+    global _cse_instance, _cse_m2_instance, _cse_m1_instance
+    if model == "m2":
+        if _cse_m2_instance is None:
+            _cse_m2_instance = ContextSufficiencyEvaluatorM2()
+        return _cse_m2_instance
+    if model == "m1":
+        if _cse_m1_instance is None:
+            _cse_m1_instance = ContextSufficiencyEvaluatorM1()
+        return _cse_m1_instance
+    # default → m3
     if _cse_instance is None:
         _cse_instance = ContextSufficiencyEvaluator()
     return _cse_instance
