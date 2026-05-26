@@ -64,21 +64,24 @@ class ExplanationGenerator:
             print(f"   [LLM API Error] {e}")
             return None
 
-    def generate(self, article_id: str, metadata: dict, force_hallucination=False) -> str:
+    def generate(self, article_id: str, metadata: dict, force_hallucination=False,
+                 product_knowledge: str = "") -> str:
         """
         Generates a natural language explanation of why the item was recommended.
         Uses Groq Cloud for real generation, with mock fallback.
+        If product_knowledge is provided (from the EMNLP 2023 knowledge loop),
+        it is injected as a grounding context so the LLM stays factually anchored.
         """
         color = metadata.get('colour_group_name', 'Black')
         product_type = metadata.get('product_type_name', 'Garment')
-        
+
         if force_hallucination:
             # CAUTION: We intentionally instruct the mock LLM to lie about the color
             # so we can prove our VLM Guard catches errors mathematically!
             wrong_colors = ['neon green', 'hot pink', 'silver', 'striped magenta']
             bad_color = random.choice(wrong_colors)
             return f"I highly recommend this item! As you can see, it features a beautiful {bad_color} design."
-        
+
         # Try Groq Cloud API first
         if self.is_available:
             department = metadata.get('department_name', 'Fashion')
@@ -89,6 +92,11 @@ class ExplanationGenerator:
             kb_instruction = (
                 f"\n- Psychology insight: {kb_fact}"
                 if kb_fact else ""
+            )
+            # EMNLP 2023: inject verified product knowledge as grounding context
+            knowledge_instruction = (
+                f"\n\nVerified product knowledge (use this to stay factually grounded):\n{product_knowledge}"
+                if product_knowledge else ""
             )
 
             prompt = (
@@ -101,16 +109,18 @@ class ExplanationGenerator:
                 f"- Department: {department}\n"
                 f"- Category: {category}\n"
                 f"- Description: {detail_desc}"
-                f"{kb_instruction}\n\n"
+                f"{kb_instruction}"
+                f"{knowledge_instruction}\n\n"
                 f"Respond with ONLY the recommendation explanation, nothing else. "
                 f"Do not start with 'I recommend' — be creative and natural. "
-                f"If a psychology insight is provided, weave it naturally into your explanation."
+                f"If a psychology insight is provided, weave it naturally into your explanation. "
+                f"Only describe features that are supported by the verified product knowledge."
             )
-            
+
             result = self._call_llm(prompt)
             if result:
                 return result
-        
+
         # Fallback to mock template if API unavailable
         return f"I recommend this item because it is a stylish {color} {product_type} that matches your search."
         
@@ -244,14 +254,100 @@ class ExplanationGenerator:
             return candidates
 
     # ------------------------------------------------------------------
-    # NOVELTY 4: Proactive Self-Reflection Quality Gate
+    # EMNLP 2023 Loop 1: Factual Knowledge Acquisition
+    # Paper: Ji et al. (2023), "Towards Mitigating LLM Hallucination via
+    # Self Reflection", EMNLP 2023 Findings (2023.findings-emnlp.123).
+    # Generate-score-refine loop to produce verified product knowledge
+    # before explanation generation — grounding the LLM in facts first.
     # ------------------------------------------------------------------
-    def self_evaluate(self, explanation: str, metadata: dict) -> tuple:
+    def generate_product_knowledge(self, metadata: dict) -> str:
         """
-        LLM scores its own generated explanation before ViLT verification.
+        Loop 1 of the EMNLP 2023 self-reflection method: generate factual
+        background knowledge about the product, score it for factual
+        consistency with the metadata, and refine once if the score is low.
+
+        Returns a verified knowledge string used to ground explanation generation.
+        """
+        if not self.is_available:
+            return ""
+
+        colour = metadata.get('colour_group_name', '')
+        product_type = metadata.get('product_type_name', '')
+        department = metadata.get('department_name', '')
+        appearance = metadata.get('graphical_appearance_name', '')
+        detail_desc = str(metadata.get('detail_desc', ''))[:200]
+
+        meta_facts = (
+            f"Colour: {colour} | Type: {product_type} | "
+            f"Department: {department} | Appearance: {appearance} | "
+            f"Description: {detail_desc}"
+        )
+
+        def _generate_knowledge(facts: str) -> str:
+            prompt = (
+                f"You are a fashion expert. Based on the product metadata below, "
+                f"generate concise factual background knowledge about this item "
+                f"(2-3 sentences). Consider: verifiability, objectivity, and "
+                f"accuracy to the given attributes.\n\n"
+                f"Product metadata:\n{facts}\n\n"
+                f"Output ONLY the factual knowledge. No recommendations yet."
+            )
+            return self._call_llm(prompt, max_tokens=100, temperature=0.1) or ""
+
+        def _score_knowledge(knowledge: str, facts: str) -> int:
+            prompt = (
+                f"Score this product knowledge for factual consistency with "
+                f"the verified metadata (1-10). Deduct points for any claim "
+                f"not supported by the metadata.\n\n"
+                f"Metadata: {facts}\n"
+                f"Knowledge: \"{knowledge}\"\n\n"
+                f"Output ONLY: SCORE: <number>"
+            )
+            result = self._call_llm(prompt, max_tokens=10, temperature=0.0)
+            if not result:
+                return 7
+            try:
+                line = next((l for l in result.split('\n') if 'SCORE' in l.upper()), "SCORE: 7")
+                return int(line.split(':', 1)[1].strip())
+            except Exception:
+                return 7
+
+        knowledge = _generate_knowledge(meta_facts)
+        if not knowledge:
+            return ""
+
+        score = _score_knowledge(knowledge, meta_facts)
+        print(f"   [Knowledge Loop] Factuality score: {score}/10")
+
+        if score < 6:
+            print(f"   [Knowledge Loop] Score below threshold — refining knowledge...")
+            refine_prompt = (
+                f"The following product knowledge scored {score}/10 for factual "
+                f"consistency with the metadata. Rewrite it to be strictly accurate.\n\n"
+                f"Metadata: {meta_facts}\n"
+                f"Original knowledge: \"{knowledge}\"\n\n"
+                f"Output ONLY the corrected knowledge. No extra text."
+            )
+            refined = self._call_llm(refine_prompt, max_tokens=100, temperature=0.0)
+            if refined:
+                knowledge = refined
+                print(f"   [Knowledge Loop] Knowledge refined successfully.")
+
+        return knowledge
+
+    # ------------------------------------------------------------------
+    # NOVELTY 4 (upgraded): Knowledge-Grounded Self-Reflection Gate
+    # Paper: Ji et al. (2023) EMNLP — Loop 2: Knowledge-Consistent
+    # Answering. Upgraded from simple 1-10 scoring to knowledge-grounded
+    # consistency check: the LLM now compares the explanation against the
+    # verified product knowledge produced in Loop 1, not just raw metadata.
+    # ------------------------------------------------------------------
+    def self_evaluate(self, explanation: str, metadata: dict, product_knowledge: str = "") -> tuple:
+        """
+        Knowledge-grounded self-reflection (EMNLP 2023, Loop 2).
+        Scores the explanation against verified product knowledge (if available)
+        OR against raw metadata facts — whichever provides stronger grounding.
         Returns (passes: bool, feedback: str).
-        Proactively regenerates low-quality explanations before the ViLT gate.
-        Paper: MARC — reflection process as a core Agentic RAG pillar.
         """
         if not self.is_available:
             return True, "Self-evaluation skipped (LLM unavailable)."
@@ -259,12 +355,19 @@ class ExplanationGenerator:
         colour = metadata.get('colour_group_name', '')
         product_type = metadata.get('product_type_name', '')
 
+        grounding = (
+            f"Verified product knowledge:\n{product_knowledge}"
+            if product_knowledge
+            else f"Verified item facts: {colour} {product_type}"
+        )
+
         prompt = (
             f"Evaluate this fashion recommendation explanation for quality.\n\n"
-            f"Verified item facts: {colour} {product_type}\n"
+            f"{grounding}\n"
             f"Explanation to evaluate: \"{explanation}\"\n\n"
-            f"Score 1-10 based on: factual consistency with item facts, clarity, helpfulness.\n"
-            f"Be strict — score below 6 if the explanation contradicts or ignores the item facts.\n"
+            f"Score 1-10 based on: factual consistency with verified facts, "
+            f"clarity, and helpfulness. Be strict — score below 6 if the "
+            f"explanation contradicts or ignores the verified product knowledge.\n"
             f"Output format (two lines only):\n"
             f"SCORE: <number>\n"
             f"FEEDBACK: <one sentence>"

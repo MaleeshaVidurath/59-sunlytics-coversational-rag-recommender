@@ -57,7 +57,7 @@ async def process_endpoint(request: PipelineRequest) -> dict:
     
     action_type = retrieval_dict.get('action') if retrieval_dict else 'None (FEEDBACK/CHITCHAT)'
     logger.info(f"Received pipeline request. Action: {action_type}")
-    logger.info(f"[M3->M2 RAW REQUEST]\n{json.dumps(request.dict(), indent=2, default=str)}")
+    print(f"\n[M3->M2 RAW REQUEST]\n{json.dumps(request.dict(), indent=2, default=str)}\n")
     
     try:
         # Route the request through the central M2 dispatcher

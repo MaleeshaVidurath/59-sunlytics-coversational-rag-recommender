@@ -565,7 +565,7 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
         if kb_explanation_fact:
             print(f"  [KB] Explanation fact: {kb_explanation_fact[:80]}...")
 
-        explanation = generator_loop.generate_faithful_explanation(
+        explanation, verification_trail = generator_loop.generate_faithful_explanation(
             article_id=aid,
             kb_fact=kb_explanation_fact,
         )
@@ -573,6 +573,7 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
         item_response = _format_article_for_response(meta)
         item_response["explanation"] = explanation
         item_response["score"] = result["final_score"]
+        item_response["verification_trail"] = verification_trail
         response_items.append(item_response)
 
     # Build natural language summary
