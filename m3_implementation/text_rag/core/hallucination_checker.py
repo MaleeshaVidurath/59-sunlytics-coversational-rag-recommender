@@ -2,38 +2,39 @@
 #
 # NLI-based hallucination detection for LLM responses.
 #
-# HOW IT WORKS:
-#   1. Split LLM response into individual sentences
-#   2. For each sentence, find the most relevant evidence piece
-#      using sentence embedding similarity
-#   3. Run NLI (cross-encoder/nli-deberta-v3-base) on (evidence, sentence) pair
-#   4. NLI returns 3 scores: CONTRADICTION, NEUTRAL, ENTAILMENT
-#   5. If CONTRADICTION > 0.65 → sentence is a hallucination
-#   6. If ENTAILMENT < 0.20 for factual sentences → possible hallucination
-#   7. Aggregate: if any sentence fails → response flagged
+# APPROACH — Option A: evidence-field-first
+#   For each evidence field (colour, price, name, type, …):
+#     1. If LLM usage map names sentence numbers for this field → use those sentences
+#     2. Otherwise use MiniLM to find the best matching sentence in the response
+#     3. If best MiniLM similarity < _MIN_SIMILARITY and field not in usage map → SKIP
+#        (LLM did not mention this field — nothing to contradict)
+#     4. Run DeBERTa on (evidence_fact, best_sentence) pair
+#     5. If CONTRADICTION > _NLI_CONTRADICTION_THRESHOLD → hallucination
+#
+# IMPORTANT: is_unsupported (entailment < threshold) is NOT checked.
+#   Reason: a sentence like "Red T-shirt at £45, stretch fabric" contains the
+#   correct colour but also extra info (price, material) that the colour evidence
+#   alone cannot confirm.  DeBERTa would score entailment low → false positive.
+#   We only care: did the LLM CONTRADICT a field value we gave it?
 #
 # NLI LABELS from cross-encoder/nli-deberta-v3-base:
 #   Label 0 = CONTRADICTION
 #   Label 1 = NEUTRAL
 #   Label 2 = ENTAILMENT
-#
-# FACTUAL vs NON-FACTUAL sentences:
-#   Factual: contains numbers, product names, specific attributes
-#   Non-factual: greetings, transitions, opinions ("I think", "you might")
-#   Only factual sentences are strictly checked against evidence
 
 import os
 import sys
 import re
-from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 from text_rag.config import (
-    NLI_MODEL_NAME, NLI_CONTRADICTION_THRESHOLD, NLI_ENTAILMENT_THRESHOLD
+    NLI_MODEL_NAME, NLI_CONTRADICTION_THRESHOLD
 )
 
 _nli_model   = None
 _embed_model = None
+
+_MIN_SIMILARITY = 0.35  # MiniLM threshold below which a field is considered unused
 
 
 def _get_nli_model():
@@ -57,25 +58,21 @@ def _get_embed_model():
 
 def _split_sentences(text: str) -> list[str]:
     """Splits text into sentences, filtering out very short ones."""
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    # Also split on newlines immediately before "Option N:" so each catalog option
+    # always starts its own sentence even when the LLM prefixes with an intro line
+    # that has no trailing period (e.g. "Here are your options:\nOption 1: ...").
+    sentences = re.split(r'(?<=[.!?])\s+|\n(?=Option\s+\d+\s*:)', text.strip())
     return [s.strip() for s in sentences if len(s.strip()) > 15]
 
 
-# ── Factual sentence detection ─────────────────────────────────────────────────
+# ── Sentence skip rules ────────────────────────────────────────────────────────
 
-_FACTUAL_PATTERNS = [
-    r'£\d',                          # price mentions only
-    r'£[\d]+\.\d+',               # exact price format
-]
-# Only check price and name sentences — descriptions are too complex for NLI
-# Description sentences contain partial/truncated text that NLI misreads
 _SKIP_PATTERNS = [
     r'\b(short|long|relaxed|slim|fitted|woven|knit|cotton|stretch|denim)\b',
     r'\b(waist|crotch|pocket|hem|sleeve|collar|button|zip|fly)\b',
     r'\b(regular|classic|modern|style|design|detail|trim|finish)\b',
 ]
 _SKIP_RE = re.compile('|'.join(_SKIP_PATTERNS), re.IGNORECASE)
-_FACTUAL_RE = re.compile('|'.join(_FACTUAL_PATTERNS), re.IGNORECASE)
 
 _NON_FACTUAL_STARTS = [
     "here are", "i hope", "you might", "feel free", "let me know",
@@ -84,247 +81,464 @@ _NON_FACTUAL_STARTS = [
 ]
 
 
-def _is_factual_sentence(sentence: str) -> bool:
+_MIN_LOCK_SIM = 0.30  # minimum similarity to consider a sentence as describing an item
+
+
+def _build_item_sentence_map(sentences: list[str], items: list[dict]) -> dict:
     """
-    Returns True only if the sentence makes a VERIFIABLE factual claim.
-    We only check price sentences — descriptions are too complex for NLI
-    because they get truncated differently in evidence vs response.
+    Maps each evidence item to the sentence that best describes it using
+    MiniLM semantic similarity on rich item descriptions (name + colour + price + type).
+
+    Order-independent: does not rely on "Option N:" numbering or LLM response order.
+    Format-independent: works regardless of how the LLM structures its response.
+    Robust to single-field errors: if LLM writes wrong colour, name+price still pull
+    the match to the correct sentence.
+
+    Greedy assignment — highest similarity pair is assigned first, each sentence
+    can only be claimed by one item.  Items with no sentence above _MIN_LOCK_SIM
+    are left out of the map (LLM didn't mention them in this response).
     """
+    if not sentences or not items:
+        return {}
+
+    import numpy as np
+    model = _get_embed_model()
+
+    # Rich description per item using fields that reliably appear in LLM responses.
+    # Deliberately excludes section/index_group/garment_group — LLM never mentions them.
+    item_descs = []
+    for item in items:
+        parts = [
+            item.get("name", ""),
+            item.get("colour", ""),
+            str(item.get("price", "")),
+            item.get("type", ""),
+        ]
+        item_descs.append(" ".join(p for p in parts if p))
+
+    # Encode items and sentences together in one batch for efficiency
+    all_texts  = item_descs + sentences
+    embeddings = model.encode(all_texts)
+    item_embs  = embeddings[:len(items)]
+    sent_embs  = embeddings[len(items):]
+
+    # Build full similarity matrix
+    scores = []
+    for item_idx, item_emb in enumerate(item_embs):
+        for sent_idx, sent_emb in enumerate(sent_embs):
+            sim = float(
+                np.dot(item_emb, sent_emb) /
+                (np.linalg.norm(item_emb) * np.linalg.norm(sent_emb) + 1e-8)
+            )
+            scores.append((sim, item_idx, sent_idx))
+
+    # Greedy assignment: highest similarity first, no sentence used twice
+    scores.sort(reverse=True)
+    option_map = {}
+    used_sents = set()
+
+    for sim, item_idx, sent_idx in scores:
+        if sim < _MIN_LOCK_SIM:
+            break  # sorted descending — nothing below threshold is useful
+        if item_idx not in option_map and sent_idx not in used_sents:
+            option_map[item_idx] = sent_idx
+            used_sents.add(sent_idx)
+
+    # Print matrix AFTER assignment so ASSIGNED vs best-raw conflict is visible.
+    # "best-raw" means this was the highest score for that item in isolation,
+    # but another item claimed the sentence first in greedy assignment.
+    print("\n[MINILM-SIM] ━━━ similarity matrix (items × sentences) ━━━")
+    for item_idx, desc in enumerate(item_descs):
+        assigned_sent = option_map.get(item_idx)
+        item_scores = sorted(
+            [(sent_idx, sim) for sim, i, sent_idx in scores if i == item_idx],
+            key=lambda x: x[0],
+        )
+        best_sim = max(sim for _, sim in item_scores) if item_scores else 0
+        print(f"  item[{item_idx}] {desc[:60]}")
+        for sent_idx, sim in item_scores:
+            tags = []
+            if sent_idx == assigned_sent:
+                tags.append("ASSIGNED")
+            elif sim == best_sim:
+                tags.append("best-raw")
+            tag_str = f"  ◀ {' | '.join(tags)}" if tags else ""
+            print(f"    sent[{sent_idx}] sim={sim:.4f}{tag_str}  {sentences[sent_idx][:80]}")
+
+    print("\n[ITEM-MAP] ━━━ item→sentence assignments ━━━")
+    for item_idx in sorted(option_map.keys()):
+        sent_idx = option_map[item_idx]
+        print(f"  item[{item_idx}] desc : {item_descs[item_idx]}")
+        print(f"  item[{item_idx}] sent[{sent_idx}]: {sentences[sent_idx][:120]}")
+
+    return option_map
+
+
+def _should_skip_sentence(sentence: str) -> bool:
+    """
+    Returns True for sentences that must never be NLI-checked:
+    conversational openers and garment-description sentences.
+
+    Exception: sentences containing a £ price are Option sentences
+    (e.g. "Option 1: Solo bra, Black, £13.10, This bra's sporty design...")
+    and must never be skipped even if they contain description words.
+    """
+    # Option sentences always contain a £ price — never skip these
+    if "£" in sentence:
+        return False
     s = sentence.lower()
     for start in _NON_FACTUAL_STARTS:
         if s.startswith(start):
-            return False
-    # Skip description-style sentences (contain garment detail words)
-    if _SKIP_RE.search(sentence):
-        return False
-    # Only check sentences with price or clear product names
-    return bool(_FACTUAL_RE.search(sentence))
+            return True
+    return bool(_SKIP_RE.search(sentence))
 
 
 # ── Evidence flattening ────────────────────────────────────────────────────────
 
-def _flatten_evidence(evidence: dict) -> list[str]:
+def _flatten_evidence(evidence: dict) -> list[dict]:
     """
-    Converts the evidence bundle into a list of fact strings
-    that can be compared against LLM sentences via NLI.
+    Converts the evidence bundle into a list of
+    {"field": str, "text": str} dicts.
+    Each dict represents one checkable fact from one evidence field.
     """
     facts = []
 
-    def add_article_facts(article: dict, prefix: str = ""):
+    def add_article_facts(article: dict, prefix: str = "", item_idx: int = None):
         if not article:
             return
-        if article.get("name"):
-            facts.append(f"{prefix}The item is called {article['name']}.")
+        name = article.get("name", "")
+        _idx = {} if item_idx is None else {"item_idx": item_idx}
+        if name:
+            facts.append({"field": "name",
+                           "text": f"{prefix}The item is called {name}.", **_idx})
         if article.get("type"):
-            facts.append(f"{prefix}It is a {article['type']}.")
+            facts.append({"field": "type",
+                           "text": f"{prefix}{name} is a {article['type']}." if name else f"{prefix}It is a {article['type']}.", **_idx})
         if article.get("colour"):
-            facts.append(f"{prefix}The colour is {article['colour']}.")
+            facts.append({"field": "colour",
+                           "text": f"{prefix}{name} is {article['colour']} in colour." if name else f"{prefix}The colour is {article['colour']}.", **_idx})
         if article.get("price"):
-            facts.append(f"{prefix}The price is {article['price']}.")
+            facts.append({"field": "price",
+                           "text": f"{prefix}{name} is priced at {article['price']}." if name else f"{prefix}The price is {article['price']}.", **_idx})
         if article.get("pattern"):
-            facts.append(f"{prefix}The pattern is {article['pattern']}.")
-        if article.get("material_description"):
-            desc = article["material_description"][:300]
-            facts.append(f"{prefix}Description: {desc}")
-        if article.get("garment_group"):
-            facts.append(f"{prefix}It belongs to {article['garment_group']}.")
+            facts.append({"field": "pattern",
+                           "text": f"{prefix}{name} has a {article['pattern']} pattern." if name else f"{prefix}The pattern is {article['pattern']}.", **_idx})
         if article.get("index_group"):
-            facts.append(f"{prefix}It is from {article['index_group']}.")
+            facts.append({"field": "index_group",
+                           "text": f"{prefix}It is from {article['index_group']}.", **_idx})
+        if article.get("section"):
+            facts.append({"field": "section",
+                           "text": f"{prefix}It is in the {article['section']} section.", **_idx})
 
     action = evidence.get("action", "")
 
     if action == "catalog_search":
-        for item in evidence.get("items", []):
-            add_article_facts(item)
+        for item_idx, item in enumerate(evidence.get("items", [])):
+            add_article_facts(item, item_idx=item_idx)
         for boost in evidence.get("preference_boosts", []):
-            facts.append(
-                f"User prefers {boost['attribute']}={boost['value']} "
-                f"with weight {boost['weight']:.2f}."
-            )
+            facts.append({
+                "field": "preference",
+                "text": (
+                    f"User prefers {boost['attribute']}={boost['value']} "
+                    f"with weight {boost['weight']:.2f}."
+                ),
+            })
 
     elif action in ("item_attribute_lookup", "item_detail_lookup"):
         add_article_facts(evidence.get("article"))
         for k, v in evidence.get("extracted_facts", {}).items():
-            facts.append(f"{k}: {v}")
+            facts.append({"field": k, "text": f"{k}: {v}"})
 
     elif action == "item_compare":
         add_article_facts(evidence.get("item_a"), prefix="Option 1: ")
         add_article_facts(evidence.get("item_b"), prefix="Option 2: ")
         for k, v in evidence.get("comparison_facts", {}).items():
-            facts.append(f"{k}: {v}")
+            facts.append({"field": k, "text": f"{k}: {v}"})
 
     elif action == "explanation_generate":
         add_article_facts(evidence.get("article"))
         for match in evidence.get("confirmed_matches", []):
-            facts.append(
-                f"The item's {match['attribute']} is {match['value']}, "
-                f"which matches the user's preference."
-            )
+            facts.append({
+                "field": match.get("attribute", "match"),
+                "text": (
+                    f"The item's {match['attribute']} is {match['value']}, "
+                    f"which matches the user's preference."
+                ),
+            })
         for claim in evidence.get("prior_claims", []):
             if claim.get("status") == "active":
-                facts.append(f"Already stated to user: {claim['claim_text']}")
+                facts.append({
+                    "field": "prior_claim",
+                    "text": f"Already stated to user: {claim['claim_text']}",
+                })
 
     if not facts:
-        facts.append("No specific product facts available.")
+        facts.append({"field": "general", "text": "No specific product facts available."})
 
     return facts
 
 
-# ── Best evidence finder ───────────────────────────────────────────────────────
+# ── Best sentence finder (for a given evidence fact) ──────────────────────────
 
-def _find_best_evidence(sentence: str, fact_list: list[str]) -> str:
+def _find_best_sentence(
+    fact_text:           str,
+    sentences:           list[str],
+    option_sentence_map: dict = None,
+    item_idx:            int  = None,
+) -> tuple[str, float, int]:
     """
-    Finds the most relevant evidence fact for a given sentence
-    using cosine similarity between embeddings.
-    """
-    if not fact_list:
-        return ""
-    if len(fact_list) == 1:
-        return fact_list[0]
+    Finds the best matching sentence in the LLM response for a given evidence fact.
 
-    model      = _get_embed_model()
-    embeddings = model.encode([sentence] + fact_list)
-    sent_emb   = embeddings[0]
-    fact_embs  = embeddings[1:]
+    If option_sentence_map has an entry for this item → lock to that sentence.
+    This prevents cross-item name collisions (e.g. two items sharing a name prefix).
+    MiniLM similarity is always computed so the _MIN_SIMILARITY gate still works.
+
+    Otherwise MiniLM scores all sentences and picks the highest.
+
+    Returns (best_sentence_text, similarity_score, sentence_number_1indexed).
+    Returns ("", 0.0, -1) if no sentences available.
+    """
+    if not sentences:
+        return "", 0.0, -1
 
     import numpy as np
+    model = _get_embed_model()
+
+    # Item-to-sentence lock for catalog_search "Option N:" responses.
+    # Locks item N's facts to only its own sentence, preventing cross-item collisions.
+    if option_sentence_map and item_idx is not None:
+        locked_sent_idx = option_sentence_map.get(item_idx)
+        if locked_sent_idx is not None and locked_sent_idx < len(sentences):
+            locked_sent = sentences[locked_sent_idx]
+            embs = model.encode([fact_text, locked_sent])
+            sim  = float(np.dot(embs[0], embs[1]) /
+                         (np.linalg.norm(embs[0]) * np.linalg.norm(embs[1]) + 1e-8))
+            return locked_sent, sim, locked_sent_idx + 1
+
+    # No lock — MiniLM scores all sentences, highest wins
+    embeddings  = model.encode([fact_text] + sentences)
+    fact_emb    = embeddings[0]
+    sent_embs   = embeddings[1:]
+
     similarities = [
-        float(np.dot(sent_emb, fe) / (np.linalg.norm(sent_emb) * np.linalg.norm(fe) + 1e-8))
-        for fe in fact_embs
+        float(np.dot(fact_emb, se) / (np.linalg.norm(fact_emb) * np.linalg.norm(se) + 1e-8))
+        for se in sent_embs
     ]
-    best_idx = int(np.argmax(similarities))
-    return fact_list[best_idx]
+
+    best_idx   = int(np.argmax(similarities))
+    best_score = similarities[best_idx]
+    return sentences[best_idx], best_score, best_idx + 1
 
 
 # ── Main hallucination checker ─────────────────────────────────────────────────
 
 class HallucinationChecker:
     """
-    Checks LLM responses for hallucinations using NLI.
-    Returns a structured result with per-sentence scores and an overall flag.
+    Checks LLM responses for hallucinations using NLI — evidence-field-first.
+    Loops over each evidence fact, finds the LLM sentence that best matches it,
+    and runs DeBERTa contradiction check on the pair.
+    Only contradiction is flagged (not low entailment — see module docstring).
     """
 
     def check(
         self,
         response_text: str,
-        evidence: dict
+        evidence:      dict,
     ) -> dict:
         """
-        Checks a response for hallucinations.
-
         Args:
             response_text: The LLM-generated response to check
             evidence:      The evidence bundle used to generate the response
 
         Returns:
             {
-                "has_hallucination": bool,
-                "hallucination_score": float,  # 0.0-1.0 (1.0 = very bad)
-                "flagged_sentences": list[dict],  # sentences that failed
-                "all_sentences": list[dict],      # all sentence results
-                "passed": bool,
+                "has_hallucination":   bool,
+                "hallucination_score": float,
+                "flagged_sentences":   list[dict],
+                "all_checks":          list[dict],
+                "n_checked":           int,
+                "n_flagged":           int,
+                "passed":              bool,
+                "contradicted_fields": list[str],
             }
         """
         if not response_text or not response_text.strip():
             return self._empty_result()
 
-        sentences   = _split_sentences(response_text)
-        fact_list   = _flatten_evidence(evidence)
-        nli_model   = _get_nli_model()
+        sentences        = _split_sentences(response_text)
+        structured_facts = _flatten_evidence(evidence)
+        nli_model        = _get_nli_model()
 
-        results     = []
-        flagged     = []
-        total_score = 0.0
+        # Build item→sentence map for catalog_search using MiniLM semantic matching.
+        # Order-independent and format-independent — no reliance on "Option N:" numbering.
+        option_sentence_map = {}
+        if evidence.get("action") == "catalog_search":
+            items = evidence.get("items", [])
+            option_sentence_map = _build_item_sentence_map(sentences, items)
+
+        results             = []
+        flagged             = []
+        total_score         = 0.0
+        contradicted_fields = set()
+        checked_pairs       = set()   # (fact_text, sentence) pairs already checked
 
         print(f"\n[HALL-CHECK] ━━━ check() called ━━━")
-        print(f"[HALL-CHECK] response_text len={len(response_text)}: {repr(response_text[:120])}")
-        print(f"[HALL-CHECK] sentences={len(sentences)} facts={len(fact_list)}")
-        print(f"[HALL-CHECK] action={evidence.get('action','?')} skip={evidence.get('action','?') in {'no_retrieval','explanation_generate'}}")
-        for _fact in fact_list[:5]: print(f"  [HALL-FACT] {_fact[:80]}")
-        for sentence in sentences:
-            if not _is_factual_sentence(sentence):
-                print(f"[HALL-CHECK] SKIP non-factual: '{sentence[:70]}'")
-                # Non-factual sentence — skip NLI check
-                results.append({
-                    "sentence":       sentence,
-                    "is_factual":     False,
-                    "checked":        False,
-                    "passed":         True,
-                    "nli_scores":     None,
-                    "best_evidence":  None,
-                })
+        print(f"[HALL-CHECK] response len={len(response_text)}: {repr(response_text[:120])}")
+        print(f"[HALL-CHECK] sentences={len(sentences)} evidence_facts={len(structured_facts)}")
+        print(f"[HALL-CHECK] action={evidence.get('action','?')}")
+        print(f"[HALL-CHECK] option_sentence_map={option_sentence_map}")
+        for _f in structured_facts[:6]:
+            print(f"  [HALL-FACT] [{_f['field']}] {_f['text'][:80]}")
+
+        # For catalog_search, only name/colour/price are reliable enough to verify.
+        # pattern, type, section, index_group all clash with LLM description text
+        # and produce systematic false positives that cascade across retry attempts.
+        _CATALOG_CORE_FIELDS = {"name", "colour", "price"}
+
+        for fact in structured_facts:
+            fact_text  = fact["text"]
+            fact_field = fact["field"]
+            fact_item  = fact.get("item_idx")
+
+            if evidence.get("action") == "catalog_search" and fact_field not in _CATALOG_CORE_FIELDS:
                 continue
 
-            # Find most relevant evidence
-            best_evidence = _find_best_evidence(sentence, fact_list)
-            if not best_evidence:
+            # If option_sentence_map was built but this item has no locked sentence,
+            # the LLM didn't mention it in this response — skip to avoid cross-item
+            # collisions where an unlocked item's fact matches another item's sentence.
+            if option_sentence_map and fact_item is not None and fact_item not in option_sentence_map:
                 continue
 
-            print(f"[HALL-CHECK] NLI checking: '{sentence[:70]}'")
-            print(f"[HALL-CHECK] vs evidence: '{best_evidence[:80]}'")
-            # Run NLI: (premise=evidence, hypothesis=sentence)
-            scores = nli_model.predict([(best_evidence, sentence)])
-            # scores shape: (1, 3) — [contradiction, neutral, entailment]
+            # Find best matching sentence in LLM response for this evidence field
+            best_sentence, similarity, sent_num = _find_best_sentence(
+                fact_text, sentences,
+                option_sentence_map=option_sentence_map,
+                item_idx=fact_item,
+            )
+
+            if not best_sentence:
+                continue
+
+            # Skip if sentence is a description/non-factual type
+            if _should_skip_sentence(best_sentence):
+                print(f"[HALL-CHECK] SKIP [{fact_field}] sentence type: '{best_sentence[:60]}'")
+                continue
+
+            # Skip if LLM similarity is too low — field not mentioned in response
+            if similarity < _MIN_SIMILARITY:
+                print(
+                    f"[HALL-CHECK] SKIP [{fact_field}] not used by LLM "
+                    f"(sim={similarity:.3f}): '{best_sentence[:50]}'"
+                )
+                continue
+
+            # Name/price: string containment is more reliable than NLI for exact values.
+            # DeBERTa produces false contradictions when items share a name or when the
+            # sentence has long descriptive tails after the structured "Name, Colour, £price" part.
+            # If the exact value is present verbatim in the sentence it cannot be a hallucination.
+            if fact_field == "name":
+                name_m = re.search(r"The item is called (.+?)\.", fact_text)
+                if name_m and name_m.group(1).lower() in best_sentence.lower():
+                    print(f"[HALL-CHECK] PASS [name] verbatim: '{name_m.group(1)[:50]}'")
+                    results.append({
+                        "fact_field": fact_field, "fact_text": fact_text,
+                        "sentence": best_sentence, "sentence_number": sent_num,
+                        "similarity": similarity,
+                        "nli_scores": {"contradiction": 0.0, "neutral": 0.0, "entailment": 1.0},
+                        "passed": True, "is_contradiction": False,
+                    })
+                    continue
+
+            if fact_field == "price":
+                price_m = re.search(r"£[\d,.]+", fact_text)
+                if price_m and price_m.group(0) in best_sentence:
+                    print(f"[HALL-CHECK] PASS [price] verbatim: '{price_m.group(0)}'")
+                    results.append({
+                        "fact_field": fact_field, "fact_text": fact_text,
+                        "sentence": best_sentence, "sentence_number": sent_num,
+                        "similarity": similarity,
+                        "nli_scores": {"contradiction": 0.0, "neutral": 0.0, "entailment": 1.0},
+                        "passed": True, "is_contradiction": False,
+                    })
+                    continue
+
+            # Avoid duplicate (fact, sentence) pair checks
+            pair_key = (fact_text, best_sentence)
+            if pair_key in checked_pairs:
+                continue
+            checked_pairs.add(pair_key)
+
+            print(
+                f"[HALL-CHECK] NLI [{fact_field}] sim={similarity:.3f} "
+                f"s{sent_num}: '{best_sentence[:60]}'"
+            )
+            print(f"[HALL-CHECK] vs fact: '{fact_text[:70]}'")
+
+            scores = nli_model.predict([(fact_text, best_sentence)])
             score_dict = {
                 "contradiction": float(scores[0][0]),
                 "neutral":       float(scores[0][1]),
                 "entailment":    float(scores[0][2]),
             }
 
-            contradiction_score = score_dict["contradiction"]
-            entailment_score    = score_dict["entailment"]
-
-            # Determine if this sentence is a hallucination
-            is_contradiction = contradiction_score > NLI_CONTRADICTION_THRESHOLD
-            is_unsupported   = entailment_score < NLI_ENTAILMENT_THRESHOLD
-
-            is_hallucination = is_contradiction or is_unsupported
-            sentence_score   = contradiction_score if is_contradiction else (
-                1.0 - entailment_score if is_unsupported else 0.0
+            # Only contradiction is flagged — entailment not checked.
+            # A sentence with extra info scores low entailment but is not a hallucination.
+            is_hallucination = (
+                score_dict["contradiction"] > NLI_CONTRADICTION_THRESHOLD
+                and score_dict["contradiction"] > score_dict["entailment"]
             )
-            total_score += sentence_score
 
             result = {
-                "sentence":         sentence,
-                "is_factual":       True,
-                "checked":          True,
-                "passed":           not is_hallucination,
+                "fact_field":       fact_field,
+                "fact_text":        fact_text,
+                "sentence":         best_sentence,
+                "sentence_number":  sent_num,
+                "similarity":       similarity,
                 "nli_scores":       score_dict,
-                "best_evidence":    best_evidence,
-                "is_contradiction": is_contradiction,
-                "is_unsupported":   is_unsupported,
+                "passed":           not is_hallucination,
+                "is_contradiction": is_hallucination,
             }
             results.append(result)
 
-            print(f"[HALL-CHECK] NLI scores: contra={score_dict['contradiction']:.4f} neutral={score_dict['neutral']:.4f} entail={score_dict['entailment']:.4f}")
-            print(f"[HALL-CHECK] → is_contradiction={is_contradiction} is_unsupported={is_unsupported} HALLUCINATION={is_hallucination}")
-            if is_hallucination:
-                flagged.append(result)
+            print(
+                f"[HALL-CHECK] NLI: contra={score_dict['contradiction']:.4f} "
+                f"neutral={score_dict['neutral']:.4f} entail={score_dict['entailment']:.4f} "
+                f"→ HALLUCINATION={is_hallucination}"
+            )
 
-        print(f"[HALL-CHECK] ─── loop done: checked={len([r for r in results if r['checked']])} flagged={len(flagged)}")
-        factual_checked = [r for r in results if r["checked"]]
-        n_checked       = len(factual_checked)
-        avg_score       = total_score / n_checked if n_checked > 0 else 0.0
+            if is_hallucination:
+                total_score += score_dict["contradiction"]
+                flagged.append(result)
+                contradicted_fields.add(fact_field)
+
+        n_checked         = len(results)
+        avg_score         = total_score / len(flagged) if flagged else 0.0
         has_hallucination = len(flagged) > 0
 
-        print(f"[HALL-CHECK] RESULT: has_hallucination={has_hallucination} score={round(avg_score,3)} n_flagged={len(flagged)}")
+        print(
+            f"[HALL-CHECK] RESULT: has_hallucination={has_hallucination} "
+            f"score={round(avg_score,3)} n_checked={n_checked} n_flagged={len(flagged)} "
+            f"contradicted_fields={list(contradicted_fields)}"
+        )
         return {
-            "has_hallucination":  has_hallucination,
-            "hallucination_score":round(avg_score, 3),
-            "flagged_sentences":  flagged,
-            "all_sentences":      results,
-            "n_factual_checked":  n_checked,
-            "n_flagged":          len(flagged),
-            "passed":             not has_hallucination,
+            "has_hallucination":   has_hallucination,
+            "hallucination_score": round(avg_score, 3),
+            "flagged_sentences":   flagged,
+            "all_checks":          results,
+            "n_checked":           n_checked,
+            "n_flagged":           len(flagged),
+            "passed":              not has_hallucination,
+            "contradicted_fields": list(contradicted_fields),
         }
 
     def _empty_result(self) -> dict:
         return {
-            "has_hallucination":  False,
-            "hallucination_score":0.0,
-            "flagged_sentences":  [],
-            "all_sentences":      [],
-            "n_factual_checked":  0,
-            "n_flagged":          0,
-            "passed":             True,
+            "has_hallucination":   False,
+            "hallucination_score": 0.0,
+            "flagged_sentences":   [],
+            "all_checks":          [],
+            "n_checked":           0,
+            "n_flagged":           0,
+            "passed":              True,
+            "contradicted_fields": [],
         }

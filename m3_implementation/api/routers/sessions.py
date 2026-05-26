@@ -19,6 +19,14 @@ async def list_sessions(user_id: str = Query(...)):
         {"user_id": user_id}
     ).sort([("last_activity_at", -1), ("started_at", -1)]).to_list(length=100)
 
+    # Batch-fetch model locks for all sessions in one query
+    all_session_ids = [d.get("session_id") for d in docs if d.get("session_id")]
+    lock_docs = await db.session_model_locks.find(
+        {"session_id": {"$in": all_session_ids}},
+        {"session_id": 1, "selected_model": 1}
+    ).to_list(length=len(all_session_ids))
+    model_lock_map = {l["session_id"]: l.get("selected_model", "m3") for l in lock_docs}
+
     sessions = []
     for doc in docs:
         session_id = doc.get("session_id", "")
@@ -58,6 +66,7 @@ async def list_sessions(user_id: str = Query(...)):
             "turn_count":       turn_count,
             "message_count":    len(turns),
             "status":           doc.get("status", "active"),
+            "selected_model":   model_lock_map.get(session_id, "m3"),
         })
     return {"sessions": sessions}
 

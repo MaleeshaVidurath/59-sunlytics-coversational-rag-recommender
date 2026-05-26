@@ -22,7 +22,7 @@ async function apiGetHistory(sessionId, userId) {
   const r = await fetch(`${BASE}/api/sessions/${sessionId}?user_id=${userId}`);
   return r.json();
 }
-async function apiSendMessage({ userId, customerId, message, sessionId, forceNew }) {
+async function apiSendMessage({ userId, customerId, message, sessionId, forceNew, selectedModel }) {
   const r = await fetch(`${BASE}/api/chat`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -31,6 +31,7 @@ async function apiSendMessage({ userId, customerId, message, sessionId, forceNew
       message,
       session_id: sessionId || null,
       force_new_session: forceNew || false,
+      selected_model: selectedModel || "m3",
     }),
   });
   if (!r.ok) throw new Error("Chat failed");
@@ -411,8 +412,105 @@ function LoginPage({ onLogin }) {
   );
 }
 
+// ── Model Select Page ─────────────────────────────────────────────────────────
+const MODEL_OPTIONS = [
+  {
+    id: "m3",
+    title: "Member 3 · Conversational RAG",
+    desc: "Text-based RAG with session memory, hallucination checking and contradiction detection.",
+    tag: "M3",
+  },
+  {
+    id: "m2",
+    title: "Member 2 · Multimodal RAG",
+    desc: "Multimodal retrieval combining text and visual features for richer recommendations.",
+    tag: "M2",
+  },
+  {
+    id: "m1",
+    title: "Member 1 · Graph RAG",
+    desc: "Knowledge-graph-based retrieval leveraging product relationship networks.",
+    tag: "M1",
+  },
+];
+
+function ModelSelectPage({ onSelect }) {
+  const [hovered, setHovered] = useState(null);
+  return (
+    <div style={{ minHeight:"100vh", background:C.bg,
+      display:"flex", alignItems:"center", justifyContent:"center",
+      fontFamily:"system-ui,-apple-system,sans-serif" }}>
+      <div style={{ width:500, maxWidth:"92vw" }}>
+        <div style={{ textAlign:"center", marginBottom:36 }}>
+          <div style={{ fontSize:30, letterSpacing:5, color:C.accent, fontWeight:700,
+            fontFamily:"'Playfair Display',Georgia,serif", marginBottom:8 }}>SUNLYTICS</div>
+          <div style={{ fontSize:13, color:C.textDim }}>Select a recommendation model to begin</div>
+        </div>
+        {MODEL_OPTIONS.map(opt => (
+          <div key={opt.id}
+            onClick={() => onSelect(opt.id)}
+            onMouseEnter={() => setHovered(opt.id)}
+            onMouseLeave={() => setHovered(null)}
+            style={{
+              background: hovered === opt.id ? "#222" : C.card,
+              border: `1px solid ${hovered === opt.id ? C.accent : C.border}`,
+              borderRadius:12, padding:"18px 20px", marginBottom:12,
+              cursor:"pointer", transition:"all 0.15s", display:"flex",
+              alignItems:"center", gap:16,
+            }}>
+            <div style={{ width:44, height:44, borderRadius:10, flexShrink:0,
+              background:`linear-gradient(135deg,${C.accentDim},${C.accent})`,
+              display:"flex", alignItems:"center", justifyContent:"center",
+              fontSize:13, fontWeight:700, color:"#0f0f0f", fontFamily:"monospace" }}>
+              {opt.tag}
+            </div>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ color:C.text, fontWeight:600, fontSize:14, marginBottom:4 }}>
+                {opt.title}
+              </div>
+              <div style={{ color:C.textDim, fontSize:12, lineHeight:1.5 }}>
+                {opt.desc}
+              </div>
+            </div>
+            <div style={{ color:hovered === opt.id ? C.accent : C.textMuted, fontSize:18, flexShrink:0 }}>
+              →
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const MODEL_META = {
+  m1: { label:"M1 · Graph RAG",          tag:"M1", color:"#7ec87e", bg:"#1e3a1e" },
+  m2: { label:"M2 · Multimodal RAG",     tag:"M2", color:"#6e9bcf", bg:"#1e2a3a" },
+  m3: { label:"M3 · Conversational RAG", tag:"M3", color:"#c9a96e", bg:"#2a200e" },
+};
+
+function ModelBadge({ model, size = "normal" }) {
+  const meta = MODEL_META[model] || MODEL_META.m3;
+  const isSmall = size === "small";
+  return (
+    <span style={{
+      display:"inline-flex", alignItems:"center", gap:isSmall?4:6,
+      background:meta.bg, border:`1px solid ${meta.color}55`,
+      borderRadius:20, padding:isSmall?"2px 8px":"4px 12px",
+      flexShrink:0,
+    }}>
+      <span style={{
+        width:isSmall?16:20, height:isSmall?16:20, borderRadius:"50%", flexShrink:0,
+        background:meta.color, display:"flex", alignItems:"center", justifyContent:"center",
+        fontSize:isSmall?9:11, fontWeight:700, color:"#0f0f0f", fontFamily:"monospace",
+      }}>{meta.tag}</span>
+      <span style={{ color:meta.color, fontSize:isSmall?10:12,
+        fontFamily:"monospace", whiteSpace:"nowrap" }}>{meta.label}</span>
+    </span>
+  );
+}
+
 // ── Chat Page ─────────────────────────────────────────────────────────────────
-function ChatPage({ user, onLogout }) {
+function ChatPage({ user, onLogout, selectedModel, onResetModel }) {
   const [sessions, setSessions]     = useState([]);
   const [activeSession, setActive]  = useState(null);
   const [messages, setMessages]     = useState([]);
@@ -456,12 +554,8 @@ function ChatPage({ user, onLogout }) {
   async function newChat() {
     // Clear Redis active session pointer
     try { await apiNewSession(user.user_id); } catch(e) {}
-    // Set flag so next send() passes force_new_session=true
-    setForceNew(true);
-    setActive(null);
-    setMessages([]);
-    setAwaitingConsent(false);
-    inputRef.current?.focus();
+    // Return to model selection — the new session will use a fresh model choice
+    onResetModel();
   }
 
   async function handleDeleteSession(sessionId) {
@@ -499,7 +593,7 @@ function ChatPage({ user, onLogout }) {
     try {
       const res = await apiSendMessage({
         userId: user.user_id, customerId: user.customer_id,
-        message: "yes", sessionId: activeSession,
+        message: "yes", sessionId: activeSession, selectedModel,
       });
       const botMsg = {
         id: Date.now()+1, role:"assistant",
@@ -539,7 +633,7 @@ function ChatPage({ user, onLogout }) {
     try {
       await apiSendMessage({
         userId: user.user_id, customerId: user.customer_id,
-        message: "no", sessionId: activeSession,
+        message: "no", sessionId: activeSession, selectedModel,
       });
     } catch(e) {}
     inputRef.current?.focus();
@@ -562,6 +656,7 @@ function ChatPage({ user, onLogout }) {
         message: text,
         sessionId: activeSession,
         forceNew: forceNewSession,
+        selectedModel,
       });
       setForceNew(false);  // reset after first message of new chat
 
@@ -650,7 +745,11 @@ function ChatPage({ user, onLogout }) {
           }
         </div>
 
-        <div style={{ padding:"12px 14px", borderTop:`1px solid ${C.border}` }}>
+        <div style={{ padding:"8px 14px", borderTop:`1px solid ${C.border}` }}>
+          <ModelBadge model={selectedModel} size="small" />
+        </div>
+
+        <div style={{ padding:"10px 14px", borderTop:`1px solid ${C.border}` }}>
           <div style={{ display:"flex", alignItems:"center", gap:10 }}>
             <div style={{ width:32, height:32, borderRadius:"50%", background:C.user,
               border:"1px solid #2d5a3d", display:"flex", alignItems:"center",
@@ -683,8 +782,11 @@ function ChatPage({ user, onLogout }) {
           <button onClick={()=>setSidebar(v=>!v)}
             style={{ background:"transparent", border:"none", color:C.textDim,
               cursor:"pointer", fontSize:18, padding:"4px 8px", borderRadius:6 }}>☰</button>
-          <div style={{ color:C.textDim, fontSize:13 }}>
-            {activeSession ? `Session · ${activeSession.slice(-8)}` : "New conversation"}
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <ModelBadge model={selectedModel} size="normal" />
+            <span style={{ color:C.textMuted, fontSize:12 }}>
+              {activeSession ? `Session · ${activeSession.slice(-8)}` : "New conversation"}
+            </span>
           </div>
         </div>
 
@@ -784,9 +886,24 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem("sunlytics_user")); }
     catch { return null; }
   });
-  const handleLogin  = u => { localStorage.setItem("sunlytics_user", JSON.stringify(u)); setUser(u); };
-  const handleLogout = () => { localStorage.removeItem("sunlytics_user"); setUser(null); };
-  if (!user) return <LoginPage onLogin={handleLogin} />;
-  return <ChatPage user={user} onLogout={handleLogout} />;
+  // selectedModel is kept in state only (not localStorage) so every fresh login
+  // requires a new model selection — one model per session, per login.
+  const [selectedModel, setSelectedModel] = useState(null);
+
+  const handleLogin       = u => { localStorage.setItem("sunlytics_user", JSON.stringify(u)); setUser(u); };
+  const handleLogout      = () => { localStorage.removeItem("sunlytics_user"); setUser(null); setSelectedModel(null); };
+  const handleModelSelect = model => setSelectedModel(model);
+  const handleResetModel  = () => setSelectedModel(null);
+
+  if (!user)          return <LoginPage onLogin={handleLogin} />;
+  if (!selectedModel) return <ModelSelectPage onSelect={handleModelSelect} />;
+  return (
+    <ChatPage
+      user={user}
+      onLogout={handleLogout}
+      selectedModel={selectedModel}
+      onResetModel={handleResetModel}
+    />
+  );
 }
 //isura

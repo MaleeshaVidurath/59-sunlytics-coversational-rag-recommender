@@ -1,11 +1,21 @@
 # m3_implementation/api/routers/chat.py
 import asyncio
+import json as _json
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from api.dependencies import get_memory_pipeline, get_rag_pipeline
 from memory.core.rl_signal_collector import get_rl_collector, LABEL_NAME_TO_ID
+
+
+def _make_json_safe(obj: dict) -> dict:
+    """
+    Strip all non-JSON-serializable values (datetime, Pydantic models, etc.)
+    by serialising through json.dumps(default=str) → json.loads.
+    This converts datetime → ISO string, and any unknown type → str.
+    """
+    return _json.loads(_json.dumps(obj, default=str))
 
 
 # ── Fire-and-forget: send pipeline_output to friend modules ───────────────────
@@ -26,10 +36,10 @@ async def _fire_and_forget(url: str, pipeline_output: dict, module_name: str):
     if not url:
         return  # Not configured — skip silently
 
-    body = {
+    body = _make_json_safe({
         "retrieval_input": pipeline_output.get("retrieval_input"),
         "memory_context":  pipeline_output.get("memory_context") or {},
-    }
+    })
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             await client.post(f"{url}/api/process", json=body)
@@ -40,13 +50,16 @@ async def _fire_and_forget(url: str, pipeline_output: dict, module_name: str):
 
 
 async def _call_m2_sync(pipeline_output: dict, timeout: float = 30.0):
-    """Calls M2 synchronously and returns the response dict, or None on failure."""
+    """Calls M2 synchronously.
+    Returns the response dict on both success=True and success=False (M2 is reachable).
+    Returns None only when M2 cannot be reached at all (timeout, connection error).
+    """
     if not _M2_URL:
         return None
-    body = {
+    body = _make_json_safe({
         "retrieval_input": pipeline_output.get("retrieval_input"),
         "memory_context":  pipeline_output.get("memory_context") or {},
-    }
+    })
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(f"{_M2_URL}/api/process", json=body)
@@ -54,12 +67,197 @@ async def _call_m2_sync(pipeline_output: dict, timeout: float = 30.0):
             data = resp.json()
             if data.get("success"):
                 print(f"[CHAT] M2 response received: action={data.get('action')} items={len(data.get('items', []))}")
-                return data
-            print(f"[CHAT] M2 returned success=False: {data.get('error')}")
-            return None
+            else:
+                print(f"[CHAT] M2 application error: {data.get('error')}")
+            return data  # always return — None only means unreachable
     except Exception as e:
         print(f"[CHAT] M2 sync call failed ({type(e).__name__}): {e}")
         return None
+
+
+async def _call_m1_sync(pipeline_output: dict, timeout: float = 30.0):
+    """Calls M1 synchronously.
+    Returns the response dict on both success=True and success=False (M1 is reachable).
+    Returns None only when M1 cannot be reached at all (timeout, connection error).
+    """
+    if not _M1_URL:
+        return None
+    body = _make_json_safe({
+        "retrieval_input": pipeline_output.get("retrieval_input"),
+        "memory_context":  pipeline_output.get("memory_context") or {},
+    })
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(f"{_M1_URL}/api/process", json=body)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("success"):
+                print(f"[CHAT] M1 response received: action={data.get('action')} items={len(data.get('items', []))}")
+            else:
+                print(f"[CHAT] M1 application error: {data.get('error')}")
+            return data  # always return — None only means unreachable
+    except Exception as e:
+        print(f"[CHAT] M1 sync call failed ({type(e).__name__}): {e}")
+        return None
+
+
+def _remap_member_item(item: dict) -> dict:
+    """
+    Normalise a single item from M1/M2 response to the field names
+    chat.py's item extraction loop expects.
+    M2 uses prod_name/colour_group_name/product_type_name/detail_desc;
+    M1 may differ — try both names so either works.
+    """
+    price_raw = item.get("price") or item.get("avg_price")
+    if price_raw and not isinstance(price_raw, str):
+        price_str = f"£{price_raw}"
+    else:
+        price_str = price_raw or ""
+    return {
+        "article_id":  str(item.get("article_id", "")),
+        "name":        item.get("name")    or item.get("prod_name", ""),
+        "colour":      item.get("colour")  or item.get("colour_group_name", ""),
+        "type":        item.get("type")    or item.get("product_type_name", ""),
+        "price":       price_str,
+        "description": (item.get("description") or item.get("detail_desc") or "")[:120],
+        "pattern":     item.get("pattern") or item.get("graphical_appearance_name", ""),
+        "explanation": item.get("explanation", ""),
+        "score":       item.get("score"),
+        "image_url":   item.get("image_url", ""),
+    }
+
+
+def _normalize_member_response(data: dict) -> dict:
+    """Convert M1/M2 API response to the same structure as rag.process() output.
+    When success=False, passes M2/M1's own error message as response_text.
+    """
+    if not data.get("success", True):
+        # M2/M1 is reachable but couldn't fulfil the request (e.g. article not found).
+        # Surface their error message directly — do not show "unavailable".
+        error_text = data.get("error") or data.get("message") or "The selected module could not process this request."
+        return {
+            "response_text":       error_text,
+            "hallucination_flag":  False,
+            "hallucination_score": 0.0,
+            "flagged_sentences":   [],
+            "attempt_count":       1,
+            "contradiction_found": False,
+            "contradiction_count": 0,
+            "contradictions":      [],
+            "product_ids":         [],
+            "product_names":       [],
+            "action":              data.get("action", ""),
+            "items_recommended":   [],
+        }
+    remapped_items = [_remap_member_item(i) for i in data.get("items", [])]
+    return {
+        "response_text":       data.get("response_text", data.get("message", "")),
+        "hallucination_flag":  data.get("hallucination_flag", False),
+        "hallucination_score": data.get("hallucination_score", 0.0),
+        "flagged_sentences":   data.get("flagged_sentences", []),
+        "attempt_count":       data.get("attempt_count", 1),
+        "contradiction_found": data.get("contradiction_found", False),
+        "contradiction_count": data.get("contradiction_count", 0),
+        "contradictions":      data.get("contradictions", []),
+        "product_ids":         data.get("product_ids") or [i["article_id"] for i in remapped_items if i["article_id"]],
+        "product_names":       data.get("product_names") or [i["name"] for i in remapped_items if i["name"]],
+        "action":              data.get("action", ""),
+        "items_recommended":   remapped_items,
+    }
+
+
+def _member_unavailable_response(member_label: str, pipeline_output: dict) -> dict:
+    """Return a user-facing response dict when a member module cannot be reached."""
+    return {
+        "response_text":       f"{member_label} is currently unavailable. Please try again later or start a new chat and select a different model.",
+        "session_id":          pipeline_output.get("session_id", ""),
+        "label":               pipeline_output.get("label", ""),
+        "confidence":          round(pipeline_output.get("confidence", 0), 4),
+        "retrieval_strategy":  pipeline_output.get("retrieval_strategy", "NO"),
+        "action":              "",
+        "items_recommended":   [],
+        "product_ids":         [],
+        "product_names":       [],
+        "hallucination_flag":  False,
+        "hallucination_score": 0.0,
+        "attempt_count":       1,
+        "contradiction_found": False,
+        "contradiction_count": 0,
+        "contradictions":      [],
+        "cse":                 pipeline_output.get("cse", {}),
+        "recommendation_id":   None,
+        "turn_id":             pipeline_output.get("turn_id", ""),
+    }
+
+
+async def _enrich_member_items(items: list) -> list:
+    """
+    M2/M1 responses often only contain article_id without name/colour/price.
+    This fetches the full product details from the local PostgreSQL catalog
+    and maps them to the field names chat.py's item extraction expects.
+    Non-fatal — returns original items if lookup fails.
+    """
+    if not items:
+        return items
+    if all(item.get("name") for item in items):
+        return items  # already complete, no lookup needed
+
+    article_ids = [str(item.get("article_id", "")) for item in items if item.get("article_id")]
+    if not article_ids:
+        return items
+
+    try:
+        from text_rag.db.postgres_client import get_articles_by_ids
+        pg_rows = await get_articles_by_ids(article_ids)
+        pg_map = {str(row["article_id"]): row for row in pg_rows}
+        print(f"[CHAT] item enrichment: fetched {len(pg_map)} product(s) from catalog for ids={article_ids}")
+
+        enriched = []
+        for item in items:
+            aid = str(item.get("article_id", ""))
+            pg = pg_map.get(aid, {})
+            avg_price = pg.get("avg_price")
+            enriched.append({
+                "article_id":  aid,
+                "name":        pg.get("prod_name")                  or item.get("name", ""),
+                "colour":      pg.get("colour_group_name")          or item.get("colour", ""),
+                "type":        pg.get("product_type_name")          or item.get("type", ""),
+                "price":       f"£{avg_price}" if avg_price else    item.get("price", ""),
+                "description": (pg.get("detail_desc") or "")[:120],
+                "pattern":     pg.get("graphical_appearance_name")  or item.get("pattern", ""),
+            })
+        return enriched
+    except Exception as _enr_err:
+        print(f"[CHAT] item enrichment warning (non-fatal): {_enr_err}")
+        return items
+
+
+def _to_storage_item(item: dict) -> dict:
+    """
+    Convert a remapped item (name/colour/type/price-as-string) to the field
+    names that ItemInContext requires (prod_name/colour_group_name/
+    product_type_name/price-as-float-or-None).
+    Used when calling store_response() for M2/M1 items.
+    """
+    import re as _re
+    price_raw = item.get("price") or ""
+    price_float = None
+    if price_raw:
+        m = _re.search(r"[\d.]+", str(price_raw))
+        if m:
+            try:
+                price_float = float(m.group())
+            except ValueError:
+                pass
+    return {
+        "article_id":               str(item.get("article_id", "")),
+        "prod_name":                item.get("name") or item.get("prod_name", ""),
+        "product_type_name":        item.get("type") or item.get("product_type_name", ""),
+        "colour_group_name":        item.get("colour") or item.get("colour_group_name", ""),
+        "graphical_appearance_name":item.get("pattern") or item.get("graphical_appearance_name"),
+        "detail_desc":              item.get("description") or item.get("detail_desc"),
+        "price":                    price_float,
+    }
 
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -71,6 +269,7 @@ class ChatRequest(BaseModel):
     message:            str
     session_id:         Optional[str] = None   # None = start new session
     force_new_session:  bool = False            # True = ignore existing session, start fresh
+    selected_model:     str  = "m3"            # "m1", "m2", or "m3" — locked per session
 
 
 @router.post("")
@@ -121,13 +320,33 @@ async def chat(req: ChatRequest):
             except Exception as e:
                 print(f"[Chat] Redis clear error (non-fatal): {e}")
 
-        print(f"[CHAT] ─── Step 1: calling memory.process_turn...")
+        # ── Pre-read model lock so process_turn uses the right CSE ──────────
+        # For existing sessions we look up the lock BEFORE process_turn so the
+        # correct member CSE (M1/M2/M3) is selected.  For new sessions the lock
+        # doesn't exist yet — fall back to the request value.
+        _early_model = req.selected_model or "m3"
+        _lookup_sid  = (None if req.force_new_session else req.session_id) or ""
+        if _lookup_sid:
+            try:
+                from memory.db.mongo import get_db as _get_db_early
+                _db_early = _get_db_early()
+                _early_lock = await _db_early.session_model_locks.find_one(
+                    {"session_id": _lookup_sid}, {"selected_model": 1}
+                )
+                if _early_lock and _early_lock.get("selected_model"):
+                    _early_model = _early_lock["selected_model"]
+                    print(f"[CHAT] early model lock read → {_early_model}")
+            except Exception as _em_err:
+                print(f"[CHAT] early lock read warning (non-fatal): {_em_err}")
+
+        print(f"[CHAT] ─── Step 1: calling memory.process_turn (member_model={_early_model})...")
         # Step 1: Memory pipeline
         pipeline_output = await memory.process_turn(
             user_id=req.user_id,
             message=req.message,
             session_id=None if req.force_new_session else req.session_id,
             customer_id=req.customer_id,
+            member_model=_early_model,
         )
 
         print(f"[CHAT] ─── Memory pipeline done")
@@ -209,12 +428,69 @@ async def chat(req: ChatRequest):
                   f"D_items={_cse.get('d_items_available', 0.0):.2f} "
                   f"D_recency={_cse.get('d_info_recency', 0.0):.2f} "
                   f"D_completeness={_cse.get('d_info_completeness', 0.0):.2f}")
-        # ── Send to friend modules ─────────────────────────────────────────
+        # ── Determine effective model (session-level lock) ─────────────────
+        # Uses a dedicated session_model_locks collection — never writes to
+        # sessions, users, recommendations or any other existing collection.
+        #
+        # First message of a new session → stores {session_id, selected_model}
+        # in session_model_locks (upsert, so safe to call every turn).
+        # Subsequent messages → reads the stored model and uses it, ignoring
+        # whatever selected_model the request carries.  This enforces the
+        # "one model per session, unchangeable" contract.
         import asyncio as _asyncio
-        _label = pipeline_output.get("label", "")
-        print(f"[CHAT] M2: label={_label} — waiting for M2 (timeout=30s)")
-        await _call_m2_sync(pipeline_output)
-        _asyncio.ensure_future(_fire_and_forget(_M1_URL, pipeline_output, "M1 Graph RAG"))
+        _session_id_for_model = pipeline_output.get("session_id", "")
+        effective_model = req.selected_model or "m3"
+        try:
+            from memory.db.mongo import get_db as _get_db_model
+            from datetime import datetime as _dt, timezone as _tz
+            _db_model = _get_db_model()
+            _lock_doc = await _db_model.session_model_locks.find_one(
+                {"session_id": _session_id_for_model},
+                {"selected_model": 1},
+            )
+            if _lock_doc and _lock_doc.get("selected_model"):
+                # Existing session — honour the locked model, ignore request value
+                effective_model = _lock_doc["selected_model"]
+                print(f"[CHAT] model lock: existing lock found → model={effective_model}")
+            else:
+                # New session — persist the model selection in its own collection
+                await _db_model.session_model_locks.update_one(
+                    {"session_id": _session_id_for_model},
+                    {"$setOnInsert": {
+                        "session_id":     _session_id_for_model,
+                        "user_id":        pipeline_output.get("user_id", ""),
+                        "selected_model": effective_model,
+                        "locked_at":      _dt.now(_tz.utc).isoformat(),
+                    }},
+                    upsert=True,
+                )
+                print(f"[CHAT] model lock: new lock stored → model={effective_model}")
+        except Exception as _me:
+            print(f"[CHAT] model lock warning (non-fatal): {_me}")
+
+        # ── Route pipeline_output to the selected member module only ──────
+        # M3: processed locally by rag.process() below — no external call.
+        # M2/M1: call synchronously and use their response exclusively.
+        #         If the module is unreachable, return an error to the user
+        #         immediately — NO fallback to M3.
+        print(f"[CHAT] routing to selected_model={effective_model}")
+        _member_rag_result = None
+        if effective_model == "m2":
+            print(f"[CHAT] M2 selected — calling M2 sync (timeout=30s)")
+            _m2_resp = await _call_m2_sync(pipeline_output)
+            if _m2_resp is None:
+                print(f"[CHAT] M2 unavailable — returning error to user")
+                return _member_unavailable_response("M2 · Multimodal RAG", pipeline_output)
+            _member_rag_result = _normalize_member_response(_m2_resp)
+        elif effective_model == "m1":
+            print(f"[CHAT] M1 selected — calling M1 sync (timeout=30s)")
+            _m1_resp = await _call_m1_sync(pipeline_output)
+            if _m1_resp is None:
+                print(f"[CHAT] M1 unavailable — returning error to user")
+                return _member_unavailable_response("M1 · Graph RAG", pipeline_output)
+            _member_rag_result = _normalize_member_response(_m1_resp)
+        else:
+            print(f"[CHAT] M3 selected — processing locally")
 
         # ── Store classifier_input in the turn document ───────────────────
         # Stores the [SEP]-joined DistilBERT input so rl_routes.py can
@@ -242,12 +518,41 @@ async def chat(req: ChatRequest):
                 print(f"[CHAT] classifier_input store warning (non-fatal): {_ci_err}")
 
         print(f"[CHAT] ─── Step 2: calling rag.process...")
-        # Step 2: Text RAG pipeline (includes hallucination + contradiction)
-        rag_result = await rag.process(
-            pipeline_output=pipeline_output,
-            memory_pipeline=memory,
-            store_response=True,
-        )
+        # Step 2: Text RAG — M3 only. M1/M2 already produced their result above.
+        if _member_rag_result is not None:
+            rag_result = _member_rag_result
+            # M2/M1 often return only article_ids — enrich with full catalog details
+            rag_result["items_recommended"] = await _enrich_member_items(
+                rag_result.get("items_recommended", [])
+            )
+            print(f"[CHAT] ─── Using {effective_model.upper()} response (local RAG skipped)")
+            # Store the M2/M1 response so CSE can populate currently_discussing
+            # on follow-up turns (ATTRIBUTE_QUESTION, EXPLANATION_WHY, etc.)
+            _member_items = rag_result.get("items_recommended", [])
+            if _member_items:
+                try:
+                    # ItemInContext requires prod_name/colour_group_name/product_type_name.
+                    # Our remapped items use name/colour/type — convert before storing.
+                    _storage_items = [_to_storage_item(i) for i in _member_items]
+                    await memory.store_response(
+                        session_id=pipeline_output.get("session_id", ""),
+                        user_id=pipeline_output.get("user_id", ""),
+                        bot_response=rag_result.get("response_text", ""),
+                        recommended_items=_storage_items,
+                        trigger_label=pipeline_output.get("label", "UNKNOWN"),
+                        retrieval_strategy=pipeline_output.get("retrieval_strategy", "UNKNOWN"),
+                        collection_prefix=effective_model,
+                    )
+                    print(f"[CHAT] store_response OK for {effective_model.upper()} — {len(_member_items)} item(s) saved")
+                except Exception as _sr_err:
+                    print(f"[CHAT] store_response warning (non-fatal): {_sr_err}")
+        else:
+            rag_result = await rag.process(
+                pipeline_output=pipeline_output,
+                memory_pipeline=memory,
+                store_response=True,
+                collection_prefix=effective_model,
+            )
 
         print(f"[CHAT] ─── RAG done")
         print(f"[CHAT] rag_result keys: {list(rag_result.keys())}")
@@ -264,9 +569,10 @@ async def chat(req: ChatRequest):
         _rec_id = None
         if rag_result.get("action") == "catalog_search" and rag_result.get("items_recommended"):
             try:
-                from memory.db.mongo import get_db as _get_db_inner
-                _db_inner = _get_db_inner()
-                _latest_rec = await _db_inner.recommendations.find_one(
+                from memory.db.mongo import get_db as _get_db_inner, get_collection_name as _gcn
+                _db_inner  = _get_db_inner()
+                _recs_coll = _gcn("recommendations", effective_model)
+                _latest_rec = await _db_inner[_recs_coll].find_one(
                     {
                         "session_id": pipeline_output.get("session_id", ""),
                         "user_id":    pipeline_output.get("user_id", ""),
@@ -275,12 +581,9 @@ async def chat(req: ChatRequest):
                 )
                 if _latest_rec:
                     _rec_id = _latest_rec.get("recommendation_id")
-                    # Patch user_turn_id onto recommendation document
-                    # so rl_routes.py can find classifier_input via:
-                    # recommendation_id → user_turn_id → turn.classifier_input
                     _user_turn_id_for_rec = pipeline_output.get("turn_id", "")
                     if _user_turn_id_for_rec and _rec_id:
-                        await _db_inner.recommendations.update_one(
+                        await _db_inner[_recs_coll].update_one(
                             {"recommendation_id": _rec_id},
                             {"$set": {"user_turn_id": _user_turn_id_for_rec}}
                         )

@@ -1,688 +1,693 @@
 # m3_implementation/memory/core/contradiction_detector.py
 #
-# Contradiction Detector — Novel Research Contribution
+# NOVELTY: First CRS contradiction detector that uses the RAG evidence bundle
+# as authoritative ground truth stored in a session memory graph (NetworkX).
+# Instead of parsing LLM free text with regex, uses LLM-based claim extraction
+# (Groq) to extract product values from responses, then compares against
+# evidence-anchored graph nodes. DeBERTa NLI used only for confirmation,
+# not extraction. This architecture is unique to RAG-based CRS where the
+# evidence bundle is already structured and accurate.
 #
 # PURPOSE:
-#   Ensures every bot response is consistent with all previous claims
-#   made during the same session. Catches three types of contradictions:
-#
-#   TYPE 1 — Same product, same attribute, different value
-#     e.g. "London dress costs £11" then later "London dress costs £15"
-#
-#   TYPE 2 — Preference claim contradiction
-#     e.g. "recommended because you prefer Black" then later
-#          "recommended because you prefer White" (if preference unchanged)
-#
-#   TYPE 3 — Cross-turn factual inconsistency
-#     e.g. "made of cotton" then "made of polyester" for same item
+#   Ensures every bot response is consistent with the evidence used to generate it.
+#   Catches LLM drift — cases where the LLM writes the wrong colour, price, or name
+#   despite correct evidence being provided in the prompt.
 #
 # HOW IT WORKS:
-#   1. Extract atomic claims from bot response using regex patterns
-#   2. Load all active claims for same article_ids from MongoDB
-#   3. For each new claim: check if same article + same attribute
-#      has an existing claim with a different value
-#   4. If candidate contradiction found: run NLI to confirm
-#      (NLI contradiction score > NLI_CONTRADICTION_THRESHOLD = 0.70)
-#   5. If confirmed: query PostgreSQL for authoritative truth
-#   6. Mark wrong claim as "contradicted" in MongoDB
-#   7. Correct the response text to use the authoritative value
-#   8. Store ExplanationDocument (claims) and ContradictionEntry (events)
-#   9. Return corrected response + full contradiction report
+#   1. Load session graph from MongoDB (NetworkX DiGraph, persisted across turns)
+#   2. Update graph nodes from evidence bundle (PostgreSQL/Qdrant — always accurate)
+#   3. Call Groq to extract what name/colour/price the LLM actually wrote
+#   4. Compare extracted values against graph node values (evidence truth)
+#   5. If mismatch found: confirm with DeBERTa NLI (score > 0.5)
+#   6. If confirmed: fix response text, add contradiction edge to graph
+#   7. Persist updated graph + log events to MongoDB
+#   8. Return corrected response + full report
 #
 # INTEGRATION:
-#   Called from text_rag/core/rag_pipeline.py after hallucination check
-#   Only runs for actions that make factual product claims:
-#   catalog_search, item_attribute_lookup, item_compare, explanation_generate
+#   Called from text_rag/core/rag_pipeline.py after hallucination check passes.
+#   Only runs for factual actions: catalog_search, item_detail_lookup,
+#   item_attribute_lookup, item_compare, explanation_generate.
 #
-# OUTPUT STRUCTURE:
+# OUTPUT STRUCTURE (same as before — rag_pipeline.py needs no changes):
 #   {
-#     "response_text":          str   — corrected response (or original if no contradiction)
-#     "contradiction_found":    bool
-#     "contradiction_count":    int
-#     "contradictions":         list  — details of each contradiction found
-#     "claims_stored":          int   — number of new claims stored
-#     "product_ids":            list  — article_ids mentioned in this response
-#     "product_names":          list  — product names mentioned in this response
+#     "response_text":       str   — corrected response (or original if no contradiction)
+#     "contradiction_found": bool
+#     "contradiction_count": int
+#     "contradictions":      list  — details of each contradiction
+#     "claims_stored":       int   — number of products whose evidence was stored
+#     "product_ids":         list  — article_ids in this response
+#     "product_names":       list  — product names in this response
 #   }
 
 import re
 import os
 import sys
+import json
+import networkx as nx
+import httpx
 from datetime import datetime, timezone
 from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
-from memory.db.mongo import get_db
-from text_rag.db.postgres_client import get_article_by_id
-from text_rag.config import NLI_CONTRADICTION_THRESHOLD
+from memory.db.mongo import get_db, get_collection_name
 
-# ── NLI model (shared with hallucination checker) ─────────────────────────────
+# ── NLI model (shared singleton with hallucination checker) ───────────────────
 _nli_model = None
 
 def _get_nli():
     global _nli_model
     if _nli_model is None:
         from sentence_transformers import CrossEncoder
-        from text_rag.config import NLI_MODEL_NAME
-        _nli_model = CrossEncoder(NLI_MODEL_NAME)
+        _nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
         print("[ContradictionDetector] NLI model loaded.")
     return _nli_model
 
-
-# ── Claim extraction patterns ──────────────────────────────────────────────────
-# Each pattern extracts (attribute_name, value) from a sentence.
-# Ordered by specificity — more specific patterns first.
-
-CLAIM_PATTERNS = [
-    # Price patterns
-    (re.compile(
-        r'(?:costs?|priced? at|price(?:d)? of|price is|for)\s+£([\d]+\.?\d*)',
-        re.IGNORECASE),
-     "avg_price", "£{0}"),
-
-    (re.compile(
-        r'£([\d]+\.?\d*)\s+(?:dress|top|jacket|skirt|trouser|sweater|item)',
-        re.IGNORECASE),
-     "avg_price", "£{0}"),
-
-    # Colour patterns
-    (re.compile(
-        r'(?:colour is|colored?|in (?:a )?|comes in )\b'
-        r'(black|white|red|blue|green|pink|grey|gray|beige|navy|brown|'
-        r'orange|yellow|purple|light blue|dark blue|light pink|dark pink|'
-        r'light beige|light grey|dark grey)\b',
-        re.IGNORECASE),
-     "colour_group_name", "{0}"),
-
-    (re.compile(
-        r'\b(black|white|red|navy|beige|grey|gray|pink|brown)\s+'
-        r'(?:dress|top|jacket|skirt|trouser|sweater|blouse|shirt)',
-        re.IGNORECASE),
-     "colour_group_name", "{0}"),
-
-    # Material / fabric patterns
-    (re.compile(
-        r'(?:made of|made from|fabric is|material is|in a?)\s+'
-        r'([a-z\s]+(?:weave|knit|cotton|polyester|viscose|linen|silk|'
-        r'wool|denim|jersey|nylon|blend|mix))',
-        re.IGNORECASE),
-     "material", "{0}"),
-
-    # Pattern / graphical appearance
-    (re.compile(
-        r'(?:pattern is|features? (?:a )?|with (?:a )?)\b'
-        r'(solid|striped|floral|printed|embroidered|plain|patterned|'
-        r'all over pattern|denim)\b',
-        re.IGNORECASE),
-     "graphical_appearance_name", "{0}"),
-
-    # Type patterns
-    (re.compile(
-        r'\b(?:it is|this is|a) (?:a )?'
-        r'(dress|top|trouser|skirt|jacket|sweater|blouse|shirt|coat)\b',
-        re.IGNORECASE),
-     "product_type_name", "{0}"),
-
-    # Length patterns
-    (re.compile(
-        r'\b(calf-length|knee-length|mini|midi|maxi|long|short)\s+'
-        r'(?:dress|skirt)',
-        re.IGNORECASE),
-     "length", "{0}"),
-]
+# NLI label mapping for cross-encoder/nli-deberta-v3-base:
+#   Label 0 = CONTRADICTION  Label 1 = NEUTRAL  Label 2 = ENTAILMENT
+# NLI is used only for confirmation after values_contradict() flags a mismatch.
+_NLI_CONFIRMATION_THRESHOLD = 0.5
 
 
-def _extract_claims_from_text(
-    text: str,
-    article_id: str,
-    article_name: str,
-    turn_id: str,
-) -> list[dict]:
+# ── Value normalisation ───────────────────────────────────────────────────────
+
+def normalise_value(val: str) -> str:
+    if not val:
+        return ""
+    val = str(val).lower().strip()
+    val = re.sub(r'[-\s]+', ' ', val)
+    val = re.sub(r'£\s*', '£', val)
+    return val.strip()
+
+
+def values_contradict(evidence_val: str, extracted_val: str) -> bool:
     """
-    Extracts atomic factual claims from response text using regex patterns.
-
-    Each claim is:
-      {article_id, article_name, attribute, value, claim_text, turn_id, status}
-
-    Only extracts claims for sentences that mention the article name or
-    contain a product attribute keyword. This avoids false positives from
-    conversational sentences.
+    Returns True if the extracted value differs from the evidence value.
+    Uses float comparison for prices to allow tiny rounding differences.
     """
-    claims = []
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    ev = normalise_value(evidence_val)
+    ex = normalise_value(extracted_val)
+    if not ev or not ex:
+        return False
+    if ev.startswith('£') and ex.startswith('£'):
+        try:
+            return abs(float(ev[1:]) - float(ex[1:])) > 0.05
+        except Exception:
+            return ev != ex
+    return ev != ex
 
-    for sentence in sentences:
-        if len(sentence) < 10:
-            continue
 
-        # Only process sentences likely about this specific product
-        article_mentioned = (
-            article_name.lower() in sentence.lower() or
-            any(kw in sentence.lower() for kw in [
-                "costs", "priced", "made of", "material", "colour",
-                "fabric", "pattern", "dress", "top", "jacket"
-            ])
+# ── Session Graph — persistence ───────────────────────────────────────────────
+
+async def _load_graph(session_id: str, collection_prefix: str = "m3") -> nx.DiGraph:
+    """
+    Load session graph from MongoDB.
+    Returns an empty DiGraph if this is the first turn of the session.
+    collection_prefix selects which member's graph collection to use.
+    """
+    db = get_db()
+    coll_name = get_collection_name("session_graphs", collection_prefix)
+    try:
+        doc = await db[coll_name].find_one({"session_id": session_id})
+        if doc and "graph_data" in doc:
+            graph = nx.node_link_graph(doc["graph_data"])
+            return graph
+    except Exception as e:
+        print(f"[GRAPH] Failed to load graph for {session_id}: {e}")
+    return nx.DiGraph()
+
+
+async def _save_graph(
+    session_id:        str,
+    graph:             nx.DiGraph,
+    collection_prefix: str = "m3",
+) -> None:
+    """Persist session graph to MongoDB for the next turn."""
+    db = get_db()
+    coll_name = get_collection_name("session_graphs", collection_prefix)
+    try:
+        graph_data = nx.node_link_data(graph)
+        await db[coll_name].update_one(
+            {"session_id": session_id},
+            {"$set": {
+                "session_id": session_id,
+                "graph_data": graph_data,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }},
+            upsert=True,
         )
-        if not article_mentioned:
-            continue
-
-        for pattern, attribute, value_template in CLAIM_PATTERNS:
-            match = pattern.search(sentence)
-            if match:
-                raw_value = match.group(1).strip().lower()
-                value     = value_template.format(raw_value)
-
-                claims.append({
-                    "article_id":   article_id,
-                    "article_name": article_name,
-                    "attribute":    attribute,
-                    "value":        value,
-                    "claim_text":   sentence.strip(),
-                    "turn_id":      turn_id,
-                    "status":       "active",
-                    "created_at":   datetime.now(timezone.utc).isoformat(),
-                })
-                break  # one claim per sentence per attribute
-
-    return claims
+    except Exception as e:
+        print(f"[GRAPH] Failed to save graph for {session_id}: {e}")
 
 
-def _extract_product_refs(evidence: dict) -> list[tuple[str, str]]:
+# ── Evidence → product refs ───────────────────────────────────────────────────
+
+def _item_to_ref(item: dict) -> Optional[dict]:
     """
-    Extracts (article_id, product_name) pairs from the evidence bundle.
-    Returns list of (article_id, name) tuples to check claims against.
+    Converts one evidence item dict into a normalised product ref.
+    Captures all available fields so every attribute the LLM might mention
+    can be checked against DB ground truth.
+    Returns None if article_id or name is missing.
     """
-    refs = []
+    aid           = str(item.get("article_id", "")).strip()
+    name          = item.get("name") or item.get("prod_name", "")
+    colour        = item.get("colour_group_name") or item.get("colour", "")
+    price         = item.get("price") or item.get("avg_price", "")
+    product_type  = item.get("product_type_name") or item.get("type", "")
+    pattern       = item.get("graphical_appearance_name", "")
+    index_group   = item.get("index_group_name", "")
+    section       = item.get("section_name", "")
+    garment_group = item.get("garment_group_name", "")
+
+    if not aid or not name:
+        return None
+
+    if not price:
+        price_str = ""
+    elif isinstance(price, str) and '£' in price:
+        price_str = price.strip()          # already formatted: "£24.76"
+    else:
+        try:
+            price_str = f"£{float(price):.2f}"
+        except (ValueError, TypeError):
+            price_str = str(price).strip()
+
+    return {
+        "article_id":    aid,
+        "name":          str(name).strip(),
+        "colour":        str(colour).strip(),
+        "price":         price_str,
+        "product_type":  str(product_type).strip(),
+        "pattern":       str(pattern).strip(),
+        "index_group":   str(index_group).strip(),
+        "section":       str(section).strip(),
+        "garment_group": str(garment_group).strip(),
+    }
+
+
+def _extract_product_refs(evidence: dict) -> list[dict]:
+    """
+    Extract product info dicts from the evidence bundle.
+    Evidence comes from PostgreSQL/Qdrant and is always accurate ground truth.
+    """
+    refs   = []
     action = evidence.get("action", "")
 
     if action == "catalog_search":
         for item in evidence.get("items", []):
-            aid  = item.get("article_id", "")
-            name = item.get("name", "")
-            if aid and name:
-                refs.append((str(aid), name))
+            ref = _item_to_ref(item)
+            if ref:
+                refs.append(ref)
 
     elif action in ("item_attribute_lookup", "item_detail_lookup",
                     "explanation_generate"):
         article = evidence.get("article") or {}
-        aid     = article.get("article_id", "")
-        name    = article.get("name", "")
-        if aid and name:
-            refs.append((str(aid), name))
+        ref = _item_to_ref(article)
+        if ref:
+            refs.append(ref)
 
     elif action == "item_compare":
         for key in ("item_a", "item_b"):
             item = evidence.get(key) or {}
-            aid  = item.get("article_id", "")
-            name = item.get("name", "")
-            if aid and name:
-                refs.append((str(aid), name))
+            ref = _item_to_ref(item)
+            if ref:
+                refs.append(ref)
 
     return refs
 
 
-# ── PostgreSQL authoritative lookup ───────────────────────────────────────────
+# ── Session Graph — node management ──────────────────────────────────────────
 
-ATTRIBUTE_TO_DB_FIELD = {
-    "avg_price":               "avg_price",
-    "colour_group_name":       "colour_group_name",
-    "product_type_name":       "product_type_name",
-    "graphical_appearance_name": "graphical_appearance_name",
-    "garment_group_name":      "garment_group_name",
-    "material":                "detail_desc",   # material in detail_desc
-    "length":                  "detail_desc",   # length in detail_desc
-}
-
-
-async def _get_authoritative_value(
-    article_id: str,
-    attribute: str
-) -> Optional[str]:
+def _update_graph_nodes(
+    graph:        nx.DiGraph,
+    product_refs: list[dict],
+    turn_id:      str,
+    session_id:   str,
+) -> None:
     """
-    Queries PostgreSQL for the authoritative value of an attribute.
-    Returns the true value as a string, or None if not found.
+    Add or update product nodes from the current turn's evidence.
+    Node values are always overwritten with the latest DB evidence — authoritative.
     """
-    article = await get_article_by_id(article_id)
-    if not article:
-        return None
+    for ref in product_refs:
+        aid = ref["article_id"]
+        if graph.has_node(aid):
+            attrs = graph.nodes[aid]
+            for field in ("name", "colour", "price", "product_type",
+                          "pattern", "index_group", "section", "garment_group"):
+                attrs[field] = ref.get(field, "")
+            attrs["turn_id"]        = turn_id
+            attrs["last_seen_turn"] = turn_id
+        else:
+            graph.add_node(aid, **{
+                "name":            ref["name"],
+                "colour":          ref["colour"],
+                "price":           ref["price"],
+                "product_type":    ref["product_type"],
+                "pattern":         ref["pattern"],
+                "index_group":     ref["index_group"],
+                "section":         ref["section"],
+                "garment_group":   ref["garment_group"],
+                "turn_id":         turn_id,
+                "first_seen_turn": turn_id,
+                "last_seen_turn":  turn_id,
+                "session_id":      session_id,
+            })
 
-    db_field = ATTRIBUTE_TO_DB_FIELD.get(attribute)
-    if not db_field:
-        return None
 
-    val = article.get(db_field)
-    if val is None:
-        return None
+# ── Groq claim extraction ─────────────────────────────────────────────────────
 
-    if attribute == "avg_price":
-        return f"£{float(val):.2f}"
+_GROQ_EXTRACT_PROMPT = """\
+You are a claim extractor for a fashion recommender system.
 
-    return str(val).strip().lower()
+Products shown in this response (with their correct database values):
+{product_list}
+
+Bot response text:
+{response_text}
+
+Extract the values the bot wrote for each product.
+IMPORTANT: Only extract a field if it is explicitly mentioned in the response text.
+If a field is not mentioned in the response, omit it from the output entirely.
+Return ONLY valid JSON with no explanation, no markdown, no extra text.
+
+Format:
+{{
+  "ARTICLE_ID": {{
+    "name": "product name as written in response",
+    "colour": "colour as written in response",
+    "price": "£XX.XX",
+    "product_type": "product type as written in response",
+    "pattern": "pattern or appearance as written in response",
+    "index_group": "index group as written in response",
+    "section": "section as written in response",
+    "garment_group": "garment group as written in response"
+  }}
+}}
+
+Only include fields that are explicitly mentioned in the response.
+If a product is not mentioned at all, omit its article_id entirely.\
+"""
 
 
-# ── NLI contradiction confirmation ────────────────────────────────────────────
+async def _extract_claims_groq(
+    response_text: str,
+    product_refs:  list[dict],
+) -> dict[str, dict]:
+    """
+    Calls Groq (llama-3.1-8b-instant) to extract what name/colour/price
+    the LLM actually wrote for each product in the response.
 
-def _confirm_contradiction_nli(
-    old_claim_text: str,
-    new_claim_text: str,
+    Returns { article_id: { "name": ..., "colour": ..., "price": ... } }
+    Returns {} on any failure — errors are logged but never propagated.
+    """
+    _SHOW_FIELDS = ("colour", "price", "product_type", "pattern",
+                    "index_group", "section", "garment_group")
+    lines = []
+    for ref in product_refs:
+        attrs = ", ".join(
+            f"{f}={ref[f]}" for f in _SHOW_FIELDS if ref.get(f)
+        )
+        lines.append(f"- {ref['article_id']}: {ref['name']}\n  [{attrs}]")
+    product_list = "\n".join(lines)
+    prompt = _GROQ_EXTRACT_PROMPT.format(
+        product_list=product_list,
+        response_text=response_text[:1500],
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}",
+                    "Content-Type":  "application/json",
+                },
+                json={
+                    "model":       "llama-3.1-8b-instant",
+                    "messages":    [{"role": "user", "content": prompt}],
+                    "max_tokens":  300,
+                    "temperature": 0.0,
+                },
+            )
+        result  = resp.json()
+        content = result["choices"][0]["message"]["content"].strip()
+        print(f"[GROQ-EXTRACT] raw: {content[:200]}")
+
+        # Strip markdown fences if Groq wrapped the JSON
+        if content.startswith("```"):
+            content = re.sub(r'^```[a-z]*\n?', '', content)
+            content = re.sub(r'\n?```$', '', content)
+            content = content.strip()
+
+        extracted = json.loads(content)
+        if not isinstance(extracted, dict):
+            print("[GROQ-EXTRACT] Warning: parsed JSON is not a dict — skipping")
+            return {}
+
+        # Ensure all keys are strings
+        extracted = {str(k): v for k, v in extracted.items()}
+        print(f"[GROQ-EXTRACT] extracted {len(extracted)} products from response")
+        return extracted
+
+    except json.JSONDecodeError as e:
+        print(f"[GROQ-EXTRACT] JSON parse failed: {e} — skipping contradiction check")
+        return {}
+    except Exception as e:
+        print(f"[GROQ-EXTRACT] Groq call failed: {e} — skipping contradiction check")
+        return {}
+
+
+# All evidence fields stored in graph nodes that Groq may extract and we check.
+# Order: most commonly mentioned first so logs are easy to read.
+_CHECKABLE_FIELDS = (
+    "colour", "price", "name",
+    "product_type", "index_group", "section", "garment_group",
+)
+
+
+# ── NLI confirmation ──────────────────────────────────────────────────────────
+
+def _confirm_with_nli(
+    node:          dict,
+    extracted_val: str,
+    attribute:     str,
 ) -> tuple[bool, float]:
     """
-    Uses NLI to confirm whether two claims contradict each other.
-    Returns (is_contradiction, contradiction_score).
+    Confirms a suspected contradiction using DeBERTa NLI.
 
-    NLI labels for cross-encoder/nli-deberta-v3-base:
-      0 = CONTRADICTION
-      1 = NEUTRAL
-      2 = ENTAILMENT
+    Premise   = factual statement built from the graph node (DB ground truth).
+    Hypothesis = what the LLM appears to have written for this attribute.
+
+    Returns (is_contradiction, contradiction_score).
+    Returns (False, 0.0) on any failure — never raises.
     """
-    nli = _get_nli()
-    scores = nli.predict([(old_claim_text, new_claim_text)])
-    contradiction_score = float(scores[0][0])
-    is_contradiction    = contradiction_score > NLI_CONTRADICTION_THRESHOLD
-    return is_contradiction, contradiction_score
+    try:
+        name   = node.get("name", "product")
+        colour = node.get("colour", "")
+        ptype  = node.get("product_type", "")
+        price  = node.get("price", "")
+
+        # Build premise from all available node fields
+        details = []
+        if colour:
+            details.append(f"is {colour}")
+        if ptype:
+            details.append(f"is a {ptype}")
+        if price:
+            details.append(f"costs {price}")
+        premise = (
+            f"The {name} " + " and ".join(details) + "."
+            if details else f"This is the {name}."
+        )
+
+        # Build hypothesis per attribute type
+        _hypotheses = {
+            "colour":        f"The {name} is {extracted_val} in colour.",
+            "price":         f"The {name} costs {extracted_val}.",
+            "name":          f"The product is called {extracted_val}.",
+            "product_type":  f"The {name} is a {extracted_val}.",
+            "pattern":       f"The {name} has a {extracted_val} pattern.",
+            "index_group":   f"The {name} is from the {extracted_val} category.",
+            "section":       f"The {name} belongs to the {extracted_val} section.",
+            "garment_group": f"The {name} is in the {extracted_val} garment group.",
+        }
+        hypothesis = _hypotheses.get(
+            attribute, f"The {name} has {attribute} = {extracted_val}."
+        )
+
+        nli    = _get_nli()
+        scores = nli.predict([(premise, hypothesis)])
+        contra_score     = float(scores[0][0])
+        is_contradiction = contra_score > _NLI_CONFIRMATION_THRESHOLD
+        return is_contradiction, contra_score
+
+    except Exception as e:
+        print(f"[NLI] Confirmation failed: {e} — treating as no contradiction")
+        return False, 0.0
 
 
 # ── Response text correction ──────────────────────────────────────────────────
 
-def _correct_response_text(
-    response_text: str,
-    wrong_claim_text: str,
-    attribute: str,
-    authoritative_value: str,
-    article_name: str,
-    wrong_value: str = "",
+def _fix_response_text(
+    response_text:  str,
+    wrong_value:    str,
+    correct_value:  str,
 ) -> str:
     """
-    Replaces all occurrences of the wrong value in the response.
-
-    Strategy:
-      1. Replace the extracted wrong claim sentence with a correction note.
-      2. Replace ALL remaining occurrences of the raw wrong value string
-         (e.g. the price "31.08") with the authoritative value.
-         This catches related sentences like "It costs £31.08" that were
-         not individually extracted as separate claims.
+    Replaces the wrong value with the correct (evidence) value in the response.
+    Tries exact match first, then case-insensitive.
     """
-    # Build correction note based on attribute type
-    if attribute == "avg_price":
-        correction_note = (
-            f"Note: {article_name} is actually priced at "
-            f"{authoritative_value} (corrected)."
-        )
-    elif attribute == "colour_group_name":
-        correction_note = (
-            f"Note: {article_name} is {authoritative_value} in colour (corrected)."
-        )
-    elif attribute == "material":
-        correction_note = (
-            f"Note: {article_name} is made from {authoritative_value} (corrected)."
-        )
-    elif attribute == "product_type_name":
-        correction_note = (
-            f"Note: {article_name} is a {authoritative_value} (corrected)."
-        )
-    else:
-        correction_note = (
-            f"Correction: the {attribute.replace('_',' ')} of "
-            f"{article_name} is {authoritative_value}."
-        )
-
     corrected = response_text
 
-    # Step 1: Replace the extracted wrong sentence with correction note
-    if wrong_claim_text and wrong_claim_text in corrected:
-        corrected = corrected.replace(wrong_claim_text, correction_note, 1)
-        corrected = corrected.replace(wrong_claim_text, "")
+    if wrong_value in corrected:
+        corrected = corrected.replace(wrong_value, correct_value)
+    else:
+        pattern   = re.compile(re.escape(wrong_value), re.IGNORECASE)
+        corrected = pattern.sub(correct_value, corrected)
 
-    # Step 2: Replace ALL remaining occurrences of the raw wrong value
-    # This catches "It costs £31.08" even if not extracted as a claim
-    if wrong_value and authoritative_value and wrong_value in corrected:
-        corrected = corrected.replace(wrong_value, authoritative_value)
-
-    # Step 3: Clean up spacing
     while "  " in corrected:
         corrected = corrected.replace("  ", " ")
-    corrected = corrected.strip()
 
-    return corrected
+    return corrected.strip()
 
 
-# ── MongoDB storage ───────────────────────────────────────────────────────────
+# ── MongoDB contradiction log ─────────────────────────────────────────────────
 
-async def _store_explanation_document(
-    session_id: str,
-    user_id: str,
-    turn_id: str,
-    response_text: str,
-    claims: list[dict],
-    article_ids: list[str],
-):
-    """
-    Stores one ExplanationDocument per bot turn in MongoDB.
-    Creates or updates the document for this turn.
-    """
+async def _log_contradiction(
+    session_id:        str,
+    turn_id:           str,
+    article_id:        str,
+    article_name:      str,
+    attribute:         str,
+    evidence_value:    str,
+    extracted_value:   str,
+    nli_score:         float,
+    collection_prefix: str = "m3",
+) -> None:
+    """Writes a contradiction event to the appropriate contradiction_log collection."""
     db = get_db()
-    doc = {
-        "session_id":        session_id,
-        "user_id":           user_id,
-        "turn_id":           turn_id,
-        "full_explanation":  response_text,
-        "claims":            claims,
-        "article_ids":       article_ids,
-        "contradiction_log": [],
-        "created_at":        datetime.now(timezone.utc).isoformat(),
-    }
-    await db.explanations.update_one(
-        {"turn_id": turn_id},
-        {"$set": doc},
-        upsert=True
-    )
-
-
-async def _load_prior_claims(
-    session_id: str,
-    article_ids: list[str],
-) -> list[dict]:
-    """
-    Loads all active claims for the given article_ids from earlier turns
-    in this session.
-    """
-    db = get_db()
-    docs = await db.explanations.find(
-        {
-            "session_id": session_id,
-            "article_ids": {"$in": article_ids},
-        }
-    ).to_list(length=50)
-
-    prior_claims = []
-    for doc in docs:
-        for claim in doc.get("claims", []):
-            if claim.get("status") == "active":
-                prior_claims.append(claim)
-
-    return prior_claims
-
-
-async def _mark_claim_contradicted(
-    session_id: str,
-    old_claim: dict,
-    new_claim_text: str,
-    nli_score: float,
-    authoritative_value: str,
-):
-    """
-    Marks an existing claim as contradicted in MongoDB and logs the event.
-    """
-    db = get_db()
-
-    # Update the claim status in the explanations collection
-    await db.explanations.update_one(
-        {
-            "session_id": session_id,
-            "claims.turn_id":   old_claim["turn_id"],
-            "claims.attribute": old_claim["attribute"],
-            "claims.article_id":old_claim["article_id"],
-        },
-        {
-            "$set": {
-                "claims.$.status":            "contradicted",
-                "claims.$.contradicted_at":   datetime.now(timezone.utc).isoformat(),
-                "claims.$.contradicted_by":   new_claim_text,
-                "claims.$.authoritative_value": authoritative_value,
-            }
-        }
-    )
-
-    # Log contradiction event in contradiction_log collection
+    coll_name = get_collection_name("contradiction_log", collection_prefix)
     entry = {
-        "session_id":           session_id,
-        "detected_at":          datetime.now(timezone.utc).isoformat(),
-        "article_id":           old_claim["article_id"],
-        "article_name":         old_claim.get("article_name", ""),
-        "attribute":            old_claim["attribute"],
-        "old_claim_text":       old_claim["claim_text"],
-        "old_value":            old_claim["value"],
-        "new_claim_text":       new_claim_text,
-        "nli_score":            nli_score,
-        "authoritative_value":  authoritative_value,
-        "resolution":           "retract_old",
-        "resolution_note":      f"PostgreSQL confirms: {authoritative_value}",
+        "session_id":      session_id,
+        "turn_id":         turn_id,
+        "detected_at":     datetime.now(timezone.utc).isoformat(),
+        "article_id":      article_id,
+        "article_name":    article_name,
+        "attribute":       attribute,
+        "evidence_value":  evidence_value,
+        "extracted_value": extracted_value,
+        "nli_score":       nli_score,
+        "resolution":      "response_corrected",
+        "member_model":    collection_prefix,
     }
-    await db.contradiction_log.insert_one(entry)
-    print(f"[ContradictionDetector] Contradiction logged: "
-          f"{old_claim['attribute']} of {old_claim.get('article_name','?')} — "
-          f"'{old_claim['value']}' vs '{new_claim_text[:50]}'")
+    try:
+        await db[coll_name].insert_one(entry)
+    except Exception as e:
+        print(f"[CONTRA] Failed to log contradiction event: {e}")
 
 
 # ── Main ContradictionDetector class ─────────────────────────────────────────
 
 class ContradictionDetector:
     """
-    Checks bot responses for cross-turn contradictions and resolves them.
+    Evidence-Anchored Session Graph Contradiction Detector.
 
-    Called after hallucination check passes in rag_pipeline.py.
-    Maintains consistent explanation history across the entire session.
+    Uses a NetworkX DiGraph as session memory. Product nodes hold the
+    authoritative evidence values from PostgreSQL/Qdrant. Groq extracts
+    what the LLM actually wrote; mismatches are confirmed by DeBERTa NLI
+    and corrected in the response before it reaches the user.
     """
 
     async def check_and_resolve(
         self,
-        response_text:   str,
-        evidence:        dict,
-        session_id:      str,
-        user_id:         str,
-        turn_id:         str,
+        response_text:     str,
+        evidence:          dict,
+        session_id:        str,
+        user_id:           str,
+        turn_id:           str,
+        collection_prefix: str = "m3",
     ) -> dict:
         """
-        Main entry point. Checks response for contradictions with prior claims,
-        corrects any found, stores all claims in MongoDB.
+        Main entry point. Called from rag_pipeline.py after hallucination check.
 
-        Args:
-            response_text: The hallucination-checked bot response
-            evidence:      Evidence bundle from EvidenceAssembler
-            session_id:    Current session ID
-            user_id:       Current user ID
-            turn_id:       Current bot turn ID
-
-        Returns structured result dict.
+        Returns same dict structure as before so rag_pipeline.py needs no changes:
+        {
+          "response_text":       str,
+          "contradiction_found": bool,
+          "contradiction_count": int,
+          "contradictions":      list,
+          "claims_stored":       int,
+          "product_ids":         list,
+          "product_names":       list,
+        }
         """
         action = evidence.get("action", "no_retrieval")
         print(f"\n[CONTRA] ━━━ check_and_resolve() called ━━━")
         print(f"[CONTRA] action={action} session={session_id[:12] if session_id else '?'} turn={turn_id}")
-        print(f"[CONTRA] response_text: {repr(response_text[:120])}")
 
         # Only check actions that make factual product claims
         if action not in {
-            "catalog_search", "item_attribute_lookup",
-            "item_compare", "explanation_generate", "item_detail_lookup"
+            "catalog_search", "item_attribute_lookup", "item_compare",
+            "explanation_generate", "item_detail_lookup",
         }:
             print(f"[CONTRA] SKIP: action={action} not factual")
             return self._no_check_result(response_text)
 
-        # Step 1: Find product references in this response
-        product_refs = _extract_product_refs(evidence)
-        if not product_refs:
+        try:
+            return await self._run_check(
+                response_text, evidence, session_id, user_id, turn_id, action,
+                collection_prefix,
+            )
+        except Exception as e:
+            print(f"[CONTRA] Unexpected error in check_and_resolve: {e}")
             return self._no_check_result(response_text)
 
-        article_ids   = [ref[0] for ref in product_refs]
-        product_names = [ref[1] for ref in product_refs]
+    async def _run_check(
+        self,
+        response_text:     str,
+        evidence:          dict,
+        session_id:        str,
+        user_id:           str,
+        turn_id:           str,
+        action:            str,
+        collection_prefix: str = "m3",
+    ) -> dict:
 
-        # Step 2: Extract atomic claims from response
-        all_new_claims = []
-        for article_id, article_name in product_refs:
-            claims = _extract_claims_from_text(
-                text=response_text,
-                article_id=article_id,
-                article_name=article_name,
-                turn_id=turn_id,
+        # ── Step 1: Extract product refs from evidence (ground truth) ────────
+        product_refs = _extract_product_refs(evidence)
+        if not product_refs:
+            print(f"[CONTRA] SKIP: no product refs in evidence")
+            return self._no_check_result(response_text)
+
+        article_ids   = [r["article_id"] for r in product_refs]
+        product_names = [r["name"]       for r in product_refs]
+
+        # ── Step 2: Load and update session graph ────────────────────────────
+        graph = await _load_graph(session_id, collection_prefix)
+        print(f"[GRAPH] nodes={graph.number_of_nodes()} edges={graph.number_of_edges()}")
+
+        _update_graph_nodes(graph, product_refs, turn_id, session_id)
+        print(f"[GRAPH] after update: nodes={graph.number_of_nodes()}")
+
+        # ── Step 3: Extract claims from LLM response via Groq ────────────────
+        extracted = await _extract_claims_groq(response_text, product_refs)
+
+        if not extracted:
+            print(f"[CONTRA] Groq returned no claims — saving graph, skipping check")
+            await _save_graph(session_id, graph, collection_prefix)
+            return self._build_result(
+                response_text, [], len(product_refs), article_ids, product_names,
             )
-            all_new_claims.extend(claims)
 
-        print(f"[CONTRA] product_refs={product_refs}")
-        print(f"[CONTRA] claims extracted: {len(all_new_claims)}")
-        for _cl in all_new_claims: print(f"  [CONTRA-CLAIM] attr={_cl['attribute']} val={_cl['value']} text='{_cl['claim_text'][:60]}'")
-        # Step 3: Load prior active claims for these articles
-        prior_claims = await _load_prior_claims(session_id, article_ids)
+        # ── Step 4: Compare extracted claims vs graph node values ────────────
+        contradictions = []
+        corrected_text = response_text
 
-        print(f"[CONTRA] prior active claims loaded: {len(prior_claims)}")
-        for _pc in prior_claims: print(f"  [CONTRA-PRIOR] attr={_pc['attribute']} val={_pc['value']} turn={_pc.get('turn_id','?')}")
-        # Step 4: Deduplicate new claims — keep only first per (article_id, attribute)
-        # This prevents double-counting when same attribute appears twice in response
-        seen_attr_keys  = set()
-        deduped_claims  = []
-        for claim in all_new_claims:
-            key = (claim["article_id"], claim["attribute"])
-            if key not in seen_attr_keys:
-                seen_attr_keys.add(key)
-                deduped_claims.append(claim)
-        all_new_claims = deduped_claims
+        for article_id, extracted_fields in extracted.items():
+            if not graph.has_node(article_id):
+                print(f"[CONTRA] {article_id} not in graph — skipping")
+                continue
 
-        print(f"[CONTRA] after dedup: {len(all_new_claims)} unique claims")
-        # Check each deduplicated new claim against prior claims
-        contradictions  = []
-        corrected_text  = response_text
-        claims_to_store = list(all_new_claims)
+            node      = graph.nodes[article_id]
+            node_name = node.get("name", "")
 
-        for new_claim in all_new_claims:
-            for prior in prior_claims:
-                # Contradiction candidate: same article, same attribute,
-                # different value
-                if (
-                    prior["article_id"] == new_claim["article_id"]
-                    and prior["attribute"] == new_claim["attribute"]
-                    and prior["value"].lower() != new_claim["value"].lower()
-                    and prior["status"] == "active"
-                ):
-                    # Step 5: Confirm with NLI
-                    is_contra, nli_score = _confirm_contradiction_nli(
-                        old_claim_text=prior["claim_text"],
-                        new_claim_text=new_claim["claim_text"],
-                    )
+            print(f"[CONTRA] checking {article_id} ({node_name})")
+            print(f"  evidence : colour={node.get('colour')!r}  "
+                  f"price={node.get('price')!r}  "
+                  f"product_type={node.get('product_type')!r}  "
+                  f"pattern={node.get('pattern')!r}")
+            print(f"  extracted: {extracted_fields}")
 
-                    if not is_contra:
-                        continue
+            for attribute in _CHECKABLE_FIELDS:
+                extracted_val = extracted_fields.get(attribute, "")
+                if not extracted_val:
+                    continue  # Groq didn't find this field mentioned — skip
 
-                    print(f"[CONTRA-DETECTED] ⚠ Article: {new_claim.get('article_name','?')} | attr={new_claim['attribute']} | old={prior['value']} vs new={new_claim['value']} NLI={nli_score:.3f}")
+                evidence_val = node.get(attribute, "")
 
-                    # Step 6: Query PostgreSQL for authoritative truth
-                    auth_value = await _get_authoritative_value(
-                        article_id=new_claim["article_id"],
-                        attribute=new_claim["attribute"],
-                    )
+                if not values_contradict(evidence_val, extracted_val):
+                    continue
 
-                    if auth_value is None:
-                        auth_value = new_claim["value"]  # trust newer claim
+                print(f"[CONTRA-CANDIDATE] {article_id} | {attribute} | "
+                      f"evidence={evidence_val!r} extracted={extracted_val!r}")
 
-                    # Step 7: Determine which claim is wrong
-                    # Compare both claims against authoritative value
-                    prior_matches = (
-                        prior["value"].lower() in (auth_value or "").lower() or
-                        (auth_value or "").lower() in prior["value"].lower()
-                    )
-                    new_matches = (
-                        new_claim["value"].lower() in (auth_value or "").lower() or
-                        (auth_value or "").lower() in new_claim["value"].lower()
-                    )
+                # ── Step 4b: NLI confirmation ─────────────────────────────
+                is_contra, nli_score = _confirm_with_nli(
+                    node=node,
+                    extracted_val=extracted_val,
+                    attribute=attribute,
+                )
 
-                    if prior_matches and not new_matches:
-                        # Prior claim is correct — new claim is wrong
-                        # Correct the current response text
-                        corrected_text = _correct_response_text(
-                            response_text=corrected_text,
-                            wrong_claim_text=new_claim["claim_text"],
-                            attribute=new_claim["attribute"],
-                            authoritative_value=auth_value,
-                            article_name=new_claim.get("article_name", "the item"),
-                            wrong_value=new_claim["value"],
-                        )
-                        # Mark new claim as contradicted before storing
-                        new_claim["status"] = "contradicted"
-                        wrong_claim   = new_claim
-                        correct_claim = prior
+                if not is_contra:
+                    print(f"[CONTRA] NLI not confirmed (score={nli_score:.3f}) — skip")
+                    continue
 
-                        # FIX 2: Also write ContradictionEntry for retract_new
-                        # The new claim is wrong — log this event to MongoDB
-                        db = get_db()
-                        entry = {
-                            "session_id":           session_id,
-                            "detected_at":          datetime.now(timezone.utc).isoformat(),
-                            "article_id":           new_claim["article_id"],
-                            "article_name":         new_claim.get("article_name", ""),
-                            "attribute":            new_claim["attribute"],
-                            "old_claim_text":       prior["claim_text"],
-                            "old_value":            prior["value"],
-                            "new_claim_text":       new_claim["claim_text"],
-                            "new_value":            new_claim["value"],
-                            "nli_score":            nli_score,
-                            "authoritative_value":  auth_value,
-                            "resolution":           "retract_new",
-                            "resolution_note":      (
-                                f"Prior claim '{prior['value']}' matches DB. "
-                                f"New claim '{new_claim['value']}' is wrong and corrected."
-                            ),
-                        }
-                        await db.contradiction_log.insert_one(entry)
-                        print(
-                            f"[ContradictionDetector] ContradictionEntry stored "
-                            f"(retract_new): {new_claim['attribute']} of "
-                            f"{new_claim.get('article_name','?')} corrected."
-                        )
+                print(f"[CONTRA-DETECTED] ⚠ {article_id} | attr={attribute} | "
+                      f"evidence={evidence_val!r} | extracted={extracted_val!r} | "
+                      f"NLI={nli_score:.3f}")
 
-                    else:
-                        # New claim is correct (or both wrong — trust DB)
-                        # Mark old claim as contradicted in MongoDB
-                        await _mark_claim_contradicted(
-                            session_id=session_id,
-                            old_claim=prior,
-                            new_claim_text=new_claim["claim_text"],
-                            nli_score=nli_score,
-                            authoritative_value=auth_value,
-                        )
-                        wrong_claim   = prior
-                        correct_claim = new_claim
+                # ── Step 4c: Fix response text ────────────────────────────
+                corrected_text = _fix_response_text(
+                    response_text=corrected_text,
+                    wrong_value=extracted_val,
+                    correct_value=evidence_val,
+                )
 
-                    contradictions.append({
-                        "article_id":          new_claim["article_id"],
-                        "article_name":        new_claim.get("article_name", ""),
-                        "attribute":           new_claim["attribute"],
-                        "old_value":           prior["value"],
-                        "new_value":           new_claim["value"],
-                        "authoritative_value": auth_value,
-                        "nli_score":           nli_score,
-                        "wrong_claim":         wrong_claim["claim_text"],
-                        "correct_claim":       correct_claim["claim_text"],
-                        "resolution":          "retract_old" if not prior_matches else "retract_new",
-                    })
+                # ── Step 4d: Add contradiction edge to graph ──────────────
+                contra_node = f"{article_id}_contra_{attribute}_{turn_id}"
+                graph.add_node(contra_node, type="contradiction_event",
+                               turn_id=turn_id)
+                graph.add_edge(
+                    article_id, contra_node,
+                    attribute=attribute,
+                    old_value=extracted_val,
+                    new_value=evidence_val,
+                    turn_id=turn_id,
+                    nli_score=nli_score,
+                )
 
-        # Step 8: Store ExplanationDocument with all new claims
-        await _store_explanation_document(
-            session_id=session_id,
-            user_id=user_id,
-            turn_id=turn_id,
-            response_text=corrected_text,
-            claims=claims_to_store,
-            article_ids=article_ids,
-        )
+                contradictions.append({
+                    "article_id":      article_id,
+                    "article_name":    node_name,
+                    "attribute":       attribute,
+                    "evidence_value":  evidence_val,
+                    "extracted_value": extracted_val,
+                    "nli_score":       nli_score,
+                    "corrected":       True,
+                })
 
-        # Step 9: Return final result
+                # ── Step 4e: Log to MongoDB ───────────────────────────────
+                await _log_contradiction(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    article_id=article_id,
+                    article_name=node_name,
+                    attribute=attribute,
+                    evidence_value=evidence_val,
+                    extracted_value=extracted_val,
+                    nli_score=nli_score,
+                    collection_prefix=collection_prefix,
+                )
+
+        # ── Step 5: Persist updated graph ────────────────────────────────────
+        await _save_graph(session_id, graph, collection_prefix)
+
         contradiction_found = len(contradictions) > 0
-        print(f"[CONTRA] ─── result: contradiction_found={contradiction_found} count={len(contradictions)} claims_stored={len(claims_to_store)}")
+        print(f"[CONTRA] result: found={contradiction_found} "
+              f"count={len(contradictions)} stored={len(product_refs)}")
+
         if contradiction_found:
             print(f"[CONTRA] corrected response: {repr(corrected_text[:200])}")
             print(f"[ContradictionDetector] {len(contradictions)} contradiction(s) resolved.")
 
-        return {
-            "response_text":       corrected_text,
-            "contradiction_found": contradiction_found,
-            "contradiction_count": len(contradictions),
-            "contradictions":      contradictions,
-            "claims_stored":       len(claims_to_store),
-            "product_ids":         article_ids,
-            "product_names":       product_names,
-        }
+        return self._build_result(
+            corrected_text, contradictions, len(product_refs),
+            article_ids, product_names,
+        )
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _no_check_result(self, response_text: str) -> dict:
-        """Returns a pass-through result for non-factual actions."""
         return {
             "response_text":       response_text,
             "contradiction_found": False,
@@ -691,4 +696,22 @@ class ContradictionDetector:
             "claims_stored":       0,
             "product_ids":         [],
             "product_names":       [],
+        }
+
+    def _build_result(
+        self,
+        response_text: str,
+        contradictions: list,
+        claims_stored:  int,
+        product_ids:    list,
+        product_names:  list,
+    ) -> dict:
+        return {
+            "response_text":       response_text,
+            "contradiction_found": len(contradictions) > 0,
+            "contradiction_count": len(contradictions),
+            "contradictions":      contradictions,
+            "claims_stored":       claims_stored,
+            "product_ids":         product_ids,
+            "product_names":       product_names,
         }
