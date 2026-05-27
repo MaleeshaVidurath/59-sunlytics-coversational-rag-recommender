@@ -265,24 +265,12 @@ _FEEDBACK_ANCHORS = {
 def _classify_feedback_sentiment(message: str) -> float:
     """
     Returns a sentiment score on [-1.0, 1.0] for a feedback message.
-    Hybrid keyword → vector similarity.
+    Delegates to the Twitter-RoBERTa domain-adapted classifier
+    (Barbieri et al., EMNLP 2020). See: feedback_sentiment_classifier.py.
     """
-    msg = message.lower().strip()
-
-    # Step 1: keyword matching
-    for bucket, keywords in _FEEDBACK_KEYWORDS.items():
-        if any(kw in msg for kw in keywords):
-            return _FEEDBACK_SCORES[bucket]
-
-    # Step 2: vector similarity fallback
-    buckets = list(_FEEDBACK_ANCHORS.keys())
-    anchor_sentences = list(_FEEDBACK_ANCHORS.values())
-    best_bucket, score = _best_match(message, anchor_sentences)
-    if score > 0.35:
-        return _FEEDBACK_SCORES[buckets[anchor_sentences.index(best_bucket)]]
-
-    # Default: mild positive (ambiguous messages lean positive)
-    return 0.3
+    from memory.core.feedback_sentiment_classifier import classify_feedback
+    _, score = classify_feedback(message)
+    return score
 
 
 # ── Price ceiling resolver for "cheaper than X" refinements ─────────────────
@@ -1223,16 +1211,25 @@ class EnrichmentLayer:
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
         print(f"[ENRICH-FEEDBACK] ━━━ called msg='{current_message[:50]}' entities={entities}")
-        """FEEDBACK → no retrieval. Updates memory based on sentiment."""
+        """FEEDBACK — updates memory from sentiment; triggers new search if negative+items."""
+        from memory.core.feedback_sentiment_classifier import classify_feedback
+
         db = get_db()
         side_effects = []
 
         current_items = state.currently_discussing
-        item_a = current_items.get("item_a")
+        item_a        = current_items.get("item_a")
+        # All items shown in the last turn — needed so "I don't like them"
+        # excludes every recommended article, not just item_a.
+        all_ctx_items = [
+            v for k, v in sorted(current_items.items())
+            if k.startswith("item_") and v is not None
+        ]
 
-        # Classify sentiment using hybrid keyword + vector similarity
-        sentiment_score = _classify_feedback_sentiment(current_message)
-        is_positive     = sentiment_score > 0.0
+        # Classify sentiment using Twitter-RoBERTa (Barbieri et al., EMNLP 2020)
+        sentiment_label, sentiment_score = classify_feedback(current_message)
+        is_positive = sentiment_score > 0.0
+        is_negative = sentiment_label == "negative"
 
         if item_a:
             item_entities = {
@@ -1252,12 +1249,12 @@ class EnrichmentLayer:
                 confidence=0.80
             )
             side_effects.append(
-                f"Preferences updated from feedback "
-                f"({'positive' if is_positive else 'negative'}): "
+                f"Preferences updated from feedback ({sentiment_label}): "
                 f"{list(item_entities.keys())}"
             )
 
-            if is_positive:
+            # Branch strictly on label — neutral makes NO state changes
+            if sentiment_label == "positive":
                 updated_accepted = state.accepted_items + [item_a.article_id]
                 await self.session_mgr.update_dialogue_state(
                     session_id, {"accepted_items": updated_accepted}
@@ -1274,47 +1271,98 @@ class EnrichmentLayer:
                         }
                     )
                     side_effects.append("Purchase summary updated")
-            else:
-                updated_rejected = state.rejected_items + [item_a.article_id]
+
+                await db.recommendations.update_one(
+                    {"session_id": session_id, "items.article_id": item_a.article_id, "outcome": "pending"},
+                    {"$set": {"outcome": "accepted"}}
+                )
+                side_effects.append("Recommendation outcome: accepted")
+
+            elif sentiment_label == "negative":
+                new_rejected = [
+                    it.article_id for it in all_ctx_items
+                    if it.article_id not in state.rejected_items
+                ]
+                updated_rejected = state.rejected_items + new_rejected
                 await self.session_mgr.update_dialogue_state(
                     session_id, {"rejected_items": updated_rejected}
                 )
-                side_effects.append(f"Added {item_a.article_id} to rejected_items")
+                for rid in new_rejected:
+                    side_effects.append(f"Added {rid} to rejected_items")
+                    await db.recommendations.update_one(
+                        {"session_id": session_id, "items.article_id": rid, "outcome": "pending"},
+                        {"$set": {"outcome": "rejected"}}
+                    )
+                side_effects.append("Recommendation outcome: rejected")
 
-            await db.recommendations.update_one(
-                {
-                    "session_id": session_id,
-                    "items.article_id": item_a.article_id,
-                    "outcome": "pending"
-                },
-                {
-                    "$set": {
-                        "outcome": "accepted" if is_positive else "rejected"
-                    }
-                }
-            )
-            side_effects.append(
-                f"Recommendation outcome: {'accepted' if is_positive else 'rejected'}"
-            )
+            # neutral → no accepted/rejected changes, item stays as pending
 
         memory_ctx = await self._base_memory_context(
             user_id, state, include_preferences=False
         )
         memory_ctx["feedback"] = {
             "sentiment_score": sentiment_score,
+            "sentiment_label": sentiment_label,
             "is_positive":     is_positive,
-            "feedback_type": (
-                "positive" if sentiment_score > 0.3
-                else "negative" if sentiment_score < -0.3
-                else "neutral"
-            ),
+            "feedback_type":   sentiment_label,
             "item_reacted_to": item_a.model_dump() if item_a else None,
         }
+
+        # ── Negative sentiment + items in context → new catalog search ────────
+        # User implicitly requests alternatives to the rejected item.
+        # Exclude the rejected item and any previously rejected items.
+        if is_negative and all_ctx_items:
+            pref_summary = await self.user_mgr.get_preference_summary(user_id)
+            excluded_ids = list(set(
+                [it.article_id for it in all_ctx_items] + state.rejected_items
+            ))
+            side_effects.append(
+                f"FEEDBACK-negative: triggering new catalog search, "
+                f"excluding {len(excluded_ids)} item(s): {excluded_ids}"
+            )
+            print(f"[ENRICH-FEEDBACK] Negative — new search with exclusions: {excluded_ids}")
+            return {
+                "label":              "FEEDBACK",
+                "retrieval_strategy": "FULL",
+                "retrieval_input": self._make_retrieval_input(
+                    action="catalog_search",
+                    retrieval_strategy="FULL",
+                    user_message=current_message,
+                    item_a=item_a,
+                    item_b=None,
+                    exclude_ids=excluded_ids,
+                    payload={
+                        "filters":          state.hard_constraints,
+                        "soft_constraints": {
+                            k: v for k, v in state.soft_constraints.items()
+                            if v is not None
+                        },
+                        "preference_boosts": [
+                            {
+                                "attribute": p["attribute_name"],
+                                "value":     p["attribute_value"],
+                                "weight":    p["weight"],
+                            }
+                            for p in pref_summary.get("liked_attributes", [])
+                            if p["weight"] > 0.3
+                        ],
+                        "purchase_history_hints": await self._get_purchase_hints(user_id),
+                        "penalties":             pref_summary.get("disliked_values", {}),
+                        "feedback_context": {
+                            "sentiment":      sentiment_label,
+                            "score":          sentiment_score,
+                            "rejected_items": [it.article_id for it in all_ctx_items],
+                        },
+                    },
+                ),
+                "memory_context": memory_ctx,
+                "side_effects":   side_effects,
+            }
 
         return {
             "label":              "FEEDBACK",
             "retrieval_strategy": "NO",
-            "retrieval_input":    None,   # no retrieval for feedback
+            "retrieval_input":    None,
             "memory_context":     memory_ctx,
             "side_effects":       side_effects,
         }

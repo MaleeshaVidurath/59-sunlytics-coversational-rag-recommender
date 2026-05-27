@@ -21,6 +21,9 @@ m3_implementation/adaptive_rag/distilbert_training/*.csv
 # AI Model Cache (BLIP + CLIP weights for M2)
 huggingface_cache/
 m2_multimodal_rag/models/
+
+# Trained sentiment classifier (DistilBERT fine-tuned on SemEval 2017)
+m3_implementation/memory/models/sentiment_classifier/
 # OS
 .DS_Store
 Thumbs.db

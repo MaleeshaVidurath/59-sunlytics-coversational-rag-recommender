@@ -171,7 +171,7 @@ class ContextSufficiencyEvaluator:
         # ── Route to the correct evaluator based on label group ────────────
 
         if label in ("CHITCHAT", "FEEDBACK"):
-            result = self._eval_dialogue(label, prior_strategy)
+            result = self._eval_dialogue(label, prior_strategy, message, dialogue_state)
 
         elif label == "INITIAL_REQUEST":
             result = await self._eval_initial_request(
@@ -212,32 +212,172 @@ class ContextSufficiencyEvaluator:
     # Label-group evaluators
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _eval_dialogue(self, label: str, prior_strategy: str) -> SufficiencyResult:
+    def _eval_dialogue(
+        self,
+        label:          str,
+        prior_strategy: str,
+        message:        str = "",
+        dialogue_state: dict = None,
+    ) -> SufficiencyResult:
         """
-        CHITCHAT / FEEDBACK — pure dialogue management, no retrieval needed.
-        LLM answers entirely from parametric knowledge (greeting, acknowledge,
-        sentiment reaction). I(A;K|q,C) ≈ 0 — catalog adds nothing.
+        CHITCHAT / FEEDBACK — dialogue management turns.
+
+        CHITCHAT:
+            LLM answers entirely from parametric knowledge.
+            I(A;K|q,C) = 0 — catalog adds nothing.
+            All D-dimensions = 1.0 → S = 1.0 [Joren2025].
+
+        FEEDBACK (sentiment-driven via Twitter-RoBERTa, Barbieri et al. EMNLP 2020):
+            positive  → tier=NO  (user satisfied; LLM acknowledges)
+            neutral   → tier=NO  (no preference change expressed)
+            negative + items in context → tier=FULL/FULL_WITH_EXCLUSIONS
+                        (user implicitly requests alternatives; reject item excluded)
+            negative + no items → tier=NO (cannot improve without context items)
         """
-        score = 0.95 if label == "CHITCHAT" else 0.90
-        print(f"[CSE-DIALOGUE] label={label}  score={score}  → tier=NO  (no retrieval needed)")
+        # ── CHITCHAT ──────────────────────────────────────────────────────────
+        if label == "CHITCHAT":
+            d_items = d_recency = d_completeness = 1.0
+            score   = 0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness
+            print(f"[CSE-DIALOGUE] CHITCHAT → tier=NO  S={score:.3f}")
+            return SufficiencyResult(
+                tier="NO",
+                score=score,
+                label=label,
+                prior_strategy=prior_strategy,
+                override=(prior_strategy != "NO"),
+                full_subtype=None,
+                partial_subtype=None,
+                excluded_ids=[],
+                d_self_sufficient=1.0,
+                d_items_available=d_items,
+                d_info_recency=d_recency,
+                d_info_completeness=d_completeness,
+                rationale=(
+                    f"CHITCHAT → NO retrieval. S={score:.3f}. "
+                    f"Pure dialogue turn — LLM answers from parametric knowledge. "
+                    f"I(A;K|q,C)=0: catalog adds no information. "
+                    f"All D-dimensions=1.0. [Joren2025: Sufficient(q,∅,param)=1]"
+                ),
+            )
+
+        # ── FEEDBACK ──────────────────────────────────────────────────────────
+        try:
+            from memory.core.feedback_sentiment_classifier import classify_feedback
+            sentiment_label, sentiment_score = classify_feedback(message)
+        except Exception as _e:
+            print(f"[CSE-DIALOGUE] classify_feedback error: {_e} — defaulting to neutral")
+            sentiment_label, sentiment_score = "neutral", 0.0
+
+        ds         = dialogue_state or {}
+        discussing = ds.get("currently_discussing") or {}
+        # Collect ALL items shown in this turn (item_a … item_d), not just item_a.
+        # "I don't like them" rejects the whole set, so every shown id must be excluded.
+        all_items  = [
+            v for k, v in sorted(discussing.items())
+            if k.startswith("item_") and v is not None
+        ]
+        item_a = discussing.get("item_a")
+
+        # positive ─────────────────────────────────────────────────────────────
+        if sentiment_label == "positive":
+            d_items = d_recency = d_completeness = 1.0
+            score   = 0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness
+            print(f"[CSE-DIALOGUE] FEEDBACK positive (sent={sentiment_score:+.3f}) → tier=NO  S={score:.3f}")
+            return SufficiencyResult(
+                tier="NO", score=score, label=label,
+                prior_strategy=prior_strategy,
+                override=(prior_strategy != "NO"),
+                full_subtype=None, partial_subtype=None, excluded_ids=[],
+                d_self_sufficient=1.0,
+                d_items_available=d_items,
+                d_info_recency=d_recency,
+                d_info_completeness=d_completeness,
+                rationale=(
+                    f"FEEDBACK positive (sentiment={sentiment_score:+.3f}) → NO retrieval. "
+                    f"S={score:.3f}. User is satisfied — LLM acknowledges from parametric "
+                    f"knowledge. [Barbieri2020 TweetEval RoBERTa: {sentiment_label}]"
+                ),
+            )
+
+        # neutral ──────────────────────────────────────────────────────────────
+        if sentiment_label == "neutral":
+            d_items = d_recency = d_completeness = 0.9
+            score   = 0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness
+            print(f"[CSE-DIALOGUE] FEEDBACK neutral (sent={sentiment_score:+.3f}) → tier=NO  S={score:.3f}")
+            return SufficiencyResult(
+                tier="NO", score=score, label=label,
+                prior_strategy=prior_strategy,
+                override=(prior_strategy != "NO"),
+                full_subtype=None, partial_subtype=None, excluded_ids=[],
+                d_self_sufficient=0.9,
+                d_items_available=d_items,
+                d_info_recency=d_recency,
+                d_info_completeness=d_completeness,
+                rationale=(
+                    f"FEEDBACK neutral (sentiment={sentiment_score:+.3f}) → NO retrieval. "
+                    f"S={score:.3f}. No clear preference change — LLM acknowledges. "
+                    f"[Barbieri2020 TweetEval RoBERTa: {sentiment_label}]"
+                ),
+            )
+
+        # negative + items in context → new search with exclusions ─────────────
+        if all_items:
+            excluded_ids = []
+            for _it in all_items:
+                _aid = (
+                    _it.get("article_id") if isinstance(_it, dict)
+                    else getattr(_it, "article_id", None)
+                )
+                if _aid and str(_aid) not in excluded_ids:
+                    excluded_ids.append(str(_aid))
+            d_items = d_recency = 1.0
+            d_completeness = 0.70   # constraints known; user wants different items
+            score = 0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness
+            print(
+                f"[CSE-DIALOGUE] FEEDBACK negative+items (sent={sentiment_score:+.3f}) "
+                f"→ tier=FULL  excluded={excluded_ids}  S={score:.3f}"
+            )
+            return SufficiencyResult(
+                tier="FULL",
+                score=score,
+                label=label,
+                prior_strategy=prior_strategy,
+                override=True,
+                full_subtype="FULL_WITH_EXCLUSIONS",
+                partial_subtype=None,
+                excluded_ids=excluded_ids,
+                d_self_sufficient=0.2,
+                d_items_available=d_items,
+                d_info_recency=d_recency,
+                d_info_completeness=d_completeness,
+                rationale=(
+                    f"FEEDBACK negative (sentiment={sentiment_score:+.3f}) + items in context "
+                    f"→ FULL_WITH_EXCLUSIONS (tier overridden). S={score:.3f}. "
+                    f"User implicitly requests alternatives; excluded={excluded_ids}. "
+                    f"[Barbieri2020 TweetEval; Adaptive-RAG Jeong2024]"
+                ),
+            )
+
+        # negative + no items — cannot improve without context ─────────────────
+        d_items = d_recency = d_completeness = 0.0
+        score = 0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness
+        print(
+            f"[CSE-DIALOGUE] FEEDBACK negative+no-items (sent={sentiment_score:+.3f}) "
+            f"→ tier=NO  S={score:.3f}"
+        )
         return SufficiencyResult(
-            tier="NO",
-            score=score,
-            label=label,
+            tier="NO", score=score, label=label,
             prior_strategy=prior_strategy,
             override=(prior_strategy != "NO"),
-            full_subtype=None,
-            partial_subtype=None,
-            excluded_ids=[],
-            d_self_sufficient=1.0,
-            d_items_available=1.0,
-            d_info_recency=1.0,
-            d_info_completeness=1.0,
+            full_subtype=None, partial_subtype=None, excluded_ids=[],
+            d_self_sufficient=0.5,
+            d_items_available=d_items,
+            d_info_recency=d_recency,
+            d_info_completeness=d_completeness,
             rationale=(
-                f"{label} → NO retrieval. S={score:.3f}. "
-                f"Pure dialogue turn — LLM answers from parametric knowledge. "
-                f"I(A;K|q,C)≈0: catalog adds no information. "
-                f"[Joren2025: Sufficient(q,∅,param)=1]"
+                f"FEEDBACK negative (sentiment={sentiment_score:+.3f}) but no items in context. "
+                f"S={score:.3f}. Cannot trigger exclusion-based search without context items. "
+                f"LLM responds with acknowledgment. [Barbieri2020 TweetEval]"
             ),
         )
 
