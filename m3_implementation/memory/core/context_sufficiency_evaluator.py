@@ -236,8 +236,11 @@ class ContextSufficiencyEvaluator:
         """
         # ── CHITCHAT ──────────────────────────────────────────────────────────
         if label == "CHITCHAT":
-            d_items = d_recency = d_completeness = 1.0
-            score   = 0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness
+            # Score = d_self_sufficient directly. Retrieval dimensions are 0.0
+            # because catalog items add nothing to a pure dialogue turn.
+            # I(A;K|q,C)=0 [Joren2025]: parametric knowledge is fully sufficient.
+            d_self = 1.0
+            score  = d_self
             print(f"[CSE-DIALOGUE] CHITCHAT → tier=NO  S={score:.3f}")
             return SufficiencyResult(
                 tier="NO",
@@ -248,15 +251,15 @@ class ContextSufficiencyEvaluator:
                 full_subtype=None,
                 partial_subtype=None,
                 excluded_ids=[],
-                d_self_sufficient=1.0,
-                d_items_available=d_items,
-                d_info_recency=d_recency,
-                d_info_completeness=d_completeness,
+                d_self_sufficient=d_self,
+                d_items_available=0.0,
+                d_info_recency=0.0,
+                d_info_completeness=0.0,
                 rationale=(
                     f"CHITCHAT → NO retrieval. S={score:.3f}. "
                     f"Pure dialogue turn — LLM answers from parametric knowledge. "
-                    f"I(A;K|q,C)=0: catalog adds no information. "
-                    f"All D-dimensions=1.0. [Joren2025: Sufficient(q,∅,param)=1]"
+                    f"D_self=1.0; retrieval dimensions irrelevant (set to 0). "
+                    f"[Joren2025: Sufficient(q,∅,param)=1; I(A;K|q,C)=0]"
                 ),
             )
 
@@ -280,42 +283,48 @@ class ContextSufficiencyEvaluator:
 
         # positive ─────────────────────────────────────────────────────────────
         if sentiment_label == "positive":
-            d_items = d_recency = d_completeness = 1.0
-            score   = 0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness
+            # Score = d_self_sufficient. User is satisfied; LLM acknowledges
+            # from parametric knowledge. Retrieval dimensions irrelevant (0.0).
+            d_self = 1.0
+            score  = d_self
             print(f"[CSE-DIALOGUE] FEEDBACK positive (sent={sentiment_score:+.3f}) → tier=NO  S={score:.3f}")
             return SufficiencyResult(
                 tier="NO", score=score, label=label,
                 prior_strategy=prior_strategy,
                 override=(prior_strategy != "NO"),
                 full_subtype=None, partial_subtype=None, excluded_ids=[],
-                d_self_sufficient=1.0,
-                d_items_available=d_items,
-                d_info_recency=d_recency,
-                d_info_completeness=d_completeness,
+                d_self_sufficient=d_self,
+                d_items_available=0.0,
+                d_info_recency=0.0,
+                d_info_completeness=0.0,
                 rationale=(
                     f"FEEDBACK positive (sentiment={sentiment_score:+.3f}) → NO retrieval. "
-                    f"S={score:.3f}. User is satisfied — LLM acknowledges from parametric "
-                    f"knowledge. [Barbieri2020 TweetEval RoBERTa: {sentiment_label}]"
+                    f"S={score:.3f}. User satisfied — LLM acknowledges from parametric knowledge. "
+                    f"D_self=1.0; retrieval dimensions irrelevant (set to 0). "
+                    f"[Barbieri2020 TweetEval RoBERTa: {sentiment_label}]"
                 ),
             )
 
         # neutral ──────────────────────────────────────────────────────────────
         if sentiment_label == "neutral":
-            d_items = d_recency = d_completeness = 0.9
-            score   = 0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness
+            # Score = d_self_sufficient = 0.9. No clear preference expressed;
+            # LLM acknowledges with slight uncertainty. Retrieval dimensions 0.0.
+            d_self = 0.9
+            score  = d_self
             print(f"[CSE-DIALOGUE] FEEDBACK neutral (sent={sentiment_score:+.3f}) → tier=NO  S={score:.3f}")
             return SufficiencyResult(
                 tier="NO", score=score, label=label,
                 prior_strategy=prior_strategy,
                 override=(prior_strategy != "NO"),
                 full_subtype=None, partial_subtype=None, excluded_ids=[],
-                d_self_sufficient=0.9,
-                d_items_available=d_items,
-                d_info_recency=d_recency,
-                d_info_completeness=d_completeness,
+                d_self_sufficient=d_self,
+                d_items_available=0.0,
+                d_info_recency=0.0,
+                d_info_completeness=0.0,
                 rationale=(
                     f"FEEDBACK neutral (sentiment={sentiment_score:+.3f}) → NO retrieval. "
-                    f"S={score:.3f}. No clear preference change — LLM acknowledges. "
+                    f"S={score:.3f}. No clear preference expressed — LLM acknowledges with uncertainty. "
+                    f"D_self=0.9; retrieval dimensions irrelevant (set to 0). "
                     f"[Barbieri2020 TweetEval RoBERTa: {sentiment_label}]"
                 ),
             )
@@ -366,10 +375,14 @@ class ContextSufficiencyEvaluator:
             f"→ tier=NO  S={score:.3f}"
         )
         return SufficiencyResult(
-            tier="NO", score=score, label=label,
+            tier="NO", 
+            score=score, 
+            label=label,
             prior_strategy=prior_strategy,
             override=(prior_strategy != "NO"),
-            full_subtype=None, partial_subtype=None, excluded_ids=[],
+            full_subtype=None, 
+            partial_subtype=None, 
+            excluded_ids=[],
             d_self_sufficient=0.5,
             d_items_available=d_items,
             d_info_recency=d_recency,
