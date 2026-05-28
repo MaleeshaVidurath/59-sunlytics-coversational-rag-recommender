@@ -188,6 +188,8 @@ class TurnClassification(BaseModel):
     retrieval_strategy: str  # "FULL", "PARTIAL", or "NO"
     confidence: float
     used_rules: bool = False # True if the rule-based fallback was used
+    full_subtype: Optional[str] = None    # e.g. "FULL_FRESH", "FULL_WITH_EXCLUSIONS"
+    partial_subtype: Optional[str] = None # e.g. "CACHED_RESULT", "PARTIAL_CONTEXT_LOOKUP"
 
 
 # ─── 8. Conversation Turn ─────────────────────────────────────────────────────

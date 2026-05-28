@@ -237,7 +237,6 @@ class ContextSufficiencyEvaluator:
             v for k, v in sorted(discussing.items())
             if k.startswith("item_") and v is not None
         ]
-        item_a = discussing.get("item_a")
 
         # positive ─────────────────────────────────────────────────────────────
         if sentiment_label == "positive":
