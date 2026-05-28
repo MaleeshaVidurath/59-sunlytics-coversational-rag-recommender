@@ -467,8 +467,7 @@ class MemoryPipeline:
         _prior_strategy = retrieval_strategy
         retrieval_strategy = _cse_result.tier
 
-        print(f"[CSE] score={_cse_result.score:.4f} "
-              f"tier={_cse_result.tier} override={_cse_result.override} "
+        print(f"[CSE] tier={_cse_result.tier} override={_cse_result.override} "
               f"full_sub={_cse_result.full_subtype} partial_sub={_cse_result.partial_subtype}")
         if _cse_result.override:
             print(f"[CSE] *** STRATEGY OVERRIDE: "
@@ -579,21 +578,15 @@ class MemoryPipeline:
             # Always present, may be empty list
             "side_effects": enriched.get("side_effects", []),
 
-            # Context Sufficiency Evaluation result — scientific tier justification
-            # Dimensions: D_self D_items D_recency D_completeness
+            # Context Sufficiency Evaluation result — tier routing decision
             "cse": {
-                "score":               _cse_result.score,
-                "tier":                _cse_result.tier,
-                "prior_strategy":      _cse_result.prior_strategy,
-                "override":            _cse_result.override,
-                "full_subtype":        _cse_result.full_subtype,
-                "partial_subtype":     _cse_result.partial_subtype,
-                "excluded_ids":        _cse_result.excluded_ids,
-                "d_self_sufficient":   _cse_result.d_self_sufficient,
-                "d_items_available":   _cse_result.d_items_available,
-                "d_info_recency":      _cse_result.d_info_recency,
-                "d_info_completeness": _cse_result.d_info_completeness,
-                "rationale":           _cse_result.rationale,
+                "tier":           _cse_result.tier,
+                "prior_strategy": _cse_result.prior_strategy,
+                "override":       _cse_result.override,
+                "full_subtype":   _cse_result.full_subtype,
+                "partial_subtype":_cse_result.partial_subtype,
+                "excluded_ids":   _cse_result.excluded_ids,
+                "rationale":      _cse_result.rationale,
             },
             "_debug_enriched": enriched,  # temp debug key
 
@@ -969,11 +962,9 @@ class MemoryPipeline:
                 "side_effects":     ["User kept existing recommendations"],
                 "classifier_input": classifier_input,
                 "cse": {
-                    "score": 0.95, "tier": "NO", "override": False,
+                    "tier": "NO", "override": False,
                     "full_subtype": None, "partial_subtype": None,
-                    "excluded_ids": [], "d_self_sufficient": 1.0,
-                    "d_items_available": 1.0, "d_info_recency": 1.0,
-                    "d_info_completeness": 1.0, "rationale": "User declined new recommendations.",
+                    "excluded_ids": [], "rationale": "User declined new recommendations.",
                 },
             }
 
@@ -1025,11 +1016,9 @@ class MemoryPipeline:
             "side_effects":     enriched.get("side_effects", []) + ["New recommendations requested by user"],
             "classifier_input": classifier_input,
             "cse": {
-                "score": 0.10, "tier": "FULL", "override": False,
+                "tier": "FULL", "override": False,
                 "full_subtype": "FULL_WITH_EXCLUSIONS", "partial_subtype": None,
                 "excluded_ids": pending_excluded_ids,
-                "d_self_sufficient": 0.0, "d_items_available": 0.0,
-                "d_info_recency": 0.0, "d_info_completeness": 0.0,
                 "rationale": "User explicitly requested new recommendations — FULL retrieval with prior exclusions.",
             },
         }

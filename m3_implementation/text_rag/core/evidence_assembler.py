@@ -352,7 +352,7 @@ class EvidenceAssembler:
         # Map attribute_topic to specific fields
         attribute_field_map = {
             "material_and_care":  ["detail_desc"],
-            "colour_group_name":  ["colour_group_name", "graphical_appearance_name",
+            "colour":             ["colour_group_name", "graphical_appearance_name",
                                    "perceived_colour_master_name"],
             "sizing_and_fit":     ["detail_desc", "product_type_name"],
             "design_details":     ["detail_desc", "graphical_appearance_name",
@@ -449,25 +449,8 @@ class EvidenceAssembler:
         if items_all and dimension == "price":
             items_all.sort(key=lambda x: float(x.get("avg_price") or 9999))
 
-        # Build dimension-specific comparison facts
-        comparison_facts = _build_comparison_facts(item_a, item_b, dimension)
-
-        # For multi-item price comparison, override with full ranked list
-        if items_all and dimension == "price":
-            comparison_facts["all_items_ranked"] = [
-                {
-                    "name":   a.get("prod_name", ""),
-                    "colour": a.get("colour_group_name", ""),
-                    "price":  _format_price(a.get("avg_price")),
-                }
-                for a in items_all
-            ]
-            if items_all:
-                cheapest = items_all[0]
-                comparison_facts["cheaper_item"] = (
-                    f"{cheapest.get('prod_name','')} ({cheapest.get('colour_group_name','')})"
-                )
-                comparison_facts["cheapest_price"] = _format_price(cheapest.get("avg_price"))
+        # Build dimension-specific comparison facts (handles all items when >2)
+        comparison_facts = _build_comparison_facts(item_a, item_b, dimension, items_all)
 
         return {
             "action":            "item_compare",
@@ -666,62 +649,135 @@ class EvidenceAssembler:
 def _build_comparison_facts(
     item_a: Optional[dict],
     item_b: Optional[dict],
-    dimension: str
+    dimension: str,
+    items_all: Optional[list] = None,
 ) -> dict:
     """
-    Builds dimension-specific comparison facts from two articles.
-    Only includes verifiable facts from the data — no inference.
+    Builds dimension-specific comparison facts.
+    When items_all has >2 entries, builds an all_items list covering every item
+    so the LLM can compare across the full set, not just item_a vs item_b.
     """
     if not item_a or not item_b:
         return {}
 
     facts = {
-        "item_a_name":  item_a.get("prod_name", "Item A"),
-        "item_b_name":  item_b.get("prod_name", "Item B"),
+        "item_a_name": item_a.get("prod_name", "Item A"),
+        "item_b_name": item_b.get("prod_name", "Item B"),
     }
 
+    use_all = bool(items_all and len(items_all) > 2)
+
     if dimension == "price":
-        price_a = item_a.get("avg_price")
-        price_b = item_b.get("avg_price")
-        if price_a is not None and price_b is not None:
-            facts["item_a_price"] = _format_price(price_a)
-            facts["item_b_price"] = _format_price(price_b)
-            if float(price_a) < float(price_b):
-                facts["cheaper_item"] = item_a.get("prod_name")
-                facts["price_difference"] = f"£{abs(float(price_a)-float(price_b)):.2f}"
-            elif float(price_b) < float(price_a):
-                facts["cheaper_item"] = item_b.get("prod_name")
-                facts["price_difference"] = f"£{abs(float(price_a)-float(price_b)):.2f}"
-            else:
-                facts["same_price"] = True
-
+        _build_price_facts(facts, item_a, item_b, items_all if use_all else None)
     elif dimension == "colour":
-        facts["item_a_colour"] = item_a.get("colour_group_name", "")
-        facts["item_b_colour"] = item_b.get("colour_group_name", "")
-        facts["item_a_pattern"]= item_a.get("graphical_appearance_name", "")
-        facts["item_b_pattern"]= item_b.get("graphical_appearance_name", "")
-
+        _build_colour_facts(facts, item_a, item_b, items_all if use_all else None)
     elif dimension == "material":
+        _build_material_facts(facts, item_a, item_b, items_all if use_all else None)
+    elif dimension == "style_and_occasion":
+        _build_style_facts(facts, item_a, item_b, items_all if use_all else None)
+    else:
+        _build_overall_facts(facts, item_a, item_b, items_all if use_all else None)
+
+    return facts
+
+
+def _build_price_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optional[list]) -> None:
+    if items_all:
+        sorted_items = sorted(items_all, key=lambda x: float(x.get("avg_price") or 9999))
+        cheapest = sorted_items[0]
+        facts["all_items_ranked"] = [
+            {"name": a.get("prod_name", ""), "colour": a.get("colour_group_name", ""), "price": _format_price(a.get("avg_price"))}
+            for a in sorted_items
+        ]
+        facts["cheaper_item"]   = f"{cheapest.get('prod_name','')} ({cheapest.get('colour_group_name','')})"
+        facts["cheapest_price"] = _format_price(cheapest.get("avg_price"))
+        return
+
+    price_a = item_a.get("avg_price")
+    price_b = item_b.get("avg_price")
+    if price_a is None or price_b is None:
+        return
+
+    pa, pb = float(price_a), float(price_b)
+    facts["item_a_price"] = _format_price(price_a)
+    facts["item_b_price"] = _format_price(price_b)
+    if pa == pb:
+        facts["same_price"] = True
+    else:
+        facts["cheaper_item"]     = item_a.get("prod_name") if pa < pb else item_b.get("prod_name")
+        facts["price_difference"] = f"£{abs(pa - pb):.2f}"
+
+
+def _build_colour_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optional[list]) -> None:
+    if items_all:
+        facts["all_items"] = [
+            {
+                "name":    a.get("prod_name", ""),
+                "colour":  a.get("colour_group_name", ""),
+                "pattern": a.get("graphical_appearance_name", ""),
+            }
+            for a in items_all
+        ]
+    else:
+        facts["item_a_colour"]  = item_a.get("colour_group_name", "")
+        facts["item_b_colour"]  = item_b.get("colour_group_name", "")
+        facts["item_a_pattern"] = item_a.get("graphical_appearance_name", "")
+        facts["item_b_pattern"] = item_b.get("graphical_appearance_name", "")
+
+
+def _build_material_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optional[list]) -> None:
+    if items_all:
+        facts["all_items"] = [
+            {
+                "name":        a.get("prod_name", ""),
+                "description": a.get("detail_desc", "")[:200],
+            }
+            for a in items_all
+        ]
+    else:
         facts["item_a_description"] = item_a.get("detail_desc", "")[:200]
         facts["item_b_description"] = item_b.get("detail_desc", "")[:200]
 
-    elif dimension == "style_and_occasion":
-        facts["item_a_section"]  = item_a.get("section_name", "")
-        facts["item_b_section"]  = item_b.get("section_name", "")
-        facts["item_a_garment"]  = item_a.get("garment_group_name", "")
-        facts["item_b_garment"]  = item_b.get("garment_group_name", "")
+
+def _build_style_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optional[list]) -> None:
+    if items_all:
+        facts["all_items"] = [
+            {
+                "name":    a.get("prod_name", ""),
+                "section": a.get("section_name", ""),
+                "garment": a.get("garment_group_name", ""),
+                "desc":    a.get("detail_desc", "")[:150],
+            }
+            for a in items_all
+        ]
+    else:
+        facts["item_a_section"]    = item_a.get("section_name", "")
+        facts["item_b_section"]    = item_b.get("section_name", "")
+        facts["item_a_garment"]    = item_a.get("garment_group_name", "")
+        facts["item_b_garment"]    = item_b.get("garment_group_name", "")
         facts["item_a_desc_short"] = item_a.get("detail_desc", "")[:150]
         facts["item_b_desc_short"] = item_b.get("detail_desc", "")[:150]
 
-    else:  # overall or fit or quality
-        facts["item_a_price"]   = _format_price(item_a.get("avg_price"))
-        facts["item_b_price"]   = _format_price(item_b.get("avg_price"))
-        facts["item_a_colour"]  = item_a.get("colour_group_name", "")
-        facts["item_b_colour"]  = item_b.get("colour_group_name", "")
-        facts["item_a_type"]    = item_a.get("product_type_name", "")
-        facts["item_b_type"]    = item_b.get("product_type_name", "")
+
+def _build_overall_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optional[list]) -> None:
+    if items_all:
+        facts["all_items"] = [
+            {
+                "name":   a.get("prod_name", ""),
+                "price":  _format_price(a.get("avg_price")),
+                "colour": a.get("colour_group_name", ""),
+                "type":   a.get("product_type_name", ""),
+                "desc":   a.get("detail_desc", "")[:150],
+            }
+            for a in items_all
+        ]
+    else:
+        facts["item_a_price"]      = _format_price(item_a.get("avg_price"))
+        facts["item_b_price"]      = _format_price(item_b.get("avg_price"))
+        facts["item_a_colour"]     = item_a.get("colour_group_name", "")
+        facts["item_b_colour"]     = item_b.get("colour_group_name", "")
+        facts["item_a_type"]       = item_a.get("product_type_name", "")
+        facts["item_b_type"]       = item_b.get("product_type_name", "")
         facts["item_a_desc_short"] = item_a.get("detail_desc", "")[:150]
         facts["item_b_desc_short"] = item_b.get("detail_desc", "")[:150]
-
-    return facts
 
