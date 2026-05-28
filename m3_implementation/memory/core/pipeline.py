@@ -488,7 +488,9 @@ class MemoryPipeline:
             label=label,
             retrieval_strategy=retrieval_strategy,
             confidence=confidence,
-            used_rules=used_rules
+            used_rules=used_rules,
+            full_subtype=_cse_result.full_subtype,
+            partial_subtype=_cse_result.partial_subtype,
         )
         user_turn = await self.turn_mgr.add_user_turn(
             session_id=active_session_id,
@@ -510,17 +512,20 @@ class MemoryPipeline:
             entities=entities
         )
 
-        # ── Merge CSE excluded_ids into retrieval_input ────────────────────
-        # For INITIAL_REQUEST FULL_WITH_EXCLUSIONS: article_ids from similar
-        # prior questions in this session are added to exclude_ids so the
-        # retrieval engine does not repeat already-seen products.
-        if _cse_result.excluded_ids and enriched.get("retrieval_input"):
-            _existing_excl = enriched["retrieval_input"].get("exclude_ids") or []
-            enriched["retrieval_input"]["exclude_ids"] = list(
-                set(_existing_excl + _cse_result.excluded_ids)
-            )
-            print(f"[PIPELINE] Merged {len(_cse_result.excluded_ids)} "
-                  f"CSE excluded_ids into retrieval_input")
+        # ── Patch CSE subtypes and excluded_ids into retrieval_input ─────────
+        if enriched.get("retrieval_input"):
+            _ri = enriched["retrieval_input"]
+            # Subtypes give the RAG/assembler finer-grained routing info beyond
+            # the broad FULL/PARTIAL/NO tier — e.g. FULL_WITH_EXCLUSIONS vs
+            # FULL_STANDARD, or CACHED_RESULT vs PARTIAL_CONTEXT_LOOKUP.
+            _ri["full_subtype"]    = _cse_result.full_subtype
+            _ri["partial_subtype"] = _cse_result.partial_subtype
+
+            if _cse_result.excluded_ids:
+                _existing_excl = _ri.get("exclude_ids") or []
+                _ri["exclude_ids"] = list(set(_existing_excl + _cse_result.excluded_ids))
+                print(f"[PIPELINE] Merged {len(_cse_result.excluded_ids)} "
+                      f"CSE excluded_ids into retrieval_input")
 
         # ── Cached recommendation injection (similar INITIAL_REQUEST) ──────
         # When CSE detects a similar prior question and returns PARTIAL,
@@ -651,12 +656,12 @@ class MemoryPipeline:
                   f"{len(items)} passed ItemInContext validation")
             if len(items) >= 1:
                 import string as _string
-                _discussing = {
-                    f"item_{_string.ascii_lowercase[i]}": item.model_dump()
-                    for i, item in enumerate(items)
-                }
-                if len(items) == 1:
-                    _discussing["item_b"] = None
+                _SLOTS = [f"item_{c}" for c in _string.ascii_lowercase[:8]]
+                # Initialise all 8 slots to None so stale items from a previous
+                # turn (e.g. old item_c/item_d) are always cleared on every update.
+                _discussing = {k: None for k in _SLOTS}
+                for i, item in enumerate(items[:8]):
+                    _discussing[_SLOTS[i]] = item.model_dump()
                 print(f"[store_response] saving currently_discussing keys={list(_discussing.keys())}")
                 await self.session_mgr.update_dialogue_state(
                     session_id,
