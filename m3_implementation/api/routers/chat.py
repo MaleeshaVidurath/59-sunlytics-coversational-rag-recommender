@@ -421,13 +421,8 @@ async def chat(req: ChatRequest):
         print(f"[CHAT] purchase_hints_present={bool(_payload_dbg.get('purchase_history_hints'))}")
         _cse = pipeline_output.get("cse", {})
         if _cse:
-            print(f"[CHAT] CSE: score={_cse.get('score', 0.0):.4f} "
-                  f"tier={_cse.get('tier','?')} override={_cse.get('override','?')} "
+            print(f"[CHAT] CSE: tier={_cse.get('tier','?')} override={_cse.get('override','?')} "
                   f"full_sub={_cse.get('full_subtype')} partial_sub={_cse.get('partial_subtype')}")
-            print(f"[CHAT] CSE: D_self={_cse.get('d_self_sufficient', 0.0):.2f} "
-                  f"D_items={_cse.get('d_items_available', 0.0):.2f} "
-                  f"D_recency={_cse.get('d_info_recency', 0.0):.2f} "
-                  f"D_completeness={_cse.get('d_info_completeness', 0.0):.2f}")
         # ── Determine effective model (session-level lock) ─────────────────
         # Uses a dedicated session_model_locks collection — never writes to
         # sessions, users, recommendations or any other existing collection.

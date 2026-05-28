@@ -29,17 +29,8 @@
 #     "PARTIAL_RECENT"   — needed context found in last 3 exchanges (Redis hot)
 #     "PARTIAL_SESSION"  — needed context found earlier in session (MongoDB)
 #
-# Score dimensions (0.0–1.0, used to compute the sufficiency score):
-#   D_SELF         : LLM can answer from parametric knowledge alone
-#   D_ITEMS        : relevant items found in session context
-#   D_RECENCY      : how recent the available context is
-#   D_COMPLETENESS : how complete the available information is
-#
-# Score formula (for PARTIAL labels only):
-#   S = 0.40·D_ITEMS + 0.35·D_RECENCY + 0.25·D_COMPLETENESS
-#
-# For CHITCHAT/FEEDBACK and INITIAL_REQUEST/REFINEMENT the tier is forced
-# — score is still computed for transparency but does not drive the decision.
+# Routing decision is carried entirely by tier + subtype + excluded_ids.
+# No numerical scores are computed — the tier assignment IS the decision.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -77,27 +68,20 @@ class SufficiencyResult:
     """
     Output of the Context Sufficiency Evaluator.
 
-    Core fields:
+    Routing fields (these drive downstream behaviour):
         tier              : retrieval tier — FULL | PARTIAL | NO
-        score             : sufficiency score 0.0–1.0
-        label             : DistilBERT label for this turn
-        prior_strategy    : original DistilBERT default strategy
-        override          : whether CSE changed the strategy
-        rationale         : human-readable scientific explanation
-
-    Sub-level routing fields (do NOT change the main tier):
         full_subtype      : "FULL_STANDARD" | "FULL_WITH_EXCLUSIONS"
         partial_subtype   : "PARTIAL_RECENT" | "PARTIAL_SESSION"
-        excluded_ids      : article_ids to exclude (from similar prior questions)
+        excluded_ids      : article_ids to exclude from the next search
+        override          : True when CSE changed DistilBERT's default strategy
 
-    Dimension scores (transparency / explainability):
-        d_self_sufficient : parametric LLM knowledge sufficient
-        d_items_available : relevant items found in session context
-        d_info_recency    : recency of available context (1.0 = very recent)
-        d_info_completeness: completeness of available information
+    Metadata (for logging and rationale display only):
+        label             : DistilBERT label for this turn
+        prior_strategy    : DistilBERT default before CSE override
+        rationale         : human-readable explanation of the tier decision
+        cached_recommendation : items from a matched prior INITIAL_REQUEST
     """
     tier:               str
-    score:              float
     label:              str
     prior_strategy:     str
     override:           bool
@@ -106,11 +90,6 @@ class SufficiencyResult:
     full_subtype:         Optional[str] = None
     partial_subtype:      Optional[str] = None
     excluded_ids:         list = field(default_factory=list)
-
-    d_self_sufficient:    float = 0.0
-    d_items_available:    float = 0.0
-    d_info_recency:       float = 0.0
-    d_info_completeness:  float = 0.0
 
     # Populated when a similar prior INITIAL_REQUEST is found — used to show
     # the cached recommendation instead of doing a new catalog search.
@@ -136,9 +115,8 @@ class ContextSufficiencyEvaluator:
             history=history_list,
             session_id="sess_abc123",
         )
-        # result.tier          → "PARTIAL"
+        # result.tier            → "PARTIAL"
         # result.partial_subtype → "PARTIAL_RECENT"
-        # result.score         → 0.75
     """
 
     async def evaluate(
@@ -164,7 +142,7 @@ class ContextSufficiencyEvaluator:
             confidence     : DistilBERT confidence score
 
         Returns:
-            SufficiencyResult — tier + sub-level + score + dimensions
+            SufficiencyResult — tier + subtype + excluded_ids + rationale
         """
         prior_strategy = self._label_to_default_strategy(label)
 
@@ -175,12 +153,12 @@ class ContextSufficiencyEvaluator:
 
         elif label == "INITIAL_REQUEST":
             result = await self._eval_initial_request(
-                message, session_id, prior_strategy, history
+                message, session_id, prior_strategy, dialogue_state
             )
 
         elif label == "REFINEMENT":
             result = await self._eval_refinement(
-                dialogue_state, history, session_id, prior_strategy
+                dialogue_state, session_id, prior_strategy
             )
 
         else:
@@ -192,12 +170,7 @@ class ContextSufficiencyEvaluator:
         # ── Debug logging ─────────────────────────────────────────────────
         print(f"[CSE] ━━━ Context Sufficiency Evaluation ━━━")
         print(f"[CSE] label={label}  prior_strategy={prior_strategy}")
-        print(f"[CSE] score={result.score:.4f}  tier={result.tier}  "
-              f"full_sub={result.full_subtype}  partial_sub={result.partial_subtype}")
-        print(f"[CSE] D: self={result.d_self_sufficient:.2f}  "
-              f"items={result.d_items_available:.2f}  "
-              f"recency={result.d_info_recency:.2f}  "
-              f"completeness={result.d_info_completeness:.2f}")
+        print(f"[CSE] tier={result.tier}  full_sub={result.full_subtype}  partial_sub={result.partial_subtype}")
         if result.excluded_ids:
             print(f"[CSE] excluded_ids ({len(result.excluded_ids)}): "
                   f"{result.excluded_ids[:5]}"
@@ -236,30 +209,15 @@ class ContextSufficiencyEvaluator:
         """
         # ── CHITCHAT ──────────────────────────────────────────────────────────
         if label == "CHITCHAT":
-            # Score = d_self_sufficient directly. Retrieval dimensions are 0.0
-            # because catalog items add nothing to a pure dialogue turn.
-            # I(A;K|q,C)=0 [Joren2025]: parametric knowledge is fully sufficient.
-            d_self = 1.0
-            score  = d_self
-            print(f"[CSE-DIALOGUE] CHITCHAT → tier=NO  S={score:.3f}")
+            print(f"[CSE-DIALOGUE] CHITCHAT → tier=NO")
             return SufficiencyResult(
                 tier="NO",
-                score=score,
                 label=label,
                 prior_strategy=prior_strategy,
                 override=(prior_strategy != "NO"),
-                full_subtype=None,
-                partial_subtype=None,
-                excluded_ids=[],
-                d_self_sufficient=d_self,
-                d_items_available=0.0,
-                d_info_recency=0.0,
-                d_info_completeness=0.0,
                 rationale=(
-                    f"CHITCHAT → NO retrieval. S={score:.3f}. "
-                    f"Pure dialogue turn — LLM answers from parametric knowledge. "
-                    f"D_self=1.0; retrieval dimensions irrelevant (set to 0). "
-                    f"[Joren2025: Sufficient(q,∅,param)=1; I(A;K|q,C)=0]"
+                    "CHITCHAT → NO retrieval. Pure dialogue turn — LLM answers "
+                    "from parametric knowledge. [Joren2025: I(A;K|q,C)=0]"
                 ),
             )
 
@@ -283,48 +241,28 @@ class ContextSufficiencyEvaluator:
 
         # positive ─────────────────────────────────────────────────────────────
         if sentiment_label == "positive":
-            # Score = d_self_sufficient. User is satisfied; LLM acknowledges
-            # from parametric knowledge. Retrieval dimensions irrelevant (0.0).
-            d_self = 1.0
-            score  = d_self
-            print(f"[CSE-DIALOGUE] FEEDBACK positive (sent={sentiment_score:+.3f}) → tier=NO  S={score:.3f}")
+            print(f"[CSE-DIALOGUE] FEEDBACK positive (sent={sentiment_score:+.3f}) → tier=NO")
             return SufficiencyResult(
-                tier="NO", score=score, label=label,
+                tier="NO", label=label,
                 prior_strategy=prior_strategy,
                 override=(prior_strategy != "NO"),
-                full_subtype=None, partial_subtype=None, excluded_ids=[],
-                d_self_sufficient=d_self,
-                d_items_available=0.0,
-                d_info_recency=0.0,
-                d_info_completeness=0.0,
                 rationale=(
                     f"FEEDBACK positive (sentiment={sentiment_score:+.3f}) → NO retrieval. "
-                    f"S={score:.3f}. User satisfied — LLM acknowledges from parametric knowledge. "
-                    f"D_self=1.0; retrieval dimensions irrelevant (set to 0). "
+                    f"User satisfied — LLM acknowledges from parametric knowledge. "
                     f"[Barbieri2020 TweetEval RoBERTa: {sentiment_label}]"
                 ),
             )
 
         # neutral ──────────────────────────────────────────────────────────────
         if sentiment_label == "neutral":
-            # Score = d_self_sufficient = 0.9. No clear preference expressed;
-            # LLM acknowledges with slight uncertainty. Retrieval dimensions 0.0.
-            d_self = 0.9
-            score  = d_self
-            print(f"[CSE-DIALOGUE] FEEDBACK neutral (sent={sentiment_score:+.3f}) → tier=NO  S={score:.3f}")
+            print(f"[CSE-DIALOGUE] FEEDBACK neutral (sent={sentiment_score:+.3f}) → tier=NO")
             return SufficiencyResult(
-                tier="NO", score=score, label=label,
+                tier="NO", label=label,
                 prior_strategy=prior_strategy,
                 override=(prior_strategy != "NO"),
-                full_subtype=None, partial_subtype=None, excluded_ids=[],
-                d_self_sufficient=d_self,
-                d_items_available=0.0,
-                d_info_recency=0.0,
-                d_info_completeness=0.0,
                 rationale=(
                     f"FEEDBACK neutral (sentiment={sentiment_score:+.3f}) → NO retrieval. "
-                    f"S={score:.3f}. No clear preference expressed — LLM acknowledges with uncertainty. "
-                    f"D_self=0.9; retrieval dimensions irrelevant (set to 0). "
+                    f"No clear preference expressed — LLM acknowledges. "
                     f"[Barbieri2020 TweetEval RoBERTa: {sentiment_label}]"
                 ),
             )
@@ -339,57 +277,37 @@ class ContextSufficiencyEvaluator:
                 )
                 if _aid and str(_aid) not in excluded_ids:
                     excluded_ids.append(str(_aid))
-            d_items = d_recency = 1.0
-            d_completeness = 0.70   # constraints known; user wants different items
-            score = 0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness
             print(
                 f"[CSE-DIALOGUE] FEEDBACK negative+items (sent={sentiment_score:+.3f}) "
-                f"→ tier=FULL  excluded={excluded_ids}  S={score:.3f}"
+                f"→ tier=FULL  excluded={excluded_ids}"
             )
             return SufficiencyResult(
                 tier="FULL",
-                score=score,
                 label=label,
                 prior_strategy=prior_strategy,
                 override=True,
                 full_subtype="FULL_WITH_EXCLUSIONS",
-                partial_subtype=None,
                 excluded_ids=excluded_ids,
-                d_self_sufficient=0.2,
-                d_items_available=d_items,
-                d_info_recency=d_recency,
-                d_info_completeness=d_completeness,
                 rationale=(
                     f"FEEDBACK negative (sentiment={sentiment_score:+.3f}) + items in context "
-                    f"→ FULL_WITH_EXCLUSIONS (tier overridden). S={score:.3f}. "
+                    f"→ FULL_WITH_EXCLUSIONS (tier overridden). "
                     f"User implicitly requests alternatives; excluded={excluded_ids}. "
                     f"[Barbieri2020 TweetEval; Adaptive-RAG Jeong2024]"
                 ),
             )
 
         # negative + no items — cannot improve without context ─────────────────
-        d_items = d_recency = d_completeness = 0.0
-        score = 0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness
         print(
-            f"[CSE-DIALOGUE] FEEDBACK negative+no-items (sent={sentiment_score:+.3f}) "
-            f"→ tier=NO  S={score:.3f}"
+            f"[CSE-DIALOGUE] FEEDBACK negative+no-items (sent={sentiment_score:+.3f}) → tier=NO"
         )
         return SufficiencyResult(
-            tier="NO", 
-            score=score, 
+            tier="NO",
             label=label,
             prior_strategy=prior_strategy,
             override=(prior_strategy != "NO"),
-            full_subtype=None, 
-            partial_subtype=None, 
-            excluded_ids=[],
-            d_self_sufficient=0.5,
-            d_items_available=d_items,
-            d_info_recency=d_recency,
-            d_info_completeness=d_completeness,
             rationale=(
                 f"FEEDBACK negative (sentiment={sentiment_score:+.3f}) but no items in context. "
-                f"S={score:.3f}. Cannot trigger exclusion-based search without context items. "
+                f"Cannot trigger exclusion-based search without context items. "
                 f"LLM responds with acknowledgment. [Barbieri2020 TweetEval]"
             ),
         )
@@ -399,7 +317,7 @@ class ContextSufficiencyEvaluator:
         message:        str,
         session_id:     str,
         prior_strategy: str,
-        history:        list,
+        dialogue_state: dict,
     ) -> SufficiencyResult:
         """
         INITIAL_REQUEST — normally FULL retrieval (candidate set unknown).
@@ -423,35 +341,21 @@ class ContextSufficiencyEvaluator:
 
         if excluded_ids and cached_items:
             # Similar question found — return cached recommendation as PARTIAL
-            items_recent = self._cached_items_in_recent_history(history, cached_items)
-            d_recency     = 1.0 if items_recent else 0.40
-            d_items       = 1.0
-            d_completeness = 0.80
-            score = min(
-                round(0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness, 4),
-                0.79,
-            )
+            items_recent    = self._cached_items_in_recent_history(dialogue_state, cached_items)
             partial_subtype = "PARTIAL_RECENT" if items_recent else "PARTIAL_SESSION"
-            print(f"[CSE-INIT] similar question detected → tier=PARTIAL/{partial_subtype}  score={score}")
+            print(f"[CSE-INIT] similar question detected → tier=PARTIAL/{partial_subtype}")
             return SufficiencyResult(
                 tier="PARTIAL",
-                score=score,
                 label="INITIAL_REQUEST",
                 prior_strategy=prior_strategy,
                 override=True,
-                full_subtype=None,
                 partial_subtype=partial_subtype,
                 excluded_ids=excluded_ids,
                 cached_recommendation=cached_items,
-                d_self_sufficient=0.0,
-                d_items_available=d_items,
-                d_info_recency=d_recency,
-                d_info_completeness=d_completeness,
                 rationale=(
-                    f"INITIAL_REQUEST → {partial_subtype}. S={score:.3f}. "
+                    f"INITIAL_REQUEST → {partial_subtype}. "
                     f"Similar question asked earlier in session — using cached recommendation "
-                    f"({len(cached_items)} item(s)). User will be asked if new results needed. "
-                    f"Excluded IDs retained for optional new search. "
+                    f"({len(cached_items)} item(s)). Excluded IDs retained for optional new search. "
                     f"[Joren2025: Sufficient(q,C_t)=1 — bounded session lookup sufficient]"
                 ),
             )
@@ -460,19 +364,12 @@ class ContextSufficiencyEvaluator:
         print(f"[CSE-INIT] full_subtype=FULL_STANDARD  excluded_ids_count=0")
         return SufficiencyResult(
             tier="FULL",
-            score=0.10,
             label="INITIAL_REQUEST",
             prior_strategy=prior_strategy,
             override=(prior_strategy != "FULL"),
             full_subtype="FULL_STANDARD",
-            partial_subtype=None,
-            excluded_ids=[],
-            d_self_sufficient=0.0,
-            d_items_available=0.0,
-            d_info_recency=0.0,
-            d_info_completeness=0.0,
             rationale=(
-                "INITIAL_REQUEST → FULL_STANDARD. S=0.10. "
+                "INITIAL_REQUEST → FULL_STANDARD. "
                 "Candidate set entirely unknown — ANN catalog search required. "
                 "[Jeong2024: multi-step retrieval; Joren2025: Sufficient(q,C_t)=0]"
             ),
@@ -481,7 +378,6 @@ class ContextSufficiencyEvaluator:
     async def _eval_refinement(
         self,
         dialogue_state: dict,
-        history:        list[dict],
         session_id:     str,
         prior_strategy: str,
     ) -> SufficiencyResult:
@@ -492,7 +388,7 @@ class ContextSufficiencyEvaluator:
         so the catalog must be re-queried. All article_ids ever recommended
         in this session are excluded so the user always sees fresh results.
         """
-        has_constraints = bool(dialogue_state.get("hard_constraints", {}))
+        has_constraints = bool(dialogue_state.get("hard_constraints", {}).get("product_type_name"))
         item_a, item_b = self._discussing_items(dialogue_state)
         has_items = bool(item_a or item_b)
 
@@ -507,34 +403,22 @@ class ContextSufficiencyEvaluator:
         excluded_ids = await self._all_session_article_ids(session_id)
         print(f"[CSE-REFINE] excluded_ids (all session recommendations): {excluded_ids}")
 
-        score = round(
-            0.10
-            + (0.08 if has_constraints else 0.0)
-            + (0.07 if has_items else 0.0),
-            4,
-        )
         full_subtype = (
             "FULL_WITH_EXCLUSIONS" if (has_items or has_constraints)
             else "FULL_STANDARD"
         )
-        print(f"[CSE-REFINE] full_subtype={full_subtype}  score={score}  → tier=FULL")
+        print(f"[CSE-REFINE] full_subtype={full_subtype} → tier=FULL")
 
         excl_note = f"Excluded {len(excluded_ids)} article(s) from full session history. " if excluded_ids else ""
         return SufficiencyResult(
             tier="FULL",
-            score=score,
             label="REFINEMENT",
             prior_strategy=prior_strategy,
             override=(prior_strategy != "FULL"),
             full_subtype=full_subtype,
-            partial_subtype=None,
             excluded_ids=excluded_ids,
-            d_self_sufficient=0.0,
-            d_items_available=0.3 if has_items else 0.0,
-            d_info_recency=0.5 if history else 0.0,
-            d_info_completeness=0.4 if has_constraints else 0.0,
             rationale=(
-                f"REFINEMENT → {full_subtype}. S={score:.3f}. "
+                f"REFINEMENT → {full_subtype}. "
                 f"Constraints={'yes' if has_constraints else 'no'}  "
                 f"items={'yes' if has_items else 'no'}. "
                 f"{excl_note}"
@@ -555,16 +439,6 @@ class ContextSufficiencyEvaluator:
             item_b = item_b.model_dump()
         return item_a, item_b
 
-    @staticmethod
-    def _article_ids_from_items(*items: dict) -> list[str]:
-        """Collects unique non-empty article_id strings from the given item dicts."""
-        ids: list[str] = []
-        for item in items:
-            aid = str(item.get("article_id", "")).strip()
-            if aid and aid not in ids:
-                ids.append(aid)
-        return ids
-
     async def _eval_item_reference(
         self,
         label:          str,
@@ -584,11 +458,11 @@ class ContextSufficiencyEvaluator:
         Decision tree:
           1. Items in dialogue_state.currently_discussing?
              ├─ Yes → are they in the last 3 exchanges (history)?
-             │        ├─ Yes → PARTIAL_RECENT   (score ~0.70–0.79)
-             │        └─ No  → PARTIAL_SESSION  (score ~0.44–0.79)
+             │        ├─ Yes → PARTIAL_RECENT   
+             │        └─ No  → PARTIAL_SESSION 
              └─ No  → any recommendations in full session (MongoDB)?
-                      ├─ Yes → PARTIAL_SESSION  (score ~0.40–0.55)
-                      └─ No  → FULL_STANDARD    (score  0.20)
+                      ├─ Yes → PARTIAL_SESSION 
+                      └─ No  → FULL_STANDARD 
         """
         discussing = dialogue_state.get("currently_discussing", {})
         item_a = discussing.get("item_a")
@@ -609,34 +483,18 @@ class ContextSufficiencyEvaluator:
             session_items = await self._find_items_in_full_session(session_id)
             print(f"[CSE-ITEMREF] MongoDB fallback: found {len(session_items)} item(s) in session history")
             if session_items:
-                d_items = 0.60
-                d_recency = 0.25
-                d_completeness = self._info_completeness(label, message, dialogue_state)
-                print(f"[CSE-ITEMREF] MongoDB path → d_items={d_items}  d_recency={d_recency}  "
-                      f"d_completeness={d_completeness:.2f}  → PARTIAL_SESSION")
-                score = round(
-                    0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness,
-                    4,
-                )
-                score = max(score, 0.40)  # always PARTIAL for this path
+                print(f"[CSE-ITEMREF] MongoDB path → PARTIAL_SESSION")
                 return SufficiencyResult(
                     tier="PARTIAL",
-                    score=score,
                     label=label,
                     prior_strategy=prior_strategy,
                     override=(prior_strategy != "PARTIAL"),
-                    full_subtype=None,
                     partial_subtype="PARTIAL_SESSION",
-                    excluded_ids=[],
-                    d_self_sufficient=0.0,
-                    d_items_available=d_items,
-                    d_info_recency=d_recency,
-                    d_info_completeness=d_completeness,
                     rationale=(
-                        f"{label} → PARTIAL_SESSION. S={score:.3f}. "
-                        f"Items not in current dialogue state but found in "
-                        f"session history (MongoDB). Bounded lookup sufficient. "
-                        f"[Roy2024: follow-up on previously retrieved items]"
+                        f"{label} → PARTIAL_SESSION. "
+                        "Items not in current dialogue state but found in "
+                        "session history (MongoDB). Bounded lookup sufficient. "
+                        "[Roy2024: follow-up on previously retrieved items]"
                     ),
                 )
             else:
@@ -644,19 +502,12 @@ class ContextSufficiencyEvaluator:
                 print("[CSE-ITEMREF] no items anywhere in session → escalating to FULL retrieval")
                 return SufficiencyResult(
                     tier="FULL",
-                    score=0.20,
                     label=label,
                     prior_strategy=prior_strategy,
                     override=(prior_strategy != "FULL"),
                     full_subtype="FULL_STANDARD",
-                    partial_subtype=None,
-                    excluded_ids=[],
-                    d_self_sufficient=0.0,
-                    d_items_available=0.0,
-                    d_info_recency=0.0,
-                    d_info_completeness=0.0,
                     rationale=(
-                        f"{label} → FULL (no items in session). S=0.20. "
+                        f"{label} → FULL (no items in session). "
                         f"No recommendations found in this session — "
                         f"catalog search required before referencing items. "
                         f"[Jeong2024: retrieval required]"
@@ -675,46 +526,21 @@ class ContextSufficiencyEvaluator:
               f"(from label={label} msg='{message[:50]}')")
 
         # ── Items are in dialogue_state — check recency ────────────────────
-        d_items = 1.0
-        d_completeness = self._info_completeness(
-            label, message, dialogue_state, target_item=target_item
-        )
-        items_recent = self._items_in_recent_history(history, target_item, None)
-
-        if items_recent:
-            d_recency = 1.0
-            partial_subtype = "PARTIAL_RECENT"
-        else:
-            d_recency = 0.40
-            partial_subtype = "PARTIAL_SESSION"
-
-        score = round(
-            0.40 * d_items + 0.35 * d_recency + 0.25 * d_completeness,
-            4,
-        )
-        # These labels are NEVER NO retrieval — cap score below NO threshold
-        score = min(score, 0.79)
+        items_recent    = self._items_in_recent_history(history, target_item, None)
+        partial_subtype = "PARTIAL_RECENT" if items_recent else "PARTIAL_SESSION"
 
         return SufficiencyResult(
             tier="PARTIAL",
-            score=score,
             label=label,
             prior_strategy=prior_strategy,
             override=(prior_strategy != "PARTIAL"),
-            full_subtype=None,
             partial_subtype=partial_subtype,
-            excluded_ids=[],
-            d_self_sufficient=0.0,
-            d_items_available=d_items,
-            d_info_recency=d_recency,
-            d_info_completeness=d_completeness,
             rationale=(
-                f"{label} → {partial_subtype}. S={score:.3f}. "
+                f"{label} → {partial_subtype}. "
                 f"Target item: '{target_name}'. "
                 f"Context {'from last 3 exchanges (Redis)' if items_recent else 'from earlier in session (MongoDB)'}. "
-                f"D_items={d_items:.2f} D_recency={d_recency:.2f} D_completeness={d_completeness:.2f}. "
-                f"I(A;C_t) ≫ I(A;K\\C_t): bounded DB lookup sufficient. "
-                f"[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
+                "I(A;C_t) ≫ I(A;K\\C_t): bounded DB lookup sufficient. "
+                "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
             ),
         )
 
@@ -808,28 +634,29 @@ class ContextSufficiencyEvaluator:
                   f"— will show as cached recommendation")
         return excluded_ids, cached_items
 
+    @staticmethod
     def _cached_items_in_recent_history(
-        self,
-        history:     list[dict],
-        cached_items: list[dict],
+        dialogue_state: dict,
+        cached_items:   list[dict],
     ) -> bool:
-        """Returns True if the cached items appear in the last 3 bot turns."""
-        if not history or not cached_items:
+        """Returns True if any cached item was shown in the last recommended turn."""
+        if not cached_items:
             return False
-        bot_content = " ".join(
-            t.get("content", "").lower()
-            for t in history
-            if t.get("role") in ("assistant", "bot")
-        )
-        if not bot_content:
+        discussing = (dialogue_state or {}).get("currently_discussing") or {}
+        recent_ids = {
+            str(v.get("article_id", "")).strip()
+            for k, v in discussing.items()
+            if k.startswith("item_") and isinstance(v, dict)
+        }
+        recent_ids.discard("")
+        if not recent_ids:
             return False
-        for item in cached_items:
-            name = (item.get("prod_name") or "").lower()
-            if name and len(name) > 3:
-                words = [w for w in name.split()[:4] if len(w) > 3]
-                if any(w in bot_content for w in words):
-                    return True
-        return any(kw in bot_content for kw in ["option 1", "option 2", "here are", "£"])
+        cached_ids = {
+            str(item.get("article_id", "")).strip()
+            for item in cached_items
+        }
+        cached_ids.discard("")
+        return bool(recent_ids & cached_ids)
 
     def _recommendations_coll_name(self) -> str:
         """Returns the recommendations collection name for this CSE instance.
@@ -990,85 +817,6 @@ class ContextSufficiencyEvaluator:
             kw in bot_content
             for kw in ["option 1", "option 2", "here are", "£", "found two", "found these"]
         )
-
-    def _info_completeness(
-        self,
-        label:          str,
-        message:        str,
-        dialogue_state: dict,
-        target_item:    Optional[dict] = None,
-    ) -> float:
-        """
-        Measures how complete the available session information is for
-        answering this specific label without a new catalog search.
-
-        Uses target_item (the resolved specific item the user asked about)
-        to check the RIGHT item's fields — not always item_a.
-
-        Returns a float in [0.0, 1.0].
-        """
-        item = self._resolve_item_dict(target_item, dialogue_state)
-        dispatch = {
-            "ATTRIBUTE_QUESTION":  lambda: self._completeness_attribute(message.lower(), item),
-            "EXPLANATION_WHY":     lambda: self._completeness_explanation(dialogue_state, item),
-            "COMPARISON":          lambda: self._completeness_comparison(dialogue_state, item),
-            "SELECTION_REFERENCE": lambda: self._completeness_selection(item),
-        }
-        handler = dispatch.get(label)
-        return handler() if handler else 0.50
-
-    @staticmethod
-    def _resolve_item_dict(
-        target_item:    Optional[dict],
-        dialogue_state: dict,
-    ) -> dict:
-        """Returns a plain dict for the target item, falling back to item_a."""
-        item = target_item
-        if not item:
-            item = dialogue_state.get("currently_discussing", {}).get("item_a") or {}
-        if hasattr(item, "model_dump"):
-            item = item.model_dump()
-        return item or {}
-
-    @staticmethod
-    def _completeness_attribute(msg: str, item: dict) -> float:
-        """Completeness score for ATTRIBUTE_QUESTION based on which attribute is asked."""
-        if any(w in msg for w in ["price", "cost", "how much", "£"]):
-            return 0.90 if item.get("price") else 0.40
-        if any(w in msg for w in ["colour", "color"]):
-            return 0.90 if item.get("colour_group_name") else 0.50
-        if any(w in msg for w in ["type", "category", "kind"]):
-            return 0.90 if item.get("product_type_name") else 0.50
-        if any(w in msg for w in ["material", "fabric", "made"]):
-            return 0.30  # never stored in session — always needs DB lookup
-        if any(w in msg for w in ["description", "detail", "tell me about"]):
-            return 0.80 if item.get("detail_desc") else 0.30
-        return 0.50
-
-    @staticmethod
-    def _completeness_explanation(dialogue_state: dict, item: dict) -> float:
-        """Completeness score for EXPLANATION_WHY."""
-        prefs = dialogue_state.get("preference_profile", {})
-        if prefs and item:
-            return 0.80
-        if item:
-            return 0.55  # can explain based on item attributes alone
-        return 0.30
-
-    @staticmethod
-    def _completeness_comparison(dialogue_state: dict, item: dict) -> float:
-        """Completeness score for COMPARISON — requires both items."""
-        item_b = dialogue_state.get("currently_discussing", {}).get("item_b") or {}
-        if hasattr(item_b, "model_dump"):
-            item_b = item_b.model_dump()
-        return 0.80 if (item and item_b) else 0.30
-
-    @staticmethod
-    def _completeness_selection(item: dict) -> float:
-        """Completeness score for SELECTION_REFERENCE."""
-        if item.get("prod_name") and item.get("colour_group_name"):
-            return 0.90
-        return 0.50 if item else 0.30
 
     def _label_to_default_strategy(self, label: str) -> str:
         """Returns the DistilBERT default retrieval strategy for a label."""
