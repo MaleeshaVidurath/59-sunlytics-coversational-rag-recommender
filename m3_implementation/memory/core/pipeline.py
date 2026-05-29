@@ -513,6 +513,13 @@ class MemoryPipeline:
                 "memory_context":     _cse_result.enriched_memory_context or {},
                 "side_effects":       _cse_result.enriched_side_effects or [],
             }
+            _mc = enriched["memory_context"]
+            if _mc.get("use_historical_items"):
+                _hist = _mc.get("historical_items", [])
+                _names = [it.get("prod_name", "?") for it in _hist]
+                print(f"[PIPELINE] historical_items={_names}  use_historical_items=True")
+            else:
+                print("[PIPELINE] use_historical_items=False (item from currently_discussing)")
         else:
             print(f"[DBG-3] ENRICHMENT: calling for label={label}")
             print("[PIPELINE-6] calling enricher...")

@@ -647,18 +647,24 @@ class ContextSufficiencyEvaluator:
                     enriched_side_effects=_enrich_result.get("side_effects", []),
                 )
 
-            # PARTIAL — determine recency subtype from history
-            _payload      = (_enrich_result.get("retrieval_input") or {}).get("payload") or {}
-            _target_id    = _payload.get("article_id")
-            _discussing   = dialogue_state.get("currently_discussing", {})
-            _target_dict  = next(
-                (v for v in _discussing.values()
-                 if isinstance(v, dict) and v.get("article_id") == _target_id),
-                _discussing.get("item_a"),
-            )
-            _items_recent = self._items_in_recent_history(history, _target_dict, None)
-            _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
-            _target_name  = (_target_dict or {}).get("prod_name", "unknown")
+            # PARTIAL — determine recency subtype
+            _payload     = (_enrich_result.get("retrieval_input") or {}).get("payload") or {}
+            _target_id   = _payload.get("article_id")
+
+            if _payload.get("use_historical_items"):
+                # Enrichment found item in session history (not currently_discussing) → always SESSION
+                _partial_sub = "PARTIAL_SESSION"
+                _target_name = (_payload.get("historical_items") or [{}])[0].get("prod_name", "unknown")
+            else:
+                _discussing  = dialogue_state.get("currently_discussing", {})
+                _target_dict = next(
+                    (v for v in _discussing.values()
+                     if isinstance(v, dict) and v.get("article_id") == _target_id),
+                    _discussing.get("item_a"),
+                )
+                _items_recent = self._items_in_recent_history(history, _target_dict, None)
+                _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
+                _target_name  = (_target_dict or {}).get("prod_name", "unknown")
             print(f"[CSE-ITEMREF] ATTRIBUTE_QUESTION → enrichment=PARTIAL  "
                   f"target='{_target_name}'  subtype={_partial_sub}")
             return SufficiencyResult(
@@ -670,7 +676,7 @@ class ContextSufficiencyEvaluator:
                 rationale=(
                     f"ATTRIBUTE_QUESTION → {_partial_sub}. "
                     f"Enrichment resolved target: '{_target_name}'. "
-                    f"Context from {'last 3 exchanges (Redis)' if _items_recent else 'earlier in session (MongoDB)'}. "
+                    f"Context from {'last 3 exchanges (Redis)' if _partial_sub == 'PARTIAL_RECENT' else 'earlier in session (MongoDB)'}. "
                     "Bounded DB lookup sufficient. "
                     "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
                 ),
@@ -707,24 +713,32 @@ class ContextSufficiencyEvaluator:
             )
 
             # _enrich_comparison always returns PARTIAL — resolve recency subtype
-            _payload     = (_enrich_result.get("retrieval_input") or {}).get("payload") or {}
-            _discussing  = dialogue_state.get("currently_discussing", {})
-            _a_id        = _payload.get("article_id_a")
-            _b_id        = _payload.get("article_id_b")
-            _item_a_dict = next(
-                (v for v in _discussing.values()
-                 if isinstance(v, dict) and v.get("article_id") == _a_id),
-                _discussing.get("item_a"),
-            )
-            _item_b_dict = next(
-                (v for v in _discussing.values()
-                 if isinstance(v, dict) and v.get("article_id") == _b_id),
-                _discussing.get("item_b"),
-            )
-            _items_recent = self._items_in_recent_history(history, _item_a_dict, _item_b_dict)
-            _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
-            _a_name       = (_item_a_dict or {}).get("prod_name", "item A")
-            _b_name       = (_item_b_dict or {}).get("prod_name", "item B")
+            _payload = (_enrich_result.get("retrieval_input") or {}).get("payload") or {}
+
+            if _payload.get("use_historical_items"):
+                _partial_sub = "PARTIAL_SESSION"
+                _hist        = _payload.get("historical_items") or [{}, {}]
+                _a_name      = (_hist[0] if _hist else {}).get("prod_name", "item A")
+                _b_name      = (_hist[1] if len(_hist) > 1 else {}).get("prod_name", "item B")
+            else:
+                _discussing  = dialogue_state.get("currently_discussing", {})
+                _a_id        = _payload.get("article_id_a")
+                _b_id        = _payload.get("article_id_b")
+                _item_a_dict = next(
+                    (v for v in _discussing.values()
+                     if isinstance(v, dict) and v.get("article_id") == _a_id),
+                    _discussing.get("item_a"),
+                )
+                _item_b_dict = next(
+                    (v for v in _discussing.values()
+                     if isinstance(v, dict) and v.get("article_id") == _b_id),
+                    _discussing.get("item_b"),
+                )
+                _items_recent = self._items_in_recent_history(history, _item_a_dict, _item_b_dict)
+                _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
+                _a_name       = (_item_a_dict or {}).get("prod_name", "item A")
+                _b_name       = (_item_b_dict or {}).get("prod_name", "item B")
+
             print(f"[CSE-ITEMREF] COMPARISON → enrichment=PARTIAL  "
                   f"items='{_a_name}' vs '{_b_name}'  subtype={_partial_sub}")
             return SufficiencyResult(
@@ -736,7 +750,7 @@ class ContextSufficiencyEvaluator:
                 rationale=(
                     f"COMPARISON → {_partial_sub}. "
                     f"Enrichment resolved: '{_a_name}' vs '{_b_name}'. "
-                    f"Context from {'last 3 exchanges (Redis)' if _items_recent else 'earlier in session (MongoDB)'}. "
+                    f"Context from {'last 3 exchanges (Redis)' if _partial_sub == 'PARTIAL_RECENT' else 'earlier in session (MongoDB)'}. "
                     "Bounded DB lookup sufficient. "
                     "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
                 ),
@@ -772,20 +786,25 @@ class ContextSufficiencyEvaluator:
                 session_id, user_id, message, {}, _state_obj
             )
 
-            # Determine recency subtype from history
-            _payload      = (_enrich_result.get("retrieval_input") or {}).get("payload") or {}
-            _target_id    = _payload.get("article_id")
-            _discussing   = dialogue_state.get("currently_discussing", {})
-            _target_dict  = (
-                next(
-                    (v for v in _discussing.values()
-                     if isinstance(v, dict) and v.get("article_id") == _target_id),
-                    _discussing.get("item_a"),
-                ) if _target_id else _discussing.get("item_a")
-            )
-            _items_recent = self._items_in_recent_history(history, _target_dict, None)
-            _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
-            _target_name  = (_target_dict or {}).get("prod_name", "all items") if _target_dict else "all items"
+            # Determine recency subtype
+            _payload   = (_enrich_result.get("retrieval_input") or {}).get("payload") or {}
+            _target_id = _payload.get("article_id")
+
+            if _payload.get("use_historical_items"):
+                _partial_sub = "PARTIAL_SESSION"
+                _target_name = (_payload.get("historical_items") or [{}])[0].get("prod_name", "unknown")
+            else:
+                _discussing  = dialogue_state.get("currently_discussing", {})
+                _target_dict = (
+                    next(
+                        (v for v in _discussing.values()
+                         if isinstance(v, dict) and v.get("article_id") == _target_id),
+                        _discussing.get("item_a"),
+                    ) if _target_id else _discussing.get("item_a")
+                )
+                _items_recent = self._items_in_recent_history(history, _target_dict, None)
+                _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
+                _target_name  = (_target_dict or {}).get("prod_name", "all items") if _target_dict else "all items"
             print(f"[CSE-ITEMREF] EXPLANATION_WHY → enrichment=PARTIAL  "
                   f"target='{_target_name}'  subtype={_partial_sub}")
             return SufficiencyResult(
@@ -797,7 +816,7 @@ class ContextSufficiencyEvaluator:
                 rationale=(
                     f"EXPLANATION_WHY → {_partial_sub}. "
                     f"Enrichment resolved target: '{_target_name}'. "
-                    f"Context from {'last 3 exchanges (Redis)' if _items_recent else 'earlier in session (MongoDB)'}. "
+                    f"Context from {'last 3 exchanges (Redis)' if _partial_sub == 'PARTIAL_RECENT' else 'earlier in session (MongoDB)'}. "
                     "Bounded DB lookup sufficient. "
                     "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
                 ),
@@ -840,19 +859,25 @@ class ContextSufficiencyEvaluator:
                 return None
 
             # PARTIAL — determine recency subtype from history
-            _payload      = (_enrich_result.get("retrieval_input") or {}).get("payload") or {}
-            _target_id    = _payload.get("article_id")
-            _discussing   = dialogue_state.get("currently_discussing", {})
-            _target_dict  = (
-                next(
-                    (v for v in _discussing.values()
-                     if isinstance(v, dict) and v.get("article_id") == _target_id),
-                    _discussing.get("item_a"),
-                ) if _target_id else _discussing.get("item_a")
-            )
-            _items_recent = self._items_in_recent_history(history, _target_dict, None)
-            _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
-            _target_name  = (_target_dict or {}).get("prod_name", "unknown")
+            _payload   = (_enrich_result.get("retrieval_input") or {}).get("payload") or {}
+            _target_id = _payload.get("article_id")
+
+            if _payload.get("use_historical_items"):
+                _partial_sub = "PARTIAL_SESSION"
+                _target_name = (_payload.get("historical_items") or [{}])[0].get("prod_name", "unknown")
+            else:
+                _discussing   = dialogue_state.get("currently_discussing", {})
+                _target_dict  = (
+                    next(
+                        (v for v in _discussing.values()
+                         if isinstance(v, dict) and v.get("article_id") == _target_id),
+                        _discussing.get("item_a"),
+                    ) if _target_id else _discussing.get("item_a")
+                )
+                _items_recent = self._items_in_recent_history(history, _target_dict, None)
+                _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
+                _target_name  = (_target_dict or {}).get("prod_name", "unknown")
+
             print(f"[CSE-ITEMREF] SELECTION_REFERENCE → enrichment=PARTIAL  "
                   f"target='{_target_name}'  subtype={_partial_sub}")
             return SufficiencyResult(
@@ -864,7 +889,7 @@ class ContextSufficiencyEvaluator:
                 rationale=(
                     f"SELECTION_REFERENCE → {_partial_sub}. "
                     f"Enrichment resolved target: '{_target_name}'. "
-                    f"Context from {'last 3 exchanges (Redis)' if _items_recent else 'earlier in session (MongoDB)'}. "
+                    f"Context from {'last 3 exchanges (Redis)' if _partial_sub == 'PARTIAL_RECENT' else 'earlier in session (MongoDB)'}. "
                     "Bounded DB lookup sufficient. "
                     "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
                 ),

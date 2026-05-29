@@ -338,16 +338,34 @@ class EvidenceAssembler:
         self, ri: dict, mc: dict
     ) -> dict:
         """Fetches a single article and packages the relevant attribute."""
-        print(f"\n[ASSEMBLER-ATTR] ━━━ attribute lookup ━━━")
-        payload         = ri.get("payload", {})
-        article_id      = payload.get("article_id")
-        attribute_topic = payload.get("attribute_topic", "general_details")
-        user_message    = ri.get("user_message", "")
-        items_in_context= ri.get("items_in_context", {})
+        print("\n[ASSEMBLER-ATTR] ━━━ attribute lookup ━━━")
+        payload          = ri.get("payload", {})
+        article_id       = payload.get("article_id")
+        attribute_topic  = payload.get("attribute_topic", "general_details")
+        user_message     = ri.get("user_message", "")
+        items_in_context = ri.get("items_in_context", {})
+        use_historical   = mc.get("use_historical_items", False)
+        historical_items = mc.get("historical_items", [])
 
         article = None
-        if article_id:
+
+        # Historical path: use already-sent item data first to avoid a DB round-trip
+        if use_historical and historical_items:
+            hist_dict = historical_items[0] if isinstance(historical_items[0], dict) else {}
+            if hist_dict:
+                article = _ctx_to_article(hist_dict)
+                print(f"[ASSEMBLER-ATTR] historical item data used: '{hist_dict.get('prod_name', '?')}' (skipping DB fetch)")
+
+        # Normal path or historical fallback: fetch from PostgreSQL
+        if not article and article_id:
             article = await get_article_by_id(str(article_id))
+            print(f"[ASSEMBLER-ATTR] PostgreSQL fetch article_id={article_id} → {'found' if article else 'not found'}")
+            # Last resort: reconstruct from historical data if DB also missed
+            if not article and use_historical and historical_items:
+                hist_dict = historical_items[0] if isinstance(historical_items[0], dict) else {}
+                article = _ctx_to_article(hist_dict) if hist_dict else None
+                if article:
+                    print("[ASSEMBLER-ATTR] PostgreSQL miss — fell back to historical item data")
 
         # Map attribute_topic to specific fields
         attribute_field_map = {
@@ -375,12 +393,13 @@ class EvidenceAssembler:
                     )
 
         return {
-            "action":          "item_attribute_lookup",
-            "user_message":    user_message,
-            "article":         _article_summary(article) if article else None,
-            "attribute_topic": attribute_topic,
-            "extracted_facts": extracted,
-            "items_in_context":items_in_context,
+            "action":              "item_attribute_lookup",
+            "user_message":        user_message,
+            "article":             _article_summary(article) if article else None,
+            "attribute_topic":     attribute_topic,
+            "extracted_facts":     extracted,
+            "items_in_context":    items_in_context,
+            "use_historical_items": use_historical,
         }
 
     # ── item_compare ───────────────────────────────────────────────────────────
@@ -389,13 +408,19 @@ class EvidenceAssembler:
         self, ri: dict, mc: dict
     ) -> dict:
         """Fetches all context articles and assembles comparison evidence."""
-        payload      = ri.get("payload", {})
-        id_a         = payload.get("article_id_a")
-        id_b         = payload.get("article_id_b")
-        dimension    = payload.get("comparison_dimension", "overall")
-        pref_weights = payload.get("preference_weights", {})
-        user_message = ri.get("user_message", "")
-        ids_list     = payload.get("article_ids_list")  # all context items if >2
+        payload          = ri.get("payload", {})
+        id_a             = payload.get("article_id_a")
+        id_b             = payload.get("article_id_b")
+        dimension        = payload.get("comparison_dimension", "overall")
+        pref_weights     = payload.get("preference_weights", {})
+        user_message     = ri.get("user_message", "")
+        ids_list         = payload.get("article_ids_list")  # all context items if >2
+        use_historical   = mc.get("use_historical_items", False)
+        historical_items = mc.get("historical_items", [])
+
+        if use_historical and historical_items:
+            _names = [h.get("prod_name", "?") for h in historical_items[:2] if isinstance(h, dict)]
+            print(f"[ASSEMBLER-COMPARE] historical items: {_names} — context_article path will be used")
 
         ctx_a = payload.get("context_article_a") or {}
         ctx_b = payload.get("context_article_b") or {}
@@ -453,15 +478,16 @@ class EvidenceAssembler:
         comparison_facts = _build_comparison_facts(item_a, item_b, dimension, items_all)
 
         return {
-            "action":            "item_compare",
-            "user_message":      user_message,
-            "item_a":            _article_summary(item_a) if item_a else None,
-            "item_b":            _article_summary(item_b) if item_b else None,
-            "items_all":         items_all,
+            "action":              "item_compare",
+            "user_message":        user_message,
+            "item_a":              _article_summary(item_a) if item_a else None,
+            "item_b":              _article_summary(item_b) if item_b else None,
+            "items_all":           items_all,
             "comparison_dimension": dimension,
-            "comparison_facts":  comparison_facts,
-            "preference_weights":pref_weights,
-            "user_preferences":  mc.get("long_term_preferences", []),
+            "comparison_facts":    comparison_facts,
+            "preference_weights":  pref_weights,
+            "user_preferences":    mc.get("long_term_preferences", []),
+            "use_historical_items": use_historical,
         }
 
     # ── explanation_generate ───────────────────────────────────────────────────
@@ -473,14 +499,20 @@ class EvidenceAssembler:
         Assembles evidence for explanation generation.
         Fetches article from PostgreSQL and finds which user preferences match.
         """
-        print(f"\n[ASSEMBLER-EXPLAIN] ━━━ _assemble_explanation ━━━")
-        payload       = ri.get("payload", {})
-        article_id    = payload.get("article_id")
-        all_item_ids  = payload.get("all_item_ids")   # present when user asked "why" with no product name
-        prior_claims  = payload.get("prior_claims", [])
-        matched_prefs = payload.get("matched_prefs", [])
-        user_message  = ri.get("user_message", "")
-        items_ctx     = ri.get("items_in_context", {})
+        print("\n[ASSEMBLER-EXPLAIN] ━━━ _assemble_explanation ━━━")
+        payload          = ri.get("payload", {})
+        article_id       = payload.get("article_id")
+        all_item_ids     = payload.get("all_item_ids")   # present when user asked "why" with no product name
+        prior_claims     = payload.get("prior_claims", [])
+        matched_prefs    = payload.get("matched_prefs", [])
+        user_message     = ri.get("user_message", "")
+        items_ctx        = ri.get("items_in_context", {})
+        use_historical   = mc.get("use_historical_items", False)
+        historical_items = mc.get("historical_items", [])
+
+        if use_historical and historical_items:
+            _hist_name = (historical_items[0] if isinstance(historical_items[0], dict) else {}).get("prod_name", "?")
+            print(f"[ASSEMBLER-EXPLAIN] historical item: '{_hist_name}' — context_article path will be used")
 
         print(f"[ASSEMBLER-EXPLAIN] article_id={article_id} all_item_ids={all_item_ids}")
         print(f"[ASSEMBLER-EXPLAIN] matched_prefs count={len(matched_prefs)}")
@@ -564,14 +596,15 @@ class EvidenceAssembler:
             print(f"  [CONFIRM] {cm['attribute']}={cm['value']} weight={cm['weight']:.2f}")
 
         return {
-            "action":            "explanation_generate",
-            "user_message":      user_message,
-            "article":           _article_summary(article) if article else {},
-            "prior_claims":      prior_claims,
-            "confirmed_matches": confirmed_matches,
-            "matched_prefs":     matched_prefs,
-            "user_preferences":  mc.get("long_term_preferences", []),
-            "style_profile":     mc.get("style_profile", {}),
+            "action":              "explanation_generate",
+            "user_message":        user_message,
+            "article":             _article_summary(article) if article else {},
+            "prior_claims":        prior_claims,
+            "confirmed_matches":   confirmed_matches,
+            "matched_prefs":       matched_prefs,
+            "user_preferences":    mc.get("long_term_preferences", []),
+            "style_profile":       mc.get("style_profile", {}),
+            "use_historical_items": use_historical,
         }
 
     # ── item_detail_lookup ─────────────────────────────────────────────────────
@@ -584,10 +617,16 @@ class EvidenceAssembler:
         Uses context data stored at recommendation time when available (no DB query).
         Falls back to PostgreSQL only when detail_desc was not stored in context.
         """
-        payload      = ri.get("payload", {})
-        article_id   = payload.get("article_id")
-        user_message = ri.get("user_message", "")
-        context_art  = payload.get("context_article") or {}
+        payload          = ri.get("payload", {})
+        article_id       = payload.get("article_id")
+        user_message     = ri.get("user_message", "")
+        context_art      = payload.get("context_article") or {}
+        use_historical   = mc.get("use_historical_items", False)
+        historical_items = mc.get("historical_items", [])
+
+        if use_historical and historical_items:
+            _hist_name = (historical_items[0] if isinstance(historical_items[0], dict) else {}).get("prod_name", "?")
+            print(f"[ASSEMBLER-DETAIL] historical item: '{_hist_name}' — context_article path will be used")
 
         article = None
 
@@ -609,11 +648,16 @@ class EvidenceAssembler:
         elif article_id:
             print(f"[ASSEMBLER-DETAIL] context missing detail_desc — querying DB for article_id={article_id}")
             article = await get_article_by_id(str(article_id))
+            if not article and use_historical and historical_items:
+                article = _ctx_to_article(historical_items[0] if isinstance(historical_items[0], dict) else {}) or None
+                if article:
+                    print("[ASSEMBLER-DETAIL] PostgreSQL miss — fell back to historical item data")
 
         return {
-            "action":       "item_detail_lookup",
-            "user_message": user_message,
-            "article":      _article_summary(article) if article else None,
+            "action":              "item_detail_lookup",
+            "user_message":        user_message,
+            "article":             _article_summary(article) if article else None,
+            "use_historical_items": use_historical,
         }
 
     # ── no retrieval (FEEDBACK / CHITCHAT) ────────────────────────────────────
