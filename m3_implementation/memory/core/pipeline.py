@@ -461,6 +461,7 @@ class MemoryPipeline:
             history=history,
             session_id=active_session_id,
             confidence=confidence,
+            user_id=user_id,
         )
 
         # Override retrieval strategy with CSE result
@@ -501,16 +502,28 @@ class MemoryPipeline:
         )
 
         # ── Step 7: Enrich with memory context ────────────────────────────
-        print(f"[DBG-3] ENRICHMENT: calling for label={label}")
-        print(f"[PIPELINE-6] calling enricher...")
-        enriched = await self.enricher.enrich(
-            label=label,
-            retrieval_strategy=retrieval_strategy,
-            session_id=active_session_id,
-            user_id=user_id,
-            current_message=message,
-            entities=entities
-        )
+        # For ATTRIBUTE_QUESTION, CSE already called enrichment internally.
+        # Reuse its result to avoid a duplicate round-trip.
+        if label in ("ATTRIBUTE_QUESTION", "COMPARISON", "EXPLANATION_WHY", "SELECTION_REFERENCE") and _cse_result.enriched_retrieval_input is not None:
+            print(f"[PIPELINE] {label}: using CSE-cached enrichment (skipping duplicate call)")
+            enriched = {
+                "label":              label,
+                "retrieval_strategy": retrieval_strategy,
+                "retrieval_input":    _cse_result.enriched_retrieval_input,
+                "memory_context":     _cse_result.enriched_memory_context or {},
+                "side_effects":       _cse_result.enriched_side_effects or [],
+            }
+        else:
+            print(f"[DBG-3] ENRICHMENT: calling for label={label}")
+            print("[PIPELINE-6] calling enricher...")
+            enriched = await self.enricher.enrich(
+                label=label,
+                retrieval_strategy=retrieval_strategy,
+                session_id=active_session_id,
+                user_id=user_id,
+                current_message=message,
+                entities=entities
+            )
 
         # ── Patch CSE subtypes and excluded_ids into retrieval_input ─────────
         if enriched.get("retrieval_input"):

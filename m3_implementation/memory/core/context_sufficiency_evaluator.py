@@ -95,6 +95,14 @@ class SufficiencyResult:
     # the cached recommendation instead of doing a new catalog search.
     cached_recommendation: list = field(default_factory=list)
 
+    # Populated by label-specific CSE helpers (e.g. _eval_attr_q_cse) when
+    # they call enrichment internally.  When set, the pipeline skips its own
+    # enricher.enrich() call and uses these values directly — avoiding a
+    # duplicate enrichment round-trip for the same turn.
+    enriched_retrieval_input: Optional[dict] = None
+    enriched_memory_context:  Optional[dict] = None
+    enriched_side_effects:    Optional[list] = None
+
 
 class ContextSufficiencyEvaluator:
     """
@@ -127,6 +135,7 @@ class ContextSufficiencyEvaluator:
         history:        list[dict],
         session_id:     str,
         confidence:     float = 0.0,
+        user_id:        str = "",
     ) -> SufficiencyResult:
         """
         Assign retrieval tier and sub-level for a single user turn.
@@ -164,7 +173,7 @@ class ContextSufficiencyEvaluator:
         else:
             # ATTRIBUTE_QUESTION / EXPLANATION_WHY / COMPARISON / SELECTION_REFERENCE
             result = await self._eval_item_reference(
-                label, message, dialogue_state, history, session_id, prior_strategy
+                label, message, dialogue_state, history, session_id, prior_strategy, user_id
             )
 
         # ── Debug logging ─────────────────────────────────────────────────
@@ -446,6 +455,7 @@ class ContextSufficiencyEvaluator:
         history:        list[dict],
         session_id:     str,
         prior_strategy: str,
+        user_id:        str = "",
     ) -> SufficiencyResult:
         """
         ATTRIBUTE_QUESTION / EXPLANATION_WHY / COMPARISON / SELECTION_REFERENCE
@@ -471,47 +481,26 @@ class ContextSufficiencyEvaluator:
               f"item_a={bool(item_a)} ('{(item_a or {}).get('prod_name', '—')}')  "
               f"item_b={bool(item_b)} ('{(item_b or {}).get('prod_name', '—')}')")
 
+        # ── Delegate ATTRIBUTE_QUESTION / COMPARISON to enrichment-backed helpers ─
+        # Each helper calls the matching enrichment function internally and returns
+        # a SufficiencyResult that already carries retrieval_input/memory_context/
+        # side_effects — so the pipeline skips a duplicate enrichment call.
+        # Returns None on failure; execution falls through to the generic path.
+        _enriched_result = await self._dispatch_enrichment_cse(
+            label, message, dialogue_state, history, session_id, prior_strategy, user_id,
+            item_a, item_b,
+        )
+        if _enriched_result is not None:
+            return _enriched_result
+
         # COMPARISON specifically requires both items
         needs_both = (label == "COMPARISON")
         has_sufficient = (bool(item_a) and bool(item_b)) if needs_both else bool(item_a or item_b)
         print(f"[CSE-ITEMREF] needs_both={needs_both}  has_sufficient={has_sufficient}")
 
         if not has_sufficient:
-            # ── Fallback: check full session history in MongoDB ────────────
             print(f"[CSE-ITEMREF] no items in dialogue_state → querying MongoDB fallback (session={session_id})")
-            session_items = await self._find_items_in_full_session(session_id)
-            print(f"[CSE-ITEMREF] MongoDB fallback: found {len(session_items)} item(s) in session history")
-            if session_items:
-                print(f"[CSE-ITEMREF] MongoDB path → PARTIAL_SESSION")
-                return SufficiencyResult(
-                    tier="PARTIAL",
-                    label=label,
-                    prior_strategy=prior_strategy,
-                    override=(prior_strategy != "PARTIAL"),
-                    partial_subtype="PARTIAL_SESSION",
-                    rationale=(
-                        f"{label} → PARTIAL_SESSION. "
-                        "Items not in current dialogue state but found in "
-                        "session history (MongoDB). Bounded lookup sufficient. "
-                        "[Roy2024: follow-up on previously retrieved items]"
-                    ),
-                )
-            else:
-                # No items anywhere in session — must do a fresh catalog search
-                print("[CSE-ITEMREF] no items anywhere in session → escalating to FULL retrieval")
-                return SufficiencyResult(
-                    tier="FULL",
-                    label=label,
-                    prior_strategy=prior_strategy,
-                    override=(prior_strategy != "FULL"),
-                    full_subtype="FULL_STANDARD",
-                    rationale=(
-                        f"{label} → FULL (no items in session). "
-                        f"No recommendations found in this session — "
-                        f"catalog search required before referencing items. "
-                        f"[Jeong2024: retrieval required]"
-                    ),
-                )
+            return await self._eval_no_items_fallback(label, session_id, prior_strategy)
 
         # ── Resolve which specific item the user is asking about ──────────
         # Do this BEFORE checking completeness so we inspect the RIGHT item's
@@ -542,6 +531,350 @@ class ContextSufficiencyEvaluator:
                 "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
             ),
         )
+
+    async def _dispatch_enrichment_cse(
+        self,
+        label:          str,
+        message:        str,
+        dialogue_state: dict,
+        history:        list[dict],
+        session_id:     str,
+        prior_strategy: str,
+        user_id:        str,
+        item_a:         Optional[dict],
+        item_b:         Optional[dict],
+    ) -> Optional[SufficiencyResult]:
+        """
+        Routes ATTRIBUTE_QUESTION / COMPARISON / EXPLANATION_WHY / SELECTION_REFERENCE
+        to their enrichment-backed CSE helpers.
+        Returns None when the label has no enrichment helper, when item preconditions
+        are not met, or when the helper itself fails — caller falls through to generic path.
+        """
+        if label == "ATTRIBUTE_QUESTION":
+            return await self._eval_attr_q_cse(
+                message, dialogue_state, history, session_id, prior_strategy, user_id
+            )
+        if label == "COMPARISON" and bool(item_a and item_b):
+            return await self._eval_comparison_cse(
+                message, dialogue_state, history, session_id, prior_strategy, user_id
+            )
+        if label == "EXPLANATION_WHY" and bool(item_a or item_b):
+            return await self._eval_explanation_why_cse(
+                message, dialogue_state, history, session_id, prior_strategy, user_id
+            )
+        if label == "SELECTION_REFERENCE":
+            return await self._eval_selection_ref_cse(
+                message, dialogue_state, history, session_id, prior_strategy, user_id
+            )
+        return None
+
+    async def _eval_no_items_fallback(
+        self,
+        label:          str,
+        session_id:     str,
+        prior_strategy: str,
+    ) -> SufficiencyResult:
+        """MongoDB fallback when dialogue_state has no items for reference labels."""
+        session_items = await self._find_items_in_full_session(session_id)
+        print(f"[CSE-ITEMREF] MongoDB fallback: found {len(session_items)} item(s) in session history")
+        if session_items:
+            print("[CSE-ITEMREF] MongoDB path → PARTIAL_SESSION")
+            return SufficiencyResult(
+                tier="PARTIAL",
+                label=label,
+                prior_strategy=prior_strategy,
+                override=(prior_strategy != "PARTIAL"),
+                partial_subtype="PARTIAL_SESSION",
+                rationale=(
+                    f"{label} → PARTIAL_SESSION. "
+                    "Items not in current dialogue state but found in "
+                    "session history (MongoDB). Bounded lookup sufficient. "
+                    "[Roy2024: follow-up on previously retrieved items]"
+                ),
+            )
+        print("[CSE-ITEMREF] no items anywhere in session → escalating to FULL retrieval")
+        return SufficiencyResult(
+            tier="FULL",
+            label=label,
+            prior_strategy=prior_strategy,
+            override=(prior_strategy != "FULL"),
+            full_subtype="FULL_STANDARD",
+            rationale=(
+                f"{label} → FULL (no items in session). "
+                "No recommendations found in this session — "
+                "catalog search required before referencing items. "
+                "[Jeong2024: retrieval required]"
+            ),
+        )
+
+    async def _eval_attr_q_cse(
+        self,
+        message:        str,
+        dialogue_state: dict,
+        history:        list[dict],
+        session_id:     str,
+        prior_strategy: str,
+        user_id:        str,
+    ) -> Optional[SufficiencyResult]:
+        """
+        Calls _enrich_attribute_question and maps its result to a SufficiencyResult.
+        Returns None if the enrichment call fails so caller falls through to generic path.
+        """
+        try:
+            from memory.core.enrichment import EnrichmentLayer
+            from memory.models.schemas import DialogueState as _DS
+            _state_obj = _DS(**dialogue_state)
+            _enrich_result = await EnrichmentLayer()._enrich_attribute_question(
+                session_id, user_id, message, {}, _state_obj
+            )
+            _strategy = _enrich_result.get("retrieval_strategy", "PARTIAL")
+
+            if _strategy == "FULL":
+                print("[CSE-ITEMREF] ATTRIBUTE_QUESTION → enrichment=FULL (no items in context)")
+                return SufficiencyResult(
+                    tier="FULL",
+                    label="ATTRIBUTE_QUESTION",
+                    prior_strategy=prior_strategy,
+                    override=True,
+                    full_subtype="FULL_STANDARD",
+                    rationale=(
+                        "ATTRIBUTE_QUESTION → FULL_STANDARD. "
+                        "Enrichment confirmed: no items in context — catalog search required first. "
+                        "[Joren2025: Sufficient(q,C_t)=0]"
+                    ),
+                    enriched_retrieval_input=_enrich_result.get("retrieval_input"),
+                    enriched_memory_context=_enrich_result.get("memory_context"),
+                    enriched_side_effects=_enrich_result.get("side_effects", []),
+                )
+
+            # PARTIAL — determine recency subtype from history
+            _payload      = (_enrich_result.get("retrieval_input") or {}).get("payload") or {}
+            _target_id    = _payload.get("article_id")
+            _discussing   = dialogue_state.get("currently_discussing", {})
+            _target_dict  = next(
+                (v for v in _discussing.values()
+                 if isinstance(v, dict) and v.get("article_id") == _target_id),
+                _discussing.get("item_a"),
+            )
+            _items_recent = self._items_in_recent_history(history, _target_dict, None)
+            _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
+            _target_name  = (_target_dict or {}).get("prod_name", "unknown")
+            print(f"[CSE-ITEMREF] ATTRIBUTE_QUESTION → enrichment=PARTIAL  "
+                  f"target='{_target_name}'  subtype={_partial_sub}")
+            return SufficiencyResult(
+                tier="PARTIAL",
+                label="ATTRIBUTE_QUESTION",
+                prior_strategy=prior_strategy,
+                override=(prior_strategy != "PARTIAL"),
+                partial_subtype=_partial_sub,
+                rationale=(
+                    f"ATTRIBUTE_QUESTION → {_partial_sub}. "
+                    f"Enrichment resolved target: '{_target_name}'. "
+                    f"Context from {'last 3 exchanges (Redis)' if _items_recent else 'earlier in session (MongoDB)'}. "
+                    "Bounded DB lookup sufficient. "
+                    "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
+                ),
+                enriched_retrieval_input=_enrich_result.get("retrieval_input"),
+                enriched_memory_context=_enrich_result.get("memory_context"),
+                enriched_side_effects=_enrich_result.get("side_effects", []),
+            )
+        except Exception as _e:
+            print(f"[CSE-ITEMREF] ATTRIBUTE_QUESTION enrichment call failed: {_e} — falling through to generic path")
+            return None
+
+    async def _eval_comparison_cse(
+        self,
+        message:        str,
+        dialogue_state: dict,
+        history:        list[dict],
+        session_id:     str,
+        prior_strategy: str,
+        user_id:        str,
+    ) -> Optional[SufficiencyResult]:
+        """
+        Calls _enrich_comparison and maps its result to a SufficiencyResult.
+        _enrich_comparison always returns PARTIAL — we only determine the subtype
+        (PARTIAL_RECENT vs PARTIAL_SESSION) here using the history window.
+        Returns None if the enrichment call fails so caller falls through to generic path.
+        Only called when both item_a and item_b exist in dialogue_state.
+        """
+        try:
+            from memory.core.enrichment import EnrichmentLayer
+            from memory.models.schemas import DialogueState as _DS
+            _state_obj = _DS(**dialogue_state)
+            _enrich_result = await EnrichmentLayer()._enrich_comparison(
+                session_id, user_id, message, {}, _state_obj
+            )
+
+            # _enrich_comparison always returns PARTIAL — resolve recency subtype
+            _payload     = (_enrich_result.get("retrieval_input") or {}).get("payload") or {}
+            _discussing  = dialogue_state.get("currently_discussing", {})
+            _a_id        = _payload.get("article_id_a")
+            _b_id        = _payload.get("article_id_b")
+            _item_a_dict = next(
+                (v for v in _discussing.values()
+                 if isinstance(v, dict) and v.get("article_id") == _a_id),
+                _discussing.get("item_a"),
+            )
+            _item_b_dict = next(
+                (v for v in _discussing.values()
+                 if isinstance(v, dict) and v.get("article_id") == _b_id),
+                _discussing.get("item_b"),
+            )
+            _items_recent = self._items_in_recent_history(history, _item_a_dict, _item_b_dict)
+            _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
+            _a_name       = (_item_a_dict or {}).get("prod_name", "item A")
+            _b_name       = (_item_b_dict or {}).get("prod_name", "item B")
+            print(f"[CSE-ITEMREF] COMPARISON → enrichment=PARTIAL  "
+                  f"items='{_a_name}' vs '{_b_name}'  subtype={_partial_sub}")
+            return SufficiencyResult(
+                tier="PARTIAL",
+                label="COMPARISON",
+                prior_strategy=prior_strategy,
+                override=(prior_strategy != "PARTIAL"),
+                partial_subtype=_partial_sub,
+                rationale=(
+                    f"COMPARISON → {_partial_sub}. "
+                    f"Enrichment resolved: '{_a_name}' vs '{_b_name}'. "
+                    f"Context from {'last 3 exchanges (Redis)' if _items_recent else 'earlier in session (MongoDB)'}. "
+                    "Bounded DB lookup sufficient. "
+                    "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
+                ),
+                enriched_retrieval_input=_enrich_result.get("retrieval_input"),
+                enriched_memory_context=_enrich_result.get("memory_context"),
+                enriched_side_effects=_enrich_result.get("side_effects", []),
+            )
+        except Exception as _e:
+            print(f"[CSE-ITEMREF] COMPARISON enrichment call failed: {_e} — falling through to generic path")
+            return None
+
+    async def _eval_explanation_why_cse(
+        self,
+        message:        str,
+        dialogue_state: dict,
+        history:        list[dict],
+        session_id:     str,
+        prior_strategy: str,
+        user_id:        str,
+    ) -> Optional[SufficiencyResult]:
+        """
+        Calls _enrich_explanation_why and maps its result to a SufficiencyResult.
+        _enrich_explanation_why always returns PARTIAL — we only determine the
+        subtype (PARTIAL_RECENT vs PARTIAL_SESSION) using the history window.
+        Returns None if the enrichment call fails so caller falls through to generic path.
+        Only called when at least one item exists in dialogue_state.
+        """
+        try:
+            from memory.core.enrichment import EnrichmentLayer
+            from memory.models.schemas import DialogueState as _DS
+            _state_obj = _DS(**dialogue_state)
+            _enrich_result = await EnrichmentLayer()._enrich_explanation_why(
+                session_id, user_id, message, {}, _state_obj
+            )
+
+            # Determine recency subtype from history
+            _payload      = (_enrich_result.get("retrieval_input") or {}).get("payload") or {}
+            _target_id    = _payload.get("article_id")
+            _discussing   = dialogue_state.get("currently_discussing", {})
+            _target_dict  = (
+                next(
+                    (v for v in _discussing.values()
+                     if isinstance(v, dict) and v.get("article_id") == _target_id),
+                    _discussing.get("item_a"),
+                ) if _target_id else _discussing.get("item_a")
+            )
+            _items_recent = self._items_in_recent_history(history, _target_dict, None)
+            _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
+            _target_name  = (_target_dict or {}).get("prod_name", "all items") if _target_dict else "all items"
+            print(f"[CSE-ITEMREF] EXPLANATION_WHY → enrichment=PARTIAL  "
+                  f"target='{_target_name}'  subtype={_partial_sub}")
+            return SufficiencyResult(
+                tier="PARTIAL",
+                label="EXPLANATION_WHY",
+                prior_strategy=prior_strategy,
+                override=(prior_strategy != "PARTIAL"),
+                partial_subtype=_partial_sub,
+                rationale=(
+                    f"EXPLANATION_WHY → {_partial_sub}. "
+                    f"Enrichment resolved target: '{_target_name}'. "
+                    f"Context from {'last 3 exchanges (Redis)' if _items_recent else 'earlier in session (MongoDB)'}. "
+                    "Bounded DB lookup sufficient. "
+                    "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
+                ),
+                enriched_retrieval_input=_enrich_result.get("retrieval_input"),
+                enriched_memory_context=_enrich_result.get("memory_context"),
+                enriched_side_effects=_enrich_result.get("side_effects", []),
+            )
+        except Exception as _e:
+            print(f"[CSE-ITEMREF] EXPLANATION_WHY enrichment call failed: {_e} — falling through to generic path")
+            return None
+
+    async def _eval_selection_ref_cse(
+        self,
+        message:        str,
+        dialogue_state: dict,
+        history:        list[dict],
+        session_id:     str,
+        prior_strategy: str,
+        user_id:        str,
+    ) -> Optional[SufficiencyResult]:
+        """
+        Calls _enrich_selection_reference and maps its result to a SufficiencyResult.
+        - NO  (no items in context, reclassified to CHITCHAT) → returns None so the
+              generic path falls back to the MongoDB session-history check.
+        - PARTIAL (items found, selected item promoted to item_a) → determines
+              PARTIAL_RECENT vs PARTIAL_SESSION from history.
+        Returns None on failure so caller falls through to generic path.
+        """
+        try:
+            from memory.core.enrichment import EnrichmentLayer
+            from memory.models.schemas import DialogueState as _DS
+            _state_obj = _DS(**dialogue_state)
+            _enrich_result = await EnrichmentLayer()._enrich_selection_reference(
+                session_id, user_id, message, {}, _state_obj
+            )
+            _strategy = _enrich_result.get("retrieval_strategy", "PARTIAL")
+
+            if _strategy == "NO":
+                print("[CSE-ITEMREF] SELECTION_REFERENCE → enrichment=NO (no items) — falling through")
+                return None
+
+            # PARTIAL — determine recency subtype from history
+            _payload      = (_enrich_result.get("retrieval_input") or {}).get("payload") or {}
+            _target_id    = _payload.get("article_id")
+            _discussing   = dialogue_state.get("currently_discussing", {})
+            _target_dict  = (
+                next(
+                    (v for v in _discussing.values()
+                     if isinstance(v, dict) and v.get("article_id") == _target_id),
+                    _discussing.get("item_a"),
+                ) if _target_id else _discussing.get("item_a")
+            )
+            _items_recent = self._items_in_recent_history(history, _target_dict, None)
+            _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
+            _target_name  = (_target_dict or {}).get("prod_name", "unknown")
+            print(f"[CSE-ITEMREF] SELECTION_REFERENCE → enrichment=PARTIAL  "
+                  f"target='{_target_name}'  subtype={_partial_sub}")
+            return SufficiencyResult(
+                tier="PARTIAL",
+                label="SELECTION_REFERENCE",
+                prior_strategy=prior_strategy,
+                override=(prior_strategy != "PARTIAL"),
+                partial_subtype=_partial_sub,
+                rationale=(
+                    f"SELECTION_REFERENCE → {_partial_sub}. "
+                    f"Enrichment resolved target: '{_target_name}'. "
+                    f"Context from {'last 3 exchanges (Redis)' if _items_recent else 'earlier in session (MongoDB)'}. "
+                    "Bounded DB lookup sufficient. "
+                    "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
+                ),
+                enriched_retrieval_input=_enrich_result.get("retrieval_input"),
+                enriched_memory_context=_enrich_result.get("memory_context"),
+                enriched_side_effects=_enrich_result.get("side_effects", []),
+            )
+        except Exception as _e:
+            print(f"[CSE-ITEMREF] SELECTION_REFERENCE enrichment call failed: {_e} — falling through to generic path")
+            return None
 
     # ══════════════════════════════════════════════════════════════════════════
     # Memory helpers

@@ -973,7 +973,7 @@ class EnrichmentLayer:
     async def _enrich_attribute_question(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        print(f"[ENRICH-ATTR] ━━━ called msg='{current_message[:50]}' entities={entities}")
+        print(f"[ENRICH-ATTR] ━━━ called msg='{current_message[:50]}'")
         """ATTRIBUTE_QUESTION → action: item_attribute_lookup.
         
         Guard: if no items are in context, cannot look up an attribute.
@@ -994,7 +994,7 @@ class EnrichmentLayer:
                 "recommended yet. Treating as a new search request."
             )
             return {
-                "label":              "INITIAL_REQUEST",
+                "label":"ATTRIBUTE_QUESTION",
                 "retrieval_strategy": "FULL",
                 "retrieval_input": self._make_retrieval_input(
                     action="catalog_search",
@@ -1009,7 +1009,7 @@ class EnrichmentLayer:
                     }
                 ),
                 "memory_context": memory_ctx,
-                "side_effects":   ["Reclassified: no items in context → INITIAL_REQUEST"],
+                "side_effects":   ["Reclassified: no items in context → ATTRIBUTE_QUESTION"],
             }
 
         # Resolve which item the question is about
@@ -1023,7 +1023,7 @@ class EnrichmentLayer:
         )
 
         return {
-            "label":              "ATTRIBUTE_QUESTION",
+            "label":"ATTRIBUTE_QUESTION",
             "retrieval_strategy": "PARTIAL",
             "retrieval_input": self._make_retrieval_input(
                 action="item_attribute_lookup",
@@ -1043,7 +1043,7 @@ class EnrichmentLayer:
     async def _enrich_explanation_why(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        print(f"[ENRICH-WHY] ━━━ called msg='{current_message[:50]}' entities={entities}")
+        print(f"[ENRICH-WHY] ━━━ called msg='{current_message[:50]}'")
         """
         EXPLANATION_WHY → action: explanation_generate
 
@@ -1128,7 +1128,7 @@ class EnrichmentLayer:
     async def _enrich_comparison(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        print(f"[ENRICH-COMPARE] ━━━ called msg='{current_message[:50]}' entities={entities}")
+        print(f"[ENRICH-COMPARE] ━━━ called msg='{current_message[:50]}'")
         """COMPARISON → action: item_compare"""
         current_items = state.currently_discussing
 
@@ -1193,7 +1193,7 @@ class EnrichmentLayer:
     async def _enrich_selection_reference(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        print(f"[ENRICH-SELECT] ━━━ called msg='{current_message[:50]}' entities={entities}")
+        print(f"[ENRICH-SELECT] ━━━ called msg='{current_message[:50]}'")
         """SELECTION_REFERENCE → action: item_detail_lookup.
         
         Guard: if no items are in context (session just started or no
