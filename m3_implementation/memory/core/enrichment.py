@@ -502,42 +502,65 @@ def _resolve_selection_item(
     return name_item
 
 
-async def _resolve_comparison_items(
-    message: str, all_ctx_items: list, session_id: str
+def _find_second_item(message: str, item_pool: list) -> Optional[ItemInContext]:
+    """
+    Finds the best-matching item from pool by word overlap with no threshold.
+    Used when one item is already identified and we need the second for a comparison.
+    Returns None only when every item scores 0.
+    """
+    if not item_pool:
+        return None
+    msg_lower = message.lower()
+    msg_words = {w for w in msg_lower.split() if len(w) >= 3}
+    best_score, best_item = 0, None
+    for item in item_pool:
+        name_lower = (item.prod_name or "").lower()
+        if name_lower and name_lower in msg_lower:
+            score = 100
+        else:
+            name_words = {w for w in name_lower.split() if len(w) >= 3}
+            score = len(name_words & msg_words)
+        colour = (item.colour_group_name or "").lower()
+        if colour and colour in msg_lower:
+            score += 50
+        if score > best_score:
+            best_score, best_item = score, item
+    return best_item if best_score > 0 else None
+
+
+def _resolve_comparison_items(
+    message: str, all_ctx_items: list
 ) -> tuple:
     """
-    Returns (compare_a, compare_b, compare_list, use_historical) for a COMPARISON turn.
-    Priority: ordinals → name-match last turn → name-match session history → generic fallback.
-    use_historical=True only when session history branch produced the result.
+    Returns (compare_a, compare_b, compare_list, resolved_both) from current context only.
+    resolved_both=True when both items were explicitly identified (not generic fallback).
+    Priority: ordinals → name-match ≥2 → name-match 1 + permissive second → generic fallback.
+    Session history lookup is handled by the caller (_enrich_comparison).
     """
     msg_lower = message.lower()
 
     ordinal_items = _resolve_ordinal_items(msg_lower, all_ctx_items)
     if len(ordinal_items) >= 2:
         print(f"[ENRICH-COMPARE] ordinal-match: {[it.prod_name for it in ordinal_items]}")
-        return ordinal_items[0], ordinal_items[1], ordinal_items, False
+        return ordinal_items[0], ordinal_items[1], ordinal_items, True
 
-    resolved      = _score_items_by_name(message, all_ctx_items)
-    use_historical = False
-    print(f"[ENRICH-COMPARE] name-match (last turn): {[it.prod_name for it in resolved]}")
-
-    if len(resolved) < 2:
-        hist_pool = await _collect_session_items(session_id)
-        if hist_pool:
-            hist_resolved = _score_items_by_name(message, hist_pool)
-            if len(hist_resolved) >= 2:
-                resolved       = hist_resolved
-                use_historical = True
-                print(f"[ENRICH-COMPARE] name-match (session history): "
-                      f"{[it.prod_name for it in resolved]}")
+    resolved = _score_items_by_name(message, all_ctx_items)
+    print(f"[ENRICH-COMPARE] name-match (current): {[it.prod_name for it in resolved]}")
 
     if len(resolved) >= 2:
-        print(f"[ENRICH-COMPARE] named {len(resolved)} item(s): "
-              f"{[it.prod_name for it in resolved]}")
-        return resolved[0], resolved[1], resolved, use_historical
+        return resolved[0], resolved[1], resolved, True
+
+    if len(resolved) == 1:
+        # One item identified clearly — search remaining items permissively for the second
+        remaining = [it for it in all_ctx_items if it.article_id != resolved[0].article_id]
+        second = _find_second_item(message, remaining)
+        if second:
+            print(f"[ENRICH-COMPARE] second item (permissive match): '{second.prod_name}'")
+            pair = [resolved[0], second]
+            return pair[0], pair[1], pair, True
 
     # Generic fallback — compare all last-turn items
-    print(f"[ENRICH-COMPARE] generic: comparing all {len(all_ctx_items)} last-turn items")
+    print(f"[ENRICH-COMPARE] generic fallback: comparing all {len(all_ctx_items)} current items")
     compare_a = all_ctx_items[0] if all_ctx_items else None
     compare_b = all_ctx_items[1] if len(all_ctx_items) > 1 else None
     return compare_a, compare_b, all_ctx_items, False
@@ -697,6 +720,20 @@ async def _find_item_in_session_history(message: str, session_id: str) -> Option
     if not scored:
         return None
     return scored[0]
+
+
+async def _find_items_in_session_history(
+    message: str, session_id: str, n: int = 2
+) -> list:
+    """
+    Searches session history for up to n items matching the message.
+    Returns a list of up to n ItemInContext (empty list if not enough found).
+    """
+    session_items = await _collect_session_items(session_id)
+    if not session_items:
+        return []
+    scored = _score_items_by_name(message, session_items)
+    return scored[:n]
 
 
 # ── Helper: build items_in_context dict ───────────────────────────────────────
@@ -1272,9 +1309,27 @@ class EnrichmentLayer:
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
         memory_ctx = await self._base_memory_context(user_id, state)
 
-        compare_a, compare_b, compare_list, use_historical = await _resolve_comparison_items(
-            current_message, all_ctx_items, session_id
+        compare_a, compare_b, compare_list, resolved_both = _resolve_comparison_items(
+            current_message, all_ctx_items
         )
+        use_historical = False
+
+        # Only fall back to session history when current context couldn't identify either item
+        if not resolved_both:
+            hist_items = await _find_items_in_session_history(current_message, session_id)
+            if len(hist_items) >= 2:
+                print(f"[ENRICH-COMPARE] session history match: "
+                      f"'{hist_items[0].prod_name}' vs '{hist_items[1].prod_name}'")
+                compare_a, compare_b = hist_items[0], hist_items[1]
+                compare_list         = hist_items
+                use_historical       = True
+            else:
+                print("[ENRICH-COMPARE] no session history match (< 2 items) — keeping generic fallback")
+
+        print(f"[ENRICH-COMPARE] final pair: "
+              f"'{compare_a.prod_name if compare_a else '?'}' vs "
+              f"'{compare_b.prod_name if compare_b else '?'}'  "
+              f"resolved_both={resolved_both}  use_historical={use_historical}")
 
         payload = {
             "article_id_a":         compare_a.article_id if compare_a else None,
