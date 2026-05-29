@@ -448,7 +448,7 @@ class TextRAGPipeline:
         elif action == "item_attribute_lookup":
             article = evidence.get("article") or {}
             return (f"Here are the details for {article.get('name','the item')}: "
-                    f"{article.get('material_description','No description available')[:150]}")
+                    f"{(article.get('material_description') or 'No description available')[:150]}")
         elif action == "no_retrieval":
             return evidence.get("refusal_message", "How can I help you today?")
         return "I'm here to help with fashion recommendations. What are you looking for?"

@@ -1,12 +1,14 @@
 # m3_implementation/api/routers/chat.py
 import asyncio
 import json as _json
+import time
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from api.dependencies import get_memory_pipeline, get_rag_pipeline
 from memory.core.rl_signal_collector import get_rl_collector, LABEL_NAME_TO_ID
+from api.latency_logger import determine_tier, compute_response_status, log_turn
 
 
 def _make_json_safe(obj: dict) -> dict:
@@ -339,6 +341,7 @@ async def chat(req: ChatRequest):
             except Exception as _em_err:
                 print(f"[CHAT] early lock read warning (non-fatal): {_em_err}")
 
+        t_start = time.perf_counter()
         print(f"[CHAT] ─── Step 1: calling memory.process_turn (member_model={_early_model})...")
         # Step 1: Memory pipeline
         pipeline_output = await memory.process_turn(
@@ -349,6 +352,7 @@ async def chat(req: ChatRequest):
             member_model=_early_model,
         )
 
+        t_memory_done = time.perf_counter()
         print(f"[CHAT] ─── Memory pipeline done")
         import json as _json
         print("\n" + "="*60)
@@ -549,7 +553,21 @@ async def chat(req: ChatRequest):
                 collection_prefix=effective_model,
             )
 
+        t_rag_done = time.perf_counter()
         print(f"[CHAT] ─── RAG done")
+        _tier, _sub_tier = determine_tier(pipeline_output)
+        log_turn(
+            session_id      = pipeline_output.get("session_id", ""),
+            turn_id         = pipeline_output.get("turn_id", ""),
+            label           = pipeline_output.get("label", ""),
+            tier            = _tier,
+            sub_tier        = _sub_tier,
+            user_message    = req.message,
+            memory_ms       = (t_memory_done - t_start)      * 1000,
+            rag_ms          = (t_rag_done    - t_memory_done) * 1000,
+            total_ms        = (t_rag_done    - t_start)       * 1000,
+            response_status = compute_response_status(rag_result),
+        )
         print(f"[CHAT] rag_result keys: {list(rag_result.keys())}")
         print(f"[CHAT] response_text: '{rag_result.get('response_text','')[:100]}'")
         print(f"[CHAT] action={rag_result.get('action')} items={len(rag_result.get('items_recommended',[]))} hall={rag_result.get('hallucination_flag')} contra={rag_result.get('contradiction_found')}")

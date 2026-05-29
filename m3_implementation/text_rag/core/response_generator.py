@@ -142,7 +142,7 @@ def _build_attribute_prompt(evidence: dict, strictness: int = 0) -> str:
 
     facts_text = "\n".join(f"  {k}: {v}" for k, v in facts.items() if v)
     if not facts_text:
-        facts_text = f"  Description: {article.get('material_description','No description available')[:300]}"
+        facts_text = f"  Description: {(article.get('material_description') or 'No description available')[:300]}"
 
     strictness_instruction = {
         0: "Answer naturally and helpfully.",

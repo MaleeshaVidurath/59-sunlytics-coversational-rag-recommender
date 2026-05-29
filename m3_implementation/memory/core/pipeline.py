@@ -1097,8 +1097,12 @@ class MemoryPipeline:
             return True, None
 
         all_turns = await self.turn_mgr.get_all_session_turns(session_id)
+        _ITEM_INTRODUCING = {
+            "INITIAL_REQUEST", "REFINEMENT",
+            "SELECTION_REFERENCE", "ATTRIBUTE_QUESTION",
+        }
         has_prior_ir = any(
-            (t.get("classification") or {}).get("label") == "INITIAL_REQUEST"
+            (t.get("classification") or {}).get("label") in _ITEM_INTRODUCING
             for t in all_turns
         )
         if has_prior_ir:

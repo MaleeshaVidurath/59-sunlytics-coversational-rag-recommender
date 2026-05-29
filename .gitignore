@@ -33,6 +33,10 @@ node_modules/
 #temporary files
 Accuracy/
 
+# Test results (generated outputs, not source)
+m3_implementation/test_result/
+latency_log.csv
+
 # Empty __init__.py placeholders added for M2 package imports
 m2_multimodal_rag/__init__.py
 m2_multimodal_rag/backend/__init__.py
