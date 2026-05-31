@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 
-const BASE = "http://localhost:8000";
+const BASE = "http://localhost:8300";
 
 async function apiGetCustomers() {
   const r = await fetch(`${BASE}/api/auth/customers`);
@@ -734,15 +734,19 @@ function ChatPage({ user, onLogout, selectedModel, onResetModel }) {
         </div>
 
         <div style={{ flex:1, overflowY:"auto", padding:"10px" }}>
-          {sessions.length === 0
-            ? <div style={{color:C.textMuted,fontSize:12,padding:"16px 4px"}}>No previous chats yet.</div>
-            : sessions.map(s => (
-                <SidebarItem key={s.session_id} session={s}
-                  active={s.session_id === activeSession}
-                  onSelect={selectSession}
-                  onDelete={handleDeleteSession} />
-              ))
-          }
+          {(() => {
+            const filtered = sessions.filter(s =>
+              (s.selected_model || "m3") === selectedModel
+            );
+            if (filtered.length === 0)
+              return <div style={{color:C.textMuted,fontSize:12,padding:"16px 4px"}}>No previous chats yet.</div>;
+            return filtered.map(s => (
+              <SidebarItem key={s.session_id} session={s}
+                active={s.session_id === activeSession}
+                onSelect={selectSession}
+                onDelete={handleDeleteSession} />
+            ));
+          })()}
         </div>
 
         <div style={{ padding:"8px 14px", borderTop:`1px solid ${C.border}` }}>

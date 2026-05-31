@@ -1,4 +1,4 @@
-const BASE = "http://localhost:8000";
+const BASE = "http://localhost:8300";
 
 export async function getCustomers() {
   const res = await fetch(`${BASE}/api/auth/customers`);
