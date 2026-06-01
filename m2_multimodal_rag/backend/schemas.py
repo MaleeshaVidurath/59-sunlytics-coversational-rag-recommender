@@ -21,6 +21,7 @@ class CatalogSearchPayload(BaseModel):
     penalties: Dict[str, List[str]] = Field(default_factory=dict)
     soft_constraints: Dict[str, Any] = Field(default_factory=dict)
     purchase_history_hints: Dict[str, Any] = Field(default_factory=dict)
+    num_items: int = Field(default=2, ge=1, le=6)
 
 class AttributeLookupPayload(BaseModel):
     article_id: str
@@ -118,10 +119,6 @@ class RetrievalInputModel(BaseModel):
 # --- 3. Pipeline Request ---
 
 class PipelineRequest(BaseModel):
-    """
-    Model for the structured input from the m3 Memory Pipeline.
-    Strictly validates against the templates defined in retrieval_input_reference.pdf.
-    """
     retrieval_input: Optional[RetrievalInputModel] = None   # None indicates FEEDBACK or CHITCHAT actions
     memory_context: Optional[Dict[str, Any]] = Field(default_factory=dict)
 

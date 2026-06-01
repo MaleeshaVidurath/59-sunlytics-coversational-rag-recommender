@@ -1,24 +1,27 @@
 import torch
 import open_clip
 import numpy as np
+from PIL import Image
 
 class ClipTextEncoder:
     """
     Local CLIP Encoder for translating VLM Search Strings into 512-D Math Vectors.
     Crucially, it must load the EXACT same model weights ('laion2b_s34b_b79k') used on Kaggle.
+    Also supports image encoding for CLIPScore faithfulness scoring.
     """
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.preprocess_val = None
         print(f"Loading local CLIP Text Encoder on {self.device}...")
-        
+
         try:
-            # We only need the text portion, but we load the whole model to ensure parity.
-            self.model, _, _ = open_clip.create_model_and_transforms(
+            # Load model + image preprocessing transforms
+            self.model, _, self.preprocess_val = open_clip.create_model_and_transforms(
                 'ViT-B-32', pretrained='laion2b_s34b_b79k'
             )
             self.model = self.model.to(self.device)
             self.model.eval()
-            
+
             # Load the CLIP tokenizer
             self.tokenizer = open_clip.get_tokenizer('ViT-B-32')
         except ImportError:
@@ -76,6 +79,29 @@ class ClipTextEncoder:
 
         print(f"   [CLIP Ensemble] Averaged {len(vectors)} query vectors → 1 enriched 512-D vector")
         return avg_vector
+
+
+    def encode_image(self, image_path: str) -> np.ndarray | None:
+        """
+        Encodes a product image into a normalised 512-D CLIP vector.
+        Used by CLIPScore faithfulness scorer for image-text alignment.
+        """
+        if self.preprocess_val is None:
+            return None
+        try:
+            with Image.open(image_path) as img:
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                img_tensor = self.preprocess_val(img).unsqueeze(0).to(self.device)
+
+            with torch.no_grad():
+                image_features = self.model.encode_image(img_tensor)
+                image_features /= image_features.norm(dim=-1, keepdim=True)
+
+            return image_features.cpu().numpy().astype("float32")
+        except Exception as e:
+            print(f"   [CLIP] Image encoding failed: {e}")
+            return None
 
 
 # Singleton instantiator
