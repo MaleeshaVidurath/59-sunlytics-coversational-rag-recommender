@@ -49,6 +49,9 @@ from memory.models.schemas import (
     RecommendationDocument, now_utc
 )
 from memory.db.mongo import get_db, get_collection_name
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from adaptive_rag.distilbert_training.predict import Predictor
 
 
 def _load_distilbert_predictor():
@@ -120,6 +123,7 @@ class MemoryPipeline:
         self.user_mgr    = UserManager()
         self.enricher    = EnrichmentLayer()
 
+        self.predictor: "Predictor | None" = None
         if distilbert_predictor is not None:
             self.predictor = distilbert_predictor
             print("[MemoryPipeline] Using provided DistilBERT predictor.")

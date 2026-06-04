@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 
-const BASE = "http://localhost:8300";
+const BASE = "http://localhost:8000";
 
 async function apiGetCustomers() {
   const r = await fetch(`${BASE}/api/auth/customers`);

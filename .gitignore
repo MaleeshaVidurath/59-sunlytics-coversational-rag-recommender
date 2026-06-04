@@ -33,6 +33,9 @@ node_modules/
 #temporary files
 Accuracy/
 
+# Safety files
+m3_implementation/safety_files/
+
 # Test results (generated outputs, not source)
 m3_implementation/test_result/
 latency_log.csv
