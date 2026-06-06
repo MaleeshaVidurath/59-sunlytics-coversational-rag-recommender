@@ -8,6 +8,9 @@ venv/
 .env
 outputs/
 
+# Large ML model weight files
+*.safetensors
+
 # Data
 data/
 data_old/
@@ -22,8 +25,22 @@ m3_implementation/adaptive_rag/distilbert_training/*.csv
 huggingface_cache/
 m2_multimodal_rag/models/
 
-# Trained sentiment classifier (DistilBERT fine-tuned on SemEval 2017)
+# Trained sentiment classifier model weights and archives
 m3_implementation/memory/models/sentiment_classifier/
+m3_implementation/memory/models/sentiment_classifier.zip
+m3_implementation/notebooks/sentiment/sentiment_preprocessed_data_set/sentiment_classifier_roberta/model.safetensors
+m3_implementation/notebooks/sentiment/sentiment_preprocessed_data_set/sentiment_classifier_roberta/training_args.bin
+m3_implementation/notebooks/sentiment/sentiment_preprocessed_data_set/sentiment_classifier_roberta.zip
+
+# Sentiment dataset CSVs (raw — reproducible via download_sentiment_data_colab.ipynb)
+m3_implementation/notebooks/sentiment/sentiment_data_set/*.csv
+
+# Sentiment dataset CSVs (preprocessed — reproducible via preprocess.py)
+m3_implementation/notebooks/sentiment/sentiment_preprocessed_data_set/tweet_eval_*.csv
+
+# Eval results ZIP archives (extracted contents are kept)
+m3_implementation/notebooks/sentiment/sentiment_preprocessed_data_set/eval_results-*.zip
+m3_implementation/notebooks/sentiment/sentiment_preprocessed_data_set/eval_results-*/
 # OS
 .DS_Store
 Thumbs.db

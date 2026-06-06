@@ -67,7 +67,7 @@ def _get_pipeline():
         _config = os.path.join(_LOCAL_MODEL_DIR, "config.json")
         if os.path.isfile(_config):
             model_source = _LOCAL_MODEL_DIR
-            label = "local DistilBERT (SemEval 2017)"
+            label = "local Twitter-RoBERTa (SemEval 2017, fine-tuned)"
         else:
             model_source = _REMOTE_MODEL
             label = "Cardiff NLP Twitter-RoBERTa (remote fallback)"
