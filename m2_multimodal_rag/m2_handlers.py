@@ -15,7 +15,7 @@ from m2_multimodal_rag.llm_generator import llm_generator
 from m2_multimodal_rag.clip_embeddings import clip_encoder
 from m2_multimodal_rag.faiss_index import faiss_db
 from m2_multimodal_rag.hallucination_guard.regeneration_loop import generator_loop
-from m2_multimodal_rag.hallucination_guard.layer_2_vlm_visual_verification import blip_verifier
+from m2_multimodal_rag.hallucination_guard.layer_3_vlm_visual_verification import blip_verifier
 from m2_multimodal_rag.cross_encoder_reranker import cross_encoder_reranker
 from m2_multimodal_rag.diversity_bandit import diversity_bandit
 from m2_multimodal_rag.knowledge_base.kb_retriever import kb_retriever

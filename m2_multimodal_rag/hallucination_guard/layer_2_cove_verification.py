@@ -1,5 +1,5 @@
 """
-Layer 3 — Enhanced Chain-of-Verification (CoVe).
+Layer 2 — Enhanced Chain-of-Verification (CoVe).
 
 Reference: Dhuliawala et al. (2023), "Chain-of-Verification Reduces
 Hallucination in Large Language Models."
@@ -8,27 +8,24 @@ Mitigation Techniques in Large Language Models" (arXiv:2401.01313v3).
 
 Enhancements over baseline CoVe:
 
-  1. Predefined attribute questions (guaranteed coverage of key fields)
-     Baseline CoVe lets LLM pick questions freely — it tends to pick
-     easy ones it already knows the answer to (self-confirmation bias).
-     We always ask about colour, type, department, and appearance first.
+  1. Fully dynamic question generation — no hardcoded field checks.
+     The LLM reads the explanation and generates questions about the
+     specific claims it made. This handles the infinite vocabulary of
+     a conversational recommender without brittle keyword matching.
 
-  2. DeBERTa NLI consistency judgment (replaces LLM judge)
+  2. DeBERTa NLI consistency judgment (replaces LLM judge).
      Baseline CoVe uses the same LLM to judge its own consistency —
-     unreliable. We replace this with cross-encoder/nli-deberta-v3-base
-     (same model used by M3's contradiction detector) which gives a
-     calibrated CONTRADICTION / NEUTRAL / ENTAILMENT score.
+     unreliable. We use cross-encoder/nli-deberta-v3-base which gives
+     a calibrated CONTRADICTION / NEUTRAL / ENTAILMENT score.
 
-  3. Direct string matching for predefined questions (deterministic)
-     For the predefined attribute questions, we compare the metadata
-     answer directly against the explanation text — no LLM needed.
-     Only LLM-generated questions fall back to NLI judgment.
+  3. Independent execution — questions answered from metadata only,
+     never from the explanation (core CoVe insight).
 
-Four-step pipeline:
-  Step 1 — Draft    : LLM generates explanation (done upstream).
-  Step 2 — Plan     : Predefined attribute questions + LLM-generated questions.
-  Step 3 — Execute  : Answered INDEPENDENTLY from metadata only.
-  Step 4 — Judge    : Direct string match (predefined) + DeBERTa NLI (LLM questions).
+Three-step pipeline:
+  Step 1 — Draft   : LLM generates explanation (done upstream).
+  Step 2 — Plan    : LLM generates fact-checking questions from explanation.
+  Step 3 — Execute : Questions answered from metadata only.
+  Step 4 — Judge   : DeBERTa NLI checks for contradictions.
 """
 
 from m2_multimodal_rag.llm_generator import llm_generator
@@ -52,105 +49,64 @@ def _get_nli():
 _NLI_CONTRADICTION_IDX = 0
 _NLI_CONTRADICTION_THRESHOLD = 0.55
 
-# Predefined attribute questions — always asked regardless of explanation content.
-# Each tuple: (question, metadata_field, display_name)
-_PREDEFINED_CHECKS = [
-    ("What colour is this product?",           "colour_group_name",        "colour"),
-    ("What type of clothing product is this?", "product_type_name",        "product_type"),
-    ("What is the graphical appearance?",      "graphical_appearance_name","appearance"),
-    ("Which department does this belong to?",  "department_name",          "department"),
-]
-
 
 class CoVeVerifier:
     """
-    Enhanced Chain-of-Verification (CoVe) with DeBERTa NLI judgment
-    and predefined attribute questions for guaranteed coverage.
+    Enhanced Chain-of-Verification (CoVe) with DeBERTa NLI judgment.
+    Fully dynamic — no hardcoded field checks or keyword matching.
+    Works correctly regardless of how the LLM phrases its explanation.
     """
 
-    NUM_LLM_QUESTIONS  = 2      # LLM-generated questions on top of predefined ones
-    PASS_THRESHOLD     = 0.67   # fraction of questions that must be consistent
+    NUM_QUESTIONS  = 4     # questions generated per explanation
+    PASS_THRESHOLD = 0.67  # fraction that must be consistent to pass
 
     # ------------------------------------------------------------------ #
-    # Step 2A — Predefined attribute questions (deterministic coverage)
+    # Step 2 — LLM generates fact-checking questions from the explanation
     # ------------------------------------------------------------------ #
-    def _run_predefined_checks(
-        self, explanation: str, metadata: dict
-    ) -> list[dict]:
+    def _plan_questions(self, explanation: str) -> list[str]:
         """
-        Directly checks key attribute claims in the explanation against
-        metadata using case-insensitive string matching — no LLM needed.
-        This catches the most common and obvious hallucinations instantly.
-        """
-        exp_lower = explanation.lower()
-        trail = []
-
-        for question, field, label in _PREDEFINED_CHECKS:
-            meta_val = str(metadata.get(field, "")).strip()
-            if not meta_val or meta_val == "Unknown":
-                continue
-
-            # Check if the metadata value appears in the explanation
-            consistent = meta_val.lower() in exp_lower
-
-            trail.append({
-                "question":        question,
-                "metadata_answer": meta_val,
-                "consistent":      consistent,
-                "method":          "direct_match",
-                "field":           field,
-            })
-
-            status = "PASS" if consistent else "FAIL"
-            print(f"   [CoVe | Predefined] [{status}] {label}: "
-                  f"expected='{meta_val}' in explanation={consistent}")
-
-        return trail
-
-    # ------------------------------------------------------------------ #
-    # Step 2B — LLM-generated questions (dynamic coverage)
-    # ------------------------------------------------------------------ #
-    def _plan_llm_questions(self, explanation: str, metadata: dict) -> list[str]:
-        """
-        Generates additional targeted questions beyond the predefined ones.
-        Focuses on claims specific to this explanation's content.
+        LLM reads the explanation and generates targeted questions about
+        the specific factual claims it contains — colour, fabric, fit,
+        occasion, style, features — anything that can be verified against
+        the product metadata.
         """
         if not llm_generator.is_available or not explanation.strip():
             return []
 
         prompt = (
             f"A fashion recommendation explanation was generated.\n"
-            f"Generate {self.NUM_LLM_QUESTIONS} short fact-checking questions "
-            f"about claims in the explanation that are NOT about colour, type, "
-            f"department, or appearance (those are already checked).\n\n"
+            f"Generate {self.NUM_QUESTIONS} short fact-checking questions "
+            f"about the specific factual claims made in the explanation.\n\n"
             f"Explanation: \"{explanation}\"\n\n"
             f"Rules:\n"
-            f"- Target specific factual claims (style, occasion, features)\n"
+            f"- Cover different claims: colour, fabric, fit, features, occasion\n"
             f"- Each question must be answerable from product metadata alone\n"
             f"- Under 12 words each\n"
-            f"Output ONLY {self.NUM_LLM_QUESTIONS} questions, one per line."
+            f"- Be specific to what this explanation actually claims\n"
+            f"Output ONLY {self.NUM_QUESTIONS} questions, one per line."
         )
 
-        result = llm_generator._call_llm(prompt, max_tokens=60, temperature=0.0)
+        result = llm_generator._call_llm(prompt, max_tokens=100, temperature=0.0)
         if not result:
             return []
 
         questions = [
-            ln.strip("•-– ").strip()
+            ln.strip("•-– 1234567890.").strip()
             for ln in result.strip().split("\n")
             if ln.strip() and len(ln.strip()) > 5
         ]
-        return questions[:self.NUM_LLM_QUESTIONS]
+        return questions[:self.NUM_QUESTIONS]
 
     # ------------------------------------------------------------------ #
-    # Step 3 — Execute independently from metadata
+    # Step 3 — Answer questions from metadata ONLY (never from explanation)
     # ------------------------------------------------------------------ #
     def _execute_independently(
         self, questions: list[str], metadata: dict
     ) -> list[str]:
         """
-        Answers LLM-generated questions from metadata ONLY — never from
-        the explanation (core CoVe insight, Dhuliawala et al., 2023).
+        Answers questions from metadata ONLY — never from the explanation.
+        This is the core CoVe insight: independent execution prevents the
+        LLM from confirming its own claims.
         """
         if not questions or not llm_generator.is_available:
             return ["Unknown"] * len(questions)
@@ -178,19 +134,19 @@ class CoVeVerifier:
         return answers
 
     # ------------------------------------------------------------------ #
-    # Step 4 — DeBERTa NLI consistency judgment
+    # Step 4 — DeBERTa NLI contradiction check
     # ------------------------------------------------------------------ #
     def _nli_consistency(
         self, explanation: str, question: str, metadata_answer: str
     ) -> tuple[bool, float]:
         """
-        Uses DeBERTa NLI to judge whether the metadata-derived answer
-        is consistent with what the explanation claims.
+        Uses DeBERTa NLI to check whether the metadata-derived answer
+        CONTRADICTS what the explanation claims.
 
-        Premise   = fact from metadata ("The product is [answer]")
-        Hypothesis = claim extracted from explanation context
+        Premise    = fact from metadata ("The answer to Q is: A")
+        Hypothesis = the explanation text
 
-        Returns (is_consistent: bool, contradiction_score: float)
+        Returns (is_consistent, contradiction_score).
         Falls back to True (pass) if NLI model unavailable.
         """
         nli = _get_nli()
@@ -218,50 +174,44 @@ class CoVeVerifier:
         self, explanation: str, metadata: dict
     ) -> tuple[bool, list[dict], float]:
         """
-        Runs the full enhanced CoVe pipeline.
+        Runs the full CoVe pipeline — fully semantic, no keyword matching.
 
         Returns:
             passes             bool        True if score >= PASS_THRESHOLD
             verification_trail list[dict]  Q&A pairs with consistency verdicts
             consistency_score  float       fraction consistent (0.0–1.0)
         """
+        # Step 2 — generate questions from the explanation
+        questions = self._plan_questions(explanation)
+        if not questions:
+            return True, [], 1.0
+
+        # Step 3 — answer from metadata independently
+        answers = self._execute_independently(questions, metadata)
+
+        # Step 4 — NLI contradiction check for each Q&A pair
         trail = []
-
-        # --- Step 2A + 4A: Predefined checks (direct string matching) ---
-        predefined_trail = self._run_predefined_checks(explanation, metadata)
-        trail.extend(predefined_trail)
-
-        # --- Step 2B: LLM-generated questions ---
-        llm_questions = self._plan_llm_questions(explanation, metadata)
-
-        # --- Step 3: Answer LLM questions from metadata ---
-        llm_answers = self._execute_independently(llm_questions, metadata)
-
-        # --- Step 4B: DeBERTa NLI judgment for LLM questions ---
-        for question, answer in zip(llm_questions, llm_answers):
+        for question, answer in zip(questions, answers):
             is_consistent, contra_score = self._nli_consistency(
                 explanation, question, answer
             )
             trail.append({
-                "question":          question,
-                "metadata_answer":   answer,
-                "consistent":        is_consistent,
-                "method":            "deberta_nli",
+                "question":            question,
+                "metadata_answer":     answer,
+                "consistent":          is_consistent,
+                "method":              "deberta_nli",
                 "contradiction_score": round(contra_score, 3),
             })
             status = "PASS" if is_consistent else "FAIL"
             print(f"   [CoVe | NLI] [{status}] Q: {question[:50]} | "
                   f"A: {answer} | contra_score={contra_score:.3f}")
 
-        if not trail:
-            return True, [], 1.0
-
         consistent_count  = sum(1 for t in trail if t["consistent"])
         consistency_score = consistent_count / len(trail)
         passes            = consistency_score >= self.PASS_THRESHOLD
 
         status = "PASS" if passes else "FAIL -> regeneration needed"
-        print(f"   [Layer 3 | CoVe] {consistent_count}/{len(trail)} consistent "
+        print(f"   [Layer 2 | CoVe] {consistent_count}/{len(trail)} consistent "
               f"(score={consistency_score:.0%}) -> {status}")
 
         return passes, trail, consistency_score

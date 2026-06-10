@@ -1,10 +1,10 @@
 """
-Layer 2 — VLM Visual Verification (ViLT).
+Layer 3 — VLM Visual Verification (ViLT).
 
 Uses the dandelin/vilt-b32-finetuned-vqa Vision-Language Model to verify
 that the LLM-generated explanation is visually consistent with the actual
 product image. This cross-modal check catches hallucinations that are
-undetectable by text-only methods (Layers 1 and 3).
+undetectable by text-only methods (Layers 1 and 2).
 
 Model: dandelin/vilt-b32-finetuned-vqa (~470 MB, downloaded on first run).
 Runs locally on CPU/GPU via HuggingFace Transformers.
@@ -29,7 +29,7 @@ class VisualVerifier:
     """
 
     def __init__(self):
-        print("M2 Guard | Layer 2: Initialising VLM Visual Verifier (ViLT)...")
+        print("M2 Guard | Layer 3: Initialising VLM Visual Verifier (ViLT)...")
         try:
             self.processor = ViltProcessor.from_pretrained(
                 "dandelin/vilt-b32-finetuned-vqa"
@@ -38,10 +38,10 @@ class VisualVerifier:
                 "dandelin/vilt-b32-finetuned-vqa"
             )
             self._ready = True
-            print("M2 Guard | Layer 2: [SUCCESS] ViLT Visual Verifier ready.")
+            print("M2 Guard | Layer 3: [SUCCESS] ViLT Visual Verifier ready.")
         except Exception as e:
             self._ready = False
-            print(f"M2 Guard | Layer 2: [ERROR] Failed to load ViLT model: {e}")
+            print(f"M2 Guard | Layer 3: [ERROR] Failed to load ViLT model: {e}")
 
     def verify(self, image_path: str, llm_explanation: str, threshold: float = 0.5) -> tuple[bool, str]:
         """
@@ -52,7 +52,7 @@ class VisualVerifier:
             (False, reason_str)  if ViLT answers 'no'  → visual hallucination detected
         """
         if not getattr(self, "_ready", False):
-            return True, "Layer 2: VLM guard in fallback mode (model failed to load). Skipping."
+            return True, "Layer 3: VLM guard in fallback mode (model failed to load). Skipping."
 
         try:
             with Image.open(image_path) as img:
@@ -73,19 +73,19 @@ class VisualVerifier:
                 idx    = outputs.logits.argmax(-1).item()
                 answer = self.model.config.id2label[idx].lower().strip()
 
-                print(f"   [Layer 2 | VLM Guard] ViLT answer: '{answer}'")
+                print(f"   [Layer 3 | VLM Guard] ViLT answer: '{answer}'")
 
                 if "yes" in answer:
-                    return True, f"Layer 2: Explanation matches visual evidence (ViLT: '{answer}')."
+                    return True, f"Layer 3: Explanation matches visual evidence (ViLT: '{answer}')."
                 else:
                     return False, (
-                        f"Layer 2: VLM rejected explanation — ViLT answered '{answer}', "
+                        f"Layer 3: VLM rejected explanation — ViLT answered '{answer}', "
                         f"text contradicts image pixels. Regenerating..."
                     )
 
         except Exception as e:
-            print(f"   [Layer 2 | VLM Guard] Error: {e}. Passing by default.")
-            return True, f"Layer 2: VLM guard error: {e}. Passing by default."
+            print(f"   [Layer 3 | VLM Guard] Error: {e}. Passing by default.")
+            return True, f"Layer 3: VLM guard error: {e}. Passing by default."
 
 
 # Singleton

@@ -1,3 +1,4 @@
+import base64
 import random
 import os
 from groq import Groq
@@ -16,16 +17,17 @@ class ExplanationGenerator:
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY", "")
         self.model_name = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+        self.vision_model_name = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
         self.is_available = False
         self.client = None
-        
+
         # Initialize the Groq client
         if not self.api_key:
             print("M2 LLM: [WARNING] GROQ_API_KEY not found in .env file.")
             print("M2 LLM: Get a free key at https://console.groq.com/keys")
             print("M2 LLM: Falling back to mock mode.")
             return
-            
+
         try:
             self.client = Groq(api_key=self.api_key)
             # Quick test call to verify the key works
@@ -37,20 +39,21 @@ class ExplanationGenerator:
             if test_response.choices:
                 self.is_available = True
                 print(f"M2 LLM: [SUCCESS] Groq Cloud LLM initialized (Model: {self.model_name})")
+                print(f"M2 LLM: [SUCCESS] Vision model configured: {self.vision_model_name}")
             else:
                 print("M2 LLM: [WARNING] Groq returned empty response. Falling back to mock mode.")
         except Exception as e:
             print(f"M2 LLM: [WARNING] Failed to initialize Groq: {e}")
             print("M2 LLM: Falling back to mock mode.")
 
-    def _call_llm(self, prompt: str, max_tokens: int = 150, temperature: float = 0.7) -> str:
+    def _call_llm(self, prompt: str, max_tokens: int = 150, temperature: float = 0.7) -> str | None:
         """
         Sends a prompt to the Groq Cloud API and returns the generated text.
-        Falls back to None if the API call fails.
+        Returns None if unavailable or the API call fails.
         """
         if not self.is_available:
             return None
-            
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -64,91 +67,167 @@ class ExplanationGenerator:
             print(f"   [LLM API Error] {e}")
             return None
 
-    def generate(self, article_id: str, metadata: dict, force_hallucination=False,
-                 product_knowledge: str = "") -> str:
+    def _encode_image_base64(self, image_path: str) -> str | None:
+        """Reads an image file and returns its base64-encoded string, or None on failure."""
+        try:
+            with open(image_path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+        except Exception as e:
+            print(f"   [Vision] Could not encode image {image_path}: {e}")
+            return None
+
+    def _call_vision_llm(self, prompt: str, image_path: str,
+                         max_tokens: int = 150, temperature: float = 0.7) -> str | None:
+        """
+        Sends a prompt + product image to the vision-capable Groq model.
+        Falls back to text-only _call_llm if encoding or API call fails.
+        """
+        if not self.is_available:
+            return None
+
+        b64 = self._encode_image_base64(image_path)
+        if not b64:
+            print("   [Vision] Image encoding failed — falling back to text-only LLM.")
+            return self._call_llm(prompt, max_tokens, temperature)
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.vision_model_name,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            result = response.choices[0].message.content.strip()
+            print(f"   [Vision] Image-grounded generation succeeded.")
+            return result if result else None
+        except Exception as e:
+            print(f"   [Vision LLM API Error] {e} — falling back to text-only LLM.")
+            return self._call_llm(prompt, max_tokens, temperature)
+
+    def generate(self, article_id: str, metadata: dict, force_hallucination: bool = False,
+                 product_knowledge: str = "", image_path: str = "") -> str:
         """
         Generates a natural language explanation of why the item was recommended.
-        Uses Groq Cloud for real generation, with mock fallback.
-        If product_knowledge is provided (from the EMNLP 2023 knowledge loop),
-        it is injected as a grounding context so the LLM stays factually anchored.
+        When image_path is provided the vision LLM sees the actual product image,
+        making the explanation grounded in visual evidence — not just metadata text.
+        Falls back to text-only generation if the vision call fails.
         """
         color = metadata.get('colour_group_name', 'Black')
         product_type = metadata.get('product_type_name', 'Garment')
 
         if force_hallucination:
-            # CAUTION: We intentionally instruct the mock LLM to lie about the color
-            # so we can prove our VLM Guard catches errors mathematically!
             wrong_colors = ['neon green', 'hot pink', 'silver', 'striped magenta']
             bad_color = random.choice(wrong_colors)
             return f"I highly recommend this item! As you can see, it features a beautiful {bad_color} design."
 
-        # Try Groq Cloud API first
         if self.is_available:
             department = metadata.get('department_name', 'Fashion')
             category = metadata.get('product_group_name', 'Clothing')
             detail_desc = metadata.get('detail_desc', '')
-            # NOVELTY 5: psychology-grounded fact from Fashion KB
             kb_fact = metadata.get('kb_psychology_fact', '')
             kb_instruction = (
-                f"\n- Psychology insight: {kb_fact}"
-                if kb_fact else ""
+                f"\n- Psychology insight: {kb_fact}" if kb_fact else ""
             )
-            # EMNLP 2023: inject verified product knowledge as grounding context
             knowledge_instruction = (
                 f"\n\nVerified product knowledge (use this to stay factually grounded):\n{product_knowledge}"
                 if product_knowledge else ""
             )
 
-            prompt = (
-                f"You are a friendly fashion recommendation assistant. "
-                f"Generate a warm, conversational 1-2 sentence explanation of why "
-                f"this item is a great recommendation for the customer.\n\n"
-                f"Item details:\n"
-                f"- Product Type: {product_type}\n"
-                f"- Color: {color}\n"
-                f"- Department: {department}\n"
-                f"- Category: {category}\n"
-                f"- Description: {detail_desc}"
-                f"{kb_instruction}"
-                f"{knowledge_instruction}\n\n"
-                f"Respond with ONLY the recommendation explanation, nothing else. "
-                f"Do not start with 'I recommend' — be creative and natural. "
-                f"If a psychology insight is provided, weave it naturally into your explanation. "
-                f"Only describe features that are supported by the verified product knowledge."
-            )
+            if image_path:
+                # Vision-grounded prompt: LLM sees the actual product image
+                prompt = (
+                    f"You are a friendly fashion recommendation assistant. "
+                    f"The image above shows the actual product being recommended. "
+                    f"Generate a warm, conversational 1-2 sentence explanation grounded in "
+                    f"what you can SEE in the image. Describe visible details like colour, "
+                    f"texture, pattern, fit, or styling that make this item appealing.\n\n"
+                    f"Catalog metadata (for context only):\n"
+                    f"- Product Type: {product_type}\n"
+                    f"- Color: {color}\n"
+                    f"- Department: {department}\n"
+                    f"- Category: {category}\n"
+                    f"- Description: {detail_desc}"
+                    f"{kb_instruction}"
+                    f"{knowledge_instruction}\n\n"
+                    f"Respond with ONLY the recommendation explanation, nothing else. "
+                    f"Do not start with 'I recommend' — be creative and natural. "
+                    f"Prioritise what you observe in the image over the metadata."
+                )
+                print(f"   [Vision] Generating image-grounded explanation for {article_id}...")
+                result = self._call_vision_llm(prompt, image_path)
+            else:
+                # Text-only fallback (no image available)
+                prompt = (
+                    f"You are a friendly fashion recommendation assistant. "
+                    f"Generate a warm, conversational 1-2 sentence explanation of why "
+                    f"this item is a great recommendation for the customer.\n\n"
+                    f"Item details:\n"
+                    f"- Product Type: {product_type}\n"
+                    f"- Color: {color}\n"
+                    f"- Department: {department}\n"
+                    f"- Category: {category}\n"
+                    f"- Description: {detail_desc}"
+                    f"{kb_instruction}"
+                    f"{knowledge_instruction}\n\n"
+                    f"Respond with ONLY the recommendation explanation, nothing else. "
+                    f"Do not start with 'I recommend' — be creative and natural. "
+                    f"If a psychology insight is provided, weave it naturally into your explanation. "
+                    "Only describe features that are supported by the verified product knowledge."
+                )
+                result = self._call_llm(prompt)
 
-            result = self._call_llm(prompt)
             if result:
                 return result
 
         # Fallback to mock template if API unavailable
         return f"I recommend this item because it is a stylish {color} {product_type} that matches your search."
         
-    def regenerate(self, article_id: str, metadata: dict, visual_feedback: str) -> str:
+    def regenerate(self, article_id: str, metadata: dict, visual_feedback: str,
+                   image_path: str = "") -> str:
         """
-        Triggered ONLY if the BLIP Verification Guard rejects the previous explanation.
-        The LLM is prompted with the visual feedback to constrain its next attempt.
+        Triggered when a guard layer rejects the previous explanation.
+        When image_path is provided the vision LLM sees the product image directly,
+        so corrections are grounded in visual evidence rather than feedback text alone.
         """
         color = metadata.get('colour_group_name', 'Black')
         product_type = metadata.get('product_type_name', 'Garment')
 
         print("\n[LLM INTERNAL] Received strict feedback from Visual Guard. Regenerating response...")
 
-        # Try Groq Cloud with corrective feedback
         if self.is_available:
-            prompt = (
-                f"Your previous fashion recommendation was REJECTED by our visual verification system "
-                f"because: \"{visual_feedback}\"\n\n"
-                f"Generate a corrected 1-2 sentence recommendation that ACCURATELY describes "
-                f"this {color} {product_type}. Only describe features that are visually confirmed.\n\n"
-                f"Respond with ONLY the corrected recommendation, nothing else."
-            )
+            if image_path:
+                prompt = (
+                    f"The image above shows the actual product. Your previous fashion recommendation "
+                    f"was REJECTED because: \"{visual_feedback}\"\n\n"
+                    f"Look at the image carefully and generate a corrected 1-2 sentence recommendation "
+                    f"that ACCURATELY reflects what you see. "
+                    f"Catalog metadata for reference: {color} {product_type}.\n\n"
+                    f"Respond with ONLY the corrected recommendation, nothing else."
+                )
+                print(f"   [Vision] Regenerating with image context for {article_id}...")
+                result = self._call_vision_llm(prompt, image_path)
+            else:
+                prompt = (
+                    f"Your previous fashion recommendation was REJECTED by our visual verification system "
+                    f"because: \"{visual_feedback}\"\n\n"
+                    f"Generate a corrected 1-2 sentence recommendation that ACCURATELY describes "
+                    f"this {color} {product_type}. Only describe features that are visually confirmed.\n\n"
+                    f"Respond with ONLY the corrected recommendation, nothing else."
+                )
+                result = self._call_llm(prompt)
 
-            result = self._call_llm(prompt)
             if result:
                 return result
 
-        # Fallback to mock template
         return f"Correcting my previous statement: based on verified visual evidence, this is a {color} {product_type}."
 
     # ------------------------------------------------------------------

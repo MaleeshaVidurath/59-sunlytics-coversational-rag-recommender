@@ -4,8 +4,8 @@ M2 Hallucination Guard — Orchestrator / Regeneration Loop.
 Pipeline (in execution order):
   Pre-filter  — Direct attribute check (deterministic, zero LLM cost)
   Layer 1     — Knowledge-Grounded Self-Reflection (Ji et al., EMNLP 2023)
-  Layer 3     — Enhanced CoVe with DeBERTa NLI (Dhuliawala et al., 2023)
-  Layer 2     — CLIPScore faithfulness (Hessel et al., 2021)
+  Layer 2     — Enhanced CoVe with DeBERTa NLI (Dhuliawala et al., 2023)
+  Layer 3     — CLIPScore faithfulness (Hessel et al., 2021)
               + ViLT VQA visual verification (cross-modal ground truth)
 
 Return value: (explanation: str, verification_trail: dict)
@@ -14,8 +14,8 @@ Return value: (explanation: str, verification_trail: dict)
 from shared.data_loader import data_loader
 from m2_multimodal_rag.llm_generator import llm_generator
 from m2_multimodal_rag.hallucination_guard.layer_1_knowledge_self_reflection import knowledge_reflector
-from m2_multimodal_rag.hallucination_guard.layer_2_vlm_visual_verification    import blip_verifier
-from m2_multimodal_rag.hallucination_guard.layer_3_cove_verification           import cove_verifier
+from m2_multimodal_rag.hallucination_guard.layer_3_vlm_visual_verification    import blip_verifier
+from m2_multimodal_rag.hallucination_guard.layer_2_cove_verification           import cove_verifier
 from m2_multimodal_rag.hallucination_guard.clip_faithfulness_scorer            import clip_faithfulness_scorer
 
 
@@ -33,35 +33,34 @@ class GenerationLoop:
 
     def _direct_attribute_check(self, explanation: str, metadata: dict) -> dict:
         """
-        Deterministic pre-filter. Checks colour, type, and appearance directly
-        against metadata without any LLM call.
-        Returns {attribute: correct_value} for each attribute missing from
-        the explanation. Empty dict = all clear.
+        Deterministic pre-filter. Only checks colour — the one field that
+        must appear verbatim and whose hallucination is always critical
+        (saying 'red' for a black item is unambiguously wrong).
+
+        product_type excluded: vision LLM may correctly call a catalog
+        'Shirt' a 'blouse' based on image evidence — not a hallucination.
+        appearance excluded: 'Solid', 'Striped' are catalog tags that
+        never appear in natural language recommendations.
         """
         exp_lower = explanation.lower()
-        checks = [
-            ("colour",       metadata.get("colour_group_name", "")),
-            ("product_type", metadata.get("product_type_name", "")),
-            ("appearance",   metadata.get("graphical_appearance_name", "")),
-        ]
-        return {
-            label: value
-            for label, value in checks
-            if value and value.strip().lower() not in ("", "unknown")
-            and value.lower() not in exp_lower
-        }
+        colour = str(metadata.get("colour_group_name", "")).strip()
+        if colour and colour.lower() not in ("", "unknown"):
+            if colour.lower() not in exp_lower:
+                return {"colour": colour}
+        return {}
 
     # ── Pipeline stages ────────────────────────────────────────────────────────
 
     def _stage_prefilter(
         self, article_id: str, metadata: dict,
-        force_hallucination: bool, trail: dict,
+        force_hallucination: bool, trail: dict, image_path: str = "",
     ) -> str:
         """Pre-filter: generate initial explanation, fix obvious attribute errors."""
         explanation = llm_generator.generate(
             article_id, metadata,
             force_hallucination=force_hallucination,
             product_knowledge="",
+            image_path=image_path,
         )
         fails = self._direct_attribute_check(explanation, metadata)
         if fails:
@@ -72,7 +71,7 @@ class GenerationLoop:
                 + ". Correct these facts."
             )
             explanation = llm_generator.regenerate(
-                article_id, metadata, visual_feedback=feedback
+                article_id, metadata, visual_feedback=feedback, image_path=image_path,
             )
             trail["layers_passed"].append("pre_filter_corrected")
         else:
@@ -82,7 +81,7 @@ class GenerationLoop:
 
     def _stage_layer1(
         self, article_id: str, metadata: dict,
-        preflight: str, force_hallucination: bool, trail: dict,
+        preflight: str, force_hallucination: bool, trail: dict, image_path: str = "",
     ) -> str:
         """Layer 1: knowledge acquisition + grounded generation + self-reflection."""
         print("   [Layer 1-A] Acquiring verified product knowledge...")
@@ -96,6 +95,7 @@ class GenerationLoop:
                 article_id, metadata,
                 force_hallucination=force_hallucination,
                 product_knowledge=product_knowledge,
+                image_path=image_path,
             )
             if product_knowledge else preflight
         )
@@ -108,19 +108,19 @@ class GenerationLoop:
         if not passes_self:
             print(f"   [Layer 1-C] FAIL — regenerating. Reason: {self_feedback}")
             explanation = llm_generator.regenerate(
-                article_id, metadata, visual_feedback=self_feedback
+                article_id, metadata, visual_feedback=self_feedback, image_path=image_path,
             )
         else:
             trail["layers_passed"].append("layer_1c_self_reflection")
 
         return explanation
 
-    def _stage_layer3(
+    def _stage_layer2(
         self, article_id: str, metadata: dict,
-        explanation: str, trail: dict,
+        explanation: str, trail: dict, image_path: str = "",
     ) -> str:
-        """Layer 3: Enhanced CoVe with DeBERTa NLI."""
-        print("   [Layer 3] CoVe verification...")
+        """Layer 2: Enhanced CoVe with DeBERTa NLI."""
+        print("   [Layer 2] CoVe verification...")
         cove_passes, cove_trail, cove_score = cove_verifier.verify(explanation, metadata)
         trail["cove_trail"]             = cove_trail
         trail["cove_consistency_score"] = round(cove_score, 3)
@@ -134,21 +134,21 @@ class GenerationLoop:
                 "CoVe failed — claims inconsistent with metadata: "
                 + "; ".join(failed) + ". Correct these."
             )
-            print("   [Layer 3] FAIL — regenerating with CoVe feedback...")
+            print("   [Layer 2] FAIL — regenerating with CoVe feedback...")
             explanation = llm_generator.regenerate(
-                article_id, metadata, visual_feedback=feedback
+                article_id, metadata, visual_feedback=feedback, image_path=image_path,
             )
         else:
-            trail["layers_passed"].append("layer_3_cove_verification")
+            trail["layers_passed"].append("layer_2_cove_verification")
 
         return explanation
 
-    def _stage_layer2(
+    def _stage_layer3(
         self, article_id: str, image_path, metadata: dict,
         explanation: str, trail: dict,
     ) -> tuple[str, bool]:
         """
-        Layer 2: CLIPScore faithfulness + ViLT VQA visual verification.
+        Layer 3: CLIPScore faithfulness + ViLT VQA visual verification.
 
         CLIPScore (Hessel et al., 2021) measures cosine similarity between
         CLIP image and text embeddings — a continuous faithfulness metric.
@@ -162,30 +162,32 @@ class GenerationLoop:
         )
         trail["clip_score"] = round(clip_score, 4)
 
+        image_path_str = str(image_path)
+
         if not clip_passes:
-            print("   [Layer 2 | CLIPScore] FAIL — regenerating with visual feedback")
+            print("   [Layer 3 | CLIPScore] FAIL — regenerating with visual feedback")
             explanation = llm_generator.regenerate(
-                article_id, metadata, visual_feedback=clip_feedback
+                article_id, metadata, visual_feedback=clip_feedback, image_path=image_path_str,
             )
-            trail["layers_passed"].append("layer_2_clipscore_corrected")
+            trail["layers_passed"].append("layer_3_clipscore_corrected")
         else:
-            trail["layers_passed"].append("layer_2_clipscore_passed")
+            trail["layers_passed"].append("layer_3_clipscore_passed")
 
         # ── ViLT VQA loop ──────────────────────────────────────────────────
         for attempt in range(1, self.max_vlm_attempts + 1):
-            print(f"   [Layer 2 | ViLT] attempt {attempt}/{self.max_vlm_attempts}...")
-            is_valid, reason = blip_verifier.verify(str(image_path), explanation)
+            print(f"   [Layer 3 | ViLT] attempt {attempt}/{self.max_vlm_attempts}...")
+            is_valid, reason = blip_verifier.verify(image_path_str, explanation)
 
             if is_valid:
-                print("   [Layer 2 | ViLT] PASS")
+                print("   [Layer 3 | ViLT] PASS")
                 trail["vlm_verified"] = True
-                trail["layers_passed"].append("layer_2_vilt_verification")
+                trail["layers_passed"].append("layer_3_vilt_verification")
                 return explanation, True
 
-            print(f"   [Layer 2 | ViLT] FAIL — {reason}")
+            print(f"   [Layer 3 | ViLT] FAIL — {reason}")
 
             if attempt == self.max_vlm_attempts:
-                print("   [Layer 2 | ViLT] Max retries — falling back to metadata template.")
+                print("   [Layer 3 | ViLT] Max retries — falling back to metadata template.")
                 fallback = (
                     f"This is a {metadata.get('colour_group_name', 'Black')} "
                     f"{metadata.get('product_type_name', 'item')}."
@@ -193,7 +195,7 @@ class GenerationLoop:
                 return fallback, True
 
             explanation = llm_generator.regenerate(
-                article_id, metadata, visual_feedback=reason
+                article_id, metadata, visual_feedback=reason, image_path=image_path_str,
             )
 
         return explanation, False
@@ -223,10 +225,12 @@ class GenerationLoop:
             metadata["kb_psychology_fact"] = kb_fact
 
         image_path = data_loader.get_image(article_id)
-        if not image_path or not image_path.exists():
-            return "Visual evidence not available for verification.", {}
+        has_image = image_path is not None and image_path.exists()
+        image_path_str = str(image_path) if has_image else ""
 
         print(f"\n=== Hallucination Guard: Article {article_id} ===")
+        if not has_image:
+            print("   [Guard] No image found — running text-only pipeline (Layers 1+2 active, Layer 3 skipped).")
 
         trail: dict = {
             "knowledge_score":        None,
@@ -236,12 +240,18 @@ class GenerationLoop:
             "cove_consistency_score": None,
             "vlm_verified":           False,
             "layers_passed":          [],
+            "image_grounded":         has_image,
         }
 
-        preflight   = self._stage_prefilter(article_id, metadata, force_hallucination_test, trail)
-        explanation = self._stage_layer1(article_id, metadata, preflight, force_hallucination_test, trail)
-        explanation = self._stage_layer3(article_id, metadata, explanation, trail)
-        explanation, _ = self._stage_layer2(article_id, image_path, metadata, explanation, trail)
+        preflight   = self._stage_prefilter(article_id, metadata, force_hallucination_test, trail, image_path_str)
+        explanation = self._stage_layer1(article_id, metadata, preflight, force_hallucination_test, trail, image_path_str)
+        explanation = self._stage_layer2(article_id, metadata, explanation, trail, image_path_str)
+
+        # Layer 2 requires a valid image — skip it gracefully when unavailable
+        if has_image:
+            explanation, _ = self._stage_layer3(article_id, image_path, metadata, explanation, trail)
+        else:
+            trail["layers_passed"].append("layer_3_skipped_no_image")
 
         return explanation, trail
 
