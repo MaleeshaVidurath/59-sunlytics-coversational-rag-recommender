@@ -13,6 +13,64 @@ detected, the RAG pipeline retries with increased strictness (max 3 attempts).
 
 ---
 
+## Model Roles — Why Two Models
+
+The two models serve completely different purposes and neither can replace the other.
+
+### MiniLM — Encoding and Similarity Only
+
+MiniLM is a **bi-encoder**: it converts each piece of text independently into a numerical vector (embedding). Cosine similarity is then computed between those vectors as a standard math operation — MiniLM itself has no built-in similarity function.
+
+```
+text → MiniLM.encode() → vector → cosine_similarity() → score 0.0–1.0
+```
+
+MiniLM is used in two places:
+- **Stage 3** — encodes all item descriptions and all sentences together, then cosine similarity assigns each item to its matching sentence (the lock map)
+- **Gate 3** — encodes a single fact and all sentences, then cosine similarity picks the best matching sentence for that fact
+
+**MiniLM cannot detect contradiction.** Cosine similarity only measures how close two texts are in meaning — it cannot tell whether one contradicts the other. For example:
+
+- Fact: *"The item is Black in colour."*
+- Sentence: *"This dress comes in Red."*
+
+These score **high** on cosine similarity (both discuss colour) but the meaning is opposite. MiniLM would wrongly suggest they match.
+
+### DeBERTa — Contradiction Detection
+
+DeBERTa is a **cross-encoder**: it takes both the fact and the sentence together as a single input and attends across both simultaneously. This allows it to reason about the *relationship* between them — not just encode each independently.
+
+`cross-encoder/nli-deberta-v3-base` classifies every (fact, sentence) pair as one of:
+- **Entailment** — the sentence confirms the fact
+- **Neutral** — the sentence does not mention the fact
+- **Contradiction** — the sentence directly contradicts the fact
+
+Only a **Contradiction** label with score above threshold triggers a hallucination flag.
+
+### Why DeBERTa Specifically
+
+**1. Cross-encoder architecture**
+DeBERTa attends to both the fact and the sentence together, so it understands their relationship. A bi-encoder like MiniLM encodes each text separately and cannot reason about relationships between them.
+
+**2. Fine-tuned on NLI benchmarks**
+`cross-encoder/nli-deberta-v3-base` is pre-trained on large NLI datasets (MNLI, SNLI). It has already learned what contradiction, entailment, and neutral mean across thousands of real examples. No custom training data is needed.
+
+**3. Disentangled attention**
+DeBERTa separates **content** and **position** into different attention streams. This makes it significantly better than BERT or RoBERTa at detecting subtle semantic differences — exactly the case where two sentences both discuss the same attribute (e.g. colour) but one contradicts the other.
+
+### Why Not Other Approaches
+
+| Alternative | Problem |
+|-------------|---------|
+| Cosine similarity only | Measures closeness, not contradiction — opposite meanings can score high |
+| Rule-based / regex | Cannot handle natural language variation — *"comes in red"* vs *"red coloured"* |
+| LLM self-verification | Too slow, adds another API call per retry, expensive |
+| BERT / RoBERTa NLI | Lower accuracy on subtle contradictions than DeBERTa's disentangled attention |
+
+In summary: **MiniLM finds which sentence to check. DeBERTa decides whether that sentence contradicts the fact.**
+
+---
+
 ## Input
 
 | Parameter | Description |

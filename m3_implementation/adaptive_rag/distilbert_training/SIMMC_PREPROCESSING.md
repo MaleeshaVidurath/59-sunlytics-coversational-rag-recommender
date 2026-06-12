@@ -30,6 +30,20 @@ SIMMC 2.1 was selected because:
 - Well-cited published benchmark (EMNLP 2021, Facebook AI Research)
 - Visual reference turns are identifiable and removable via regex
 
+### Why Each Rejected Dataset Was Not Used
+
+**VOGUE (428 turns) — Too small:**
+Only 428 turns is far too small to retrain a neural classifier. A deep learning model needs thousands of examples per class to generalise; 428 total turns across multiple intent classes would produce an undertrained, unreliable model.
+
+**FashionRec (331,124 turns) — Wrong task, no labels:**
+FashionRec has no intent annotations — there is no label indicating what the user wants (searching, refining, comparing). Without labels there is nothing to train a classifier on. Additionally, FashionRec is designed for *outfit assembly* (combining multiple clothing items into a complete outfit), which is a fundamentally different task from our conversational recommender where users search and refine individual product recommendations. Even if labels existed, the dialogue structure and user behaviour would not match our system.
+
+**MMD (262,300 turns) — Wrong label type, language mismatch:**
+MMD labels are question-type only (e.g. "what is the price?") and do not include initial request labels — the most important class for our system. Additionally, MMD is written in Indian English, which does not match the American English register of our synthetic training data, risking vocabulary and phrasing mismatch during fine-tuning.
+
+**Why SIMMC 2.1 annotation quality can be trusted:**
+SIMMC 2.1 was published at EMNLP 2021, a top-tier academic NLP conference where submissions are peer-reviewed by domain experts before acceptance. The dataset was built by Facebook AI Research using trained human annotators following a formal annotation guide. This means the intent labels are verified, consistent ground truth — not noisy or self-labelled — and can be academically cited without manual re-verification.
+
 ---
 
 ## Intent Label Mapping
