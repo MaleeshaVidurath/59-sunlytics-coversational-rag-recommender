@@ -88,6 +88,66 @@ from text_rag.db.qdrant_client import semantic_search
 from text_rag.config import MAX_RECOMMENDATIONS
 
 
+def _rank_by_preferences(
+    articles: list,
+    preference_boosts: list = None,
+    purchase_hints: dict = None,
+    penalties: dict = None,
+    filters: dict = None,
+) -> list:
+    """
+    Re-ranks articles by preference boost weights and purchase history hints.
+    Applied separately to Qdrant results and PostgreSQL results before merging,
+    so both sources are ranked on the same scale and Qdrant keeps priority.
+
+    penalties: only passed for PostgreSQL results — demotes disliked items
+               without removing them. Not applied to Qdrant results yet.
+    filters:   current turn's hard filters — penalty values matching a filter
+               value are suppressed so user-requested attributes are never demoted.
+    """
+    if not articles:
+        return []
+
+    boost_map = {}
+    if preference_boosts:
+        for boost in preference_boosts:
+            key = (boost['attribute'], boost['value'])
+            boost_map[key] = boost['weight']
+
+    top_colours   = []
+    top_types     = []
+    gender_groups = []
+    if purchase_hints:
+        top_colours = purchase_hints.get('top_colours', [])
+        top_types   = purchase_hints.get('top_product_types', [])
+        _gender_map = {'female': ['Ladieswear', 'Divided'], 'male': ['Menswear']}
+        gender_groups = _gender_map.get(purchase_hints.get('inferred_gender', ''), [])
+
+    def score(art):
+        s = 0.0
+        for (attr, val), weight in boost_map.items():
+            if art.get(attr) == val:
+                s += weight
+        if art.get('colour_group_name') in top_colours:
+            idx = top_colours.index(art['colour_group_name'])
+            s += 0.3 * (1 - idx / max(len(top_colours), 1))
+        if art.get('product_type_name') in top_types:
+            idx = top_types.index(art['product_type_name'])
+            s += 0.2 * (1 - idx / max(len(top_types), 1))
+        if gender_groups and art.get('index_group_name') in gender_groups:
+            s += 0.25
+        if penalties:
+            filter_values = filters or {}
+            for attr, disliked_values in penalties.items():
+                art_val = art.get(attr)
+                # Never demote a value the user explicitly asked for this turn
+                if art_val in disliked_values and art_val != filter_values.get(attr):
+                    s -= 0.5
+        return s
+
+    return sorted(articles, key=score, reverse=True)
+
+
 def _format_price(price) -> str:
     if price is None:
         return "Price not available"
@@ -214,8 +274,10 @@ class EvidenceAssembler:
 
         print(f"[ASSEMBLER-QDRANT] got {len(qdrant_results)} results")
         for _qr in qdrant_results[:3]: print(f"  [QDRANT] {str(_qr.get('article_id',_qr.get('id','?')))[:12]} {str(_qr.get('prod_name',_qr.get('name','?')))[:25]} {_qr.get('colour_group_name',_qr.get('colour','?'))}")
-        # Step 2: PostgreSQL filtered search for ranking diversity
-        # Fetch larger pool when user requests multiple items
+        # Step 1b: Preference-rank Qdrant results before merge
+        qdrant_results = _rank_by_preferences(qdrant_results, preference_boosts, purchase_hints)
+
+        # Step 2: PostgreSQL filtered search for diversity / Qdrant fallback
         print(f"\n[ASSEMBLER-CATALOG] ━━━ catalog search ━━━")
         requested_qty = _extract_quantity(user_message, payload_qty)
         print(f"[ASSEMBLER-CATALOG] qty={requested_qty} msg='{user_message[:60]}'")
@@ -229,11 +291,10 @@ class EvidenceAssembler:
         pg_results = await search_articles_filtered(
             filters=filters,
             exclude_ids=exclude_ids,
-            preference_boosts=preference_boosts,
-            purchase_hints=purchase_hints,
-            penalties=penalties,
             limit=search_limit
         )
+        # Preference-rank PostgreSQL results before merge (penalties applied here as soft demotes)
+        pg_results = _rank_by_preferences(pg_results, preference_boosts, purchase_hints, penalties, filters)
 
         print(f"[ASSEMBLER-POSTGRES] got {len(pg_results)} results")
         for _pr in pg_results[:3]: print(f"  [POSTGRES] {str(_pr.get('article_id','?'))[:12]} {str(_pr.get('prod_name','?'))[:25]} {_pr.get('colour_group_name','?')} £{_pr.get('avg_price','?')}")
@@ -278,9 +339,9 @@ class EvidenceAssembler:
                 )
                 _pg2 = await search_articles_filtered(
                     filters=_relaxed, exclude_ids=exclude_ids,
-                    preference_boosts=preference_boosts, purchase_hints=purchase_hints,
-                    penalties=penalties, limit=search_limit
+                    limit=search_limit
                 )
+                _pg2 = _rank_by_preferences(_pg2, preference_boosts, purchase_hints, penalties, _relaxed)
                 for art in _qr2 + _pg2:
                     aid = str(art.get("article_id", ""))
                     if aid not in seen_ids:
@@ -299,9 +360,9 @@ class EvidenceAssembler:
                 )
                 _pg3 = await search_articles_filtered(
                     filters=_minimal, exclude_ids=exclude_ids,
-                    preference_boosts=preference_boosts, purchase_hints=purchase_hints,
-                    penalties=penalties, limit=search_limit
+                    limit=search_limit
                 )
+                _pg3 = _rank_by_preferences(_pg3, preference_boosts, purchase_hints, penalties, _minimal)
                 for art in _qr3 + _pg3:
                     aid = str(art.get("article_id", ""))
                     if aid not in seen_ids:

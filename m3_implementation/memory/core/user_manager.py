@@ -300,9 +300,16 @@ class UserManager:
         # Sort by weight descending — strongest preferences first
         liked.sort(key=lambda x: x["weight"], reverse=True)
 
-        # Build disliked values dict for easy exclusion in retrieval
+        # Build disliked values dict for retrieval penalty scoring.
+        # Only include dislikes with effective_weight >= 0.3:
+        #   effective_weight = abs(sentiment) × confidence × decay_weight
+        # Weak or heavily decayed dislikes are ignored — too old or uncertain
+        # to meaningfully restrict results.
         disliked: dict[str, list[str]] = {}
         for pref in user.disliked_attributes:
+            effective_weight = abs(pref.sentiment) * pref.confidence * pref.decay_weight
+            if effective_weight < 0.5:
+                continue
             attr = pref.attribute_name
             if attr not in disliked:
                 disliked[attr] = []

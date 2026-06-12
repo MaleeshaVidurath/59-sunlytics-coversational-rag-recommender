@@ -60,17 +60,18 @@ Return final response to user
 
 ### INITIAL_REQUEST — strategy: FULL
 - **Action:** `catalog_search`
-- Qdrant semantic search with user filters → top 10 candidates
-- PostgreSQL fetches full data for those article IDs
-- ResponseGenerator produces a fresh 4-item recommendation list
+- Qdrant semantic search (filters applied before cosine scoring) → up to 20 candidates, preference-ranked
+- PostgreSQL filtered search (same hard filters, no penalty SQL) → up to 20 candidates, preference-ranked with penalty demotion
+- Both result sets merged (Qdrant first), deduplicated, top N selected
+- ResponseGenerator produces a fresh recommendation list
 - Hallucination checked (name, colour, price verified)
-- Contradiction detector adds 4 new product nodes to session graph
+- Contradiction detector adds new product nodes to session graph
 - Items stored in memory as current recommendations
 
 ### REFINEMENT — strategy: FULL
 - **Action:** `catalog_search`
-- Same as INITIAL_REQUEST but filters are updated (new colour, price range, style)
-- Previously rejected items excluded via memory context
+- Same dual Qdrant + PostgreSQL search but filters updated (new colour, price range, style)
+- Previously rejected items excluded via `exclude_ids` in both searches
 - Full new search — completely replaces previous results
 
 ### ATTRIBUTE_QUESTION — strategy: PARTIAL
@@ -411,38 +412,59 @@ SELECT * FROM articles WHERE article_id = ANY($1::bigint[])
 ```
 Preserves the order of the input ID list (Qdrant rank order).
 
-**`search_articles_filtered(filters, exclude_ids, preference_boosts, penalties)`**
-Used by: `catalog_search` as a fallback or secondary ranking source
-Applies all hard filters as WHERE conditions:
+**`search_articles_filtered(filters, exclude_ids, limit)`**
+Used by: `catalog_search` as a parallel structured search alongside Qdrant.
+Applies hard filters as WHERE conditions — returns raw candidates in price-ascending order.
+Preference ranking and penalty demotion are applied AFTER this call by `EvidenceAssembler`,
+not inside the SQL query.
 ```sql
 SELECT * FROM articles
-WHERE colour_group_name      = $1    -- exact match
-  AND product_type_name      = $2    -- exact match
-  AND avg_price              <= $3   -- range
-  AND article_id             != ALL($4::bigint[])  -- exclude rejected
-  AND colour_group_name      != ALL($5::text[])    -- penalties
+WHERE colour_group_name      = $1    -- exact match (if provided)
+  AND product_type_name      = $2    -- exact match (if provided)
+  AND graphical_appearance_name = $3 -- exact match (if provided)
+  AND avg_price              <= $4   -- range (if provided)
+  AND article_id             != ALL($5::bigint[])  -- exclude rejected
 ORDER BY avg_price ASC
 LIMIT 20
 ```
-Results are then re-ranked by `_rank_by_preferences()`.
+**Note:** Penalties are NOT in the SQL. They were removed to prevent contradictions
+where a user asks for a value (e.g. "White") that is also in their dislike history,
+which would produce SQL like `colour = 'White' AND colour != ALL(['White', ...])` → 0 results.
 
 **`get_articles_for_comparison(article_id_a, article_id_b)`**
 Used by: `item_compare`
 Wraps `get_articles_by_ids()` and returns `(item_a, item_b)` tuple.
 
-### Preference Boost Ranking
+### Preference Ranking — `_rank_by_preferences()`
 
-After PostgreSQL returns filtered candidates, `_rank_by_preferences()` re-ranks
-them by a weighted score:
+**Location:** `text_rag/core/evidence_assembler.py` (module-level function)
+
+Applied **separately** to Qdrant results and PostgreSQL results before merging.
+Both result sets are scored on the same scale so that Qdrant results (placed first in
+the merge) are also preference-ranked, not just raw cosine-similarity order.
 
 ```
-score = preference_boost_weight (from user memory)
-      + 0.3 × purchase_history_colour_rank
-      + 0.2 × purchase_history_type_rank
+score per article =
+    + preference_boost_weight      for each liked attribute match
+    + 0.3 × (1 - rank/n)          if colour matches top purchase history colours
+    + 0.2 × (1 - rank/n)          if product type matches top purchase history types
+    + 0.25                         if index_group matches inferred_gender group
+    - 0.5                          for each disliked attribute match (penalties)
+                                   ← SKIPPED if the penalised value matches the
+                                      current turn's hard filter value
 ```
 
-Higher score → ranked first. This means a user who consistently buys black items
-will see black options ranked above other colours, even within the same filter set.
+**Penalty suppression rule (filter suppression):**
+If the user asked for `colour_group_name = "Blue"` this turn, and "Blue" is also in
+their dislike penalties, the `-0.5` deduction is suppressed for that attribute.
+This prevents the system from demoting the exact thing the user just asked for.
+
+**Penalties only apply to PostgreSQL results.** Qdrant results are ranked by preference
+boosts and purchase history only — penalty support for Qdrant is a future addition.
+
+**inferred_gender is a soft boost, not a filter.** A `mixed` gender history or a gift
+shopper should still see all results — the `+0.25` bonus is applied to the matching
+gender group but nothing is excluded.
 
 ### Data Loading (done once at startup)
 
@@ -476,36 +498,62 @@ roles. Neither can replace the other.
 
 ### Combined Flow for INITIAL_REQUEST / REFINEMENT
 
+Both databases run **in parallel** — Qdrant for semantic relevance, PostgreSQL for structured
+filtering. Results from each are preference-ranked separately, then merged (Qdrant first).
+
 ```
 User: "I want a blue casual jacket under £50"
      ↓
-Memory Pipeline extracts filters:
-  product_type_name = "Jacket"
-  colour_group_name = "Blue"
-  price_max         = 50.0
-  exclude_ids       = [previously rejected article IDs]
+Memory Pipeline extracts:
+  filters            = {product_type_name: "Jacket", colour_group_name: "Blue", price_max: 50.0}
+  preference_boosts  = [{colour: Black, weight: 0.68}, {type: Dress, weight: 0.61}, ...]
+  purchase_hints     = {top_colours: [Black, White, ...], inferred_gender: female, ...}
+  penalties          = {colour_group_name: ["Orange"]}   ← only strong dislikes (≥ 0.5)
+  exclude_ids        = [previously rejected article IDs]
      ↓
-Qdrant semantic_search(
-    query   = "blue casual jacket",
-    filters = {product_type_name, colour_group_name, price_max},
-    exclude = [rejected_ids],
-    top_k   = 10
-)
-→ returns 10 article payloads ranked by cosine similarity
-     ↓
-Extract article_ids from Qdrant results (preserve rank order)
-     ↓
-PostgreSQL get_articles_by_ids(article_ids)
-→ returns full 24-field article dicts in rank order
-     ↓
+┌─────────────────────────────────────┐  ┌────────────────────────────────────────────┐
+│ Qdrant semantic_search()            │  │ PostgreSQL search_articles_filtered()      │
+│  query  = "blue casual jacket"      │  │  filters = {colour: Blue, type: Jacket,    │
+│  filters = {colour, type, price}    │  │            price_max: 50.0}               │
+│  exclude = [rejected_ids]           │  │  exclude = [rejected_ids]                  │
+│  top_k  = 20                        │  │  limit   = 20                              │
+│  → 20 articles (cosine ranked)      │  │  → up to 20 articles (price-ascending)     │
+└────────────────┬────────────────────┘  └──────────────────┬─────────────────────────┘
+                 │                                           │
+                 ↓                                           ↓
+  _rank_by_preferences(                      _rank_by_preferences(
+    articles = qdrant_results,                 articles = pg_results,
+    preference_boosts = [...],                 preference_boosts = [...],
+    purchase_hints = {...},                    purchase_hints = {...},
+    penalties = None          ← not applied    penalties = {"colour": ["Orange"]},
+  )                                            filters = {colour: Blue, type: Jacket}
+                                             )
+                                             ← "Blue" penalty suppressed because
+                                                colour_group_name filter = "Blue"
+                 │                                           │
+                 └──────────────┬────────────────────────────┘
+                                ↓
+              Merge: Qdrant results first (preserve semantic priority)
+              then PostgreSQL results not already seen (add structural diversity)
+              Deduplicate by article_id
+                                ↓
+              Post-merge hard exclude filter (safety gate for rejected IDs)
+                                ↓
+              If 0 results → filter relaxation fallback:
+                Pass 1: drop price constraints → retry Qdrant + PostgreSQL
+                Pass 2: keep only product_type_name → retry Qdrant + PostgreSQL
+                        (each fallback also applies _rank_by_preferences to PG results)
+                                ↓
+              Select top N items (colour diversity applied if N > 2)
+                                ↓
 EvidenceAssembler builds evidence bundle:
-  { action: "catalog_search", items: [4 full article dicts] }
+  { action: "catalog_search", items: [N full article dicts] }
      ↓
-ResponseGenerator builds prompt with those 4 articles → Groq LLM → response
+ResponseGenerator builds prompt → Groq LLM → response
      ↓
 HallucinationChecker verifies name/colour/price in response match evidence
      ↓
-ContradictionDetector updates session graph with 4 product nodes
+ContradictionDetector updates session graph with N product nodes
      ↓
 Final response → user
 ```
