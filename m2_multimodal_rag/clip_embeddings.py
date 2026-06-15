@@ -2,11 +2,18 @@ import torch
 import open_clip
 import numpy as np
 from PIL import Image
+from pathlib import Path
+
+# Fine-tuned CLIP checkpoint (trained on the H&M sample dataset, see finetune_clip/).
+# If present, it overrides the stock laion2b weights — it MUST match the weights
+# used to build the FAISS index, or query/item vectors will be mismatched.
+FINETUNED_WEIGHTS_PATH = Path(__file__).resolve().parent / 'models' / 'clip_finetuned_hm_best.pt'
 
 class ClipTextEncoder:
     """
     Local CLIP Encoder for translating VLM Search Strings into 512-D Math Vectors.
-    Crucially, it must load the EXACT same model weights ('laion2b_s34b_b79k') used on Kaggle.
+    Crucially, it must load the EXACT same model weights used on Kaggle to build
+    the FAISS index (fine-tuned H&M checkpoint if available, else 'laion2b_s34b_b79k').
     Also supports image encoding for CLIPScore faithfulness scoring.
     """
     def __init__(self):
@@ -19,6 +26,15 @@ class ClipTextEncoder:
             self.model, _, self.preprocess_val = open_clip.create_model_and_transforms(
                 'ViT-B-32', pretrained='laion2b_s34b_b79k'
             )
+
+            # Override with the H&M fine-tuned weights when the checkpoint exists
+            if FINETUNED_WEIGHTS_PATH.exists():
+                state_dict = torch.load(FINETUNED_WEIGHTS_PATH, map_location='cpu')
+                self.model.load_state_dict(state_dict)
+                print(f"   [CLIP] Loaded fine-tuned H&M weights from {FINETUNED_WEIGHTS_PATH.name}")
+            else:
+                print("   [CLIP] Fine-tuned checkpoint not found — using stock laion2b weights")
+
             self.model = self.model.to(self.device)
             self.model.eval()
 
