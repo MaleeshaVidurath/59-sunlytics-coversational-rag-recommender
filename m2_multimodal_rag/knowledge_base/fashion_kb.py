@@ -1,7 +1,5 @@
 """
-Fashion Psychology Knowledge Base — NOVELTY 5
-
-Three-layer expert knowledge base grounded in peer-reviewed fashion psychology research:
+Fashion Psychology Knowledge Base
 
   Layer 1 — COLOR_PSYCHOLOGY
     Maps colour_group_name values to psychological emotions, occasion suitability,

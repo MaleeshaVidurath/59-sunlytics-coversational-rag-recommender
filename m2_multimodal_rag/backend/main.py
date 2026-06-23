@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from m2_multimodal_rag.m2_action_router import m2_router
 from shared.data_loader import data_loader
-from .schemas import PipelineRequest, SimpleSearchRequest
+from .schemas import PipelineRequest
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")

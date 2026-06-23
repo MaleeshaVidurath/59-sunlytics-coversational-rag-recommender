@@ -34,3 +34,5 @@ Accuracy/
 m2_multimodal_rag/__init__.py
 m2_multimodal_rag/backend/__init__.py
 shared/__init__.py
+m2_multimodal_rag/CLAUDE.md
+CLAUDE.md

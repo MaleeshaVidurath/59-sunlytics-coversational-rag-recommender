@@ -4,18 +4,9 @@ import numpy as np
 from PIL import Image
 from pathlib import Path
 
-# Fine-tuned CLIP checkpoint (trained on the H&M sample dataset, see finetune_clip/).
-# If present, it overrides the stock laion2b weights — it MUST match the weights
-# used to build the FAISS index, or query/item vectors will be mismatched.
 FINETUNED_WEIGHTS_PATH = Path(__file__).resolve().parent / 'models' / 'clip_finetuned_hm_best.pt'
 
 class ClipTextEncoder:
-    """
-    Local CLIP Encoder for translating VLM Search Strings into 512-D Math Vectors.
-    Crucially, it must load the EXACT same model weights used on Kaggle to build
-    the FAISS index (fine-tuned H&M checkpoint if available, else 'laion2b_s34b_b79k').
-    Also supports image encoding for CLIPScore faithfulness scoring.
-    """
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.preprocess_val = None

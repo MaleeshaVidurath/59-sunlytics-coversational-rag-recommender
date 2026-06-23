@@ -291,14 +291,14 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
     print(f"  [catalog_search] Base search text: '{base_search_text}'")
 
     expanded_queries = llm_generator.expand_query(base_search_text)
-    query_vector     = clip_encoder.encode_expanded(expanded_queries)
+    query_vectors    = [clip_encoder.encode_text(q) for q in expanded_queries if q]
 
-    if query_vector is None:
+    if not query_vectors:
         return {"action": "catalog_search", "success": False,
                 "response_text": "I couldn't process your search request.",
                 "items": [], "error": "CLIP encoding failed"}
 
-    candidates = faiss_db.search(query_vector, top_k=50)
+    candidates = faiss_db.search_multi(query_vectors, top_k=50)
     if not candidates:
         return {"action": "catalog_search", "success": False,
                 "response_text": "I couldn't find any items matching your search.",
@@ -459,7 +459,7 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
 
     top_results = faiss_db.mmr_select(
         candidates=reranked_results,
-        query_vector=query_vector,
+        query_vector= query_vectors[0],
         top_k=num_items,
         lambda_param=adaptive_lambda,
     ) or reranked_results[:num_items]
