@@ -12,6 +12,55 @@ The DistilBERT intent classifier was originally trained on 52,028 synthetic samp
 
 ---
 
+## Dataset Background
+
+### What is SIMMC?
+
+**SIMMC** stands for **Situated and Interactive Multimodal Conversations**. It originated from SIMMC 1.0, introduced by Moon et al. (2020) as part of the **DSTC9** (Dialog System Technology Challenge 9) competition. SIMMC 2.0 extended this into a richer shopping scenario, published at EMNLP 2021 by Facebook AI Research. SIMMC 2.1 is a corrected and cleaned iteration of 2.0, released in June 2022 for the **DSTC11-SIMMC2.1 Challenge** — hence the version mismatch between the paper title ("SIMMC 2.0") and the data files used here ("2.1"). The foundational paper, methodology, and annotation scheme described in the EMNLP 2021 paper carry over entirely to 2.1; this is why the 2021 paper remains the canonical citation.
+
+### DSTC Challenge Progression
+
+| Challenge | Dataset Version | Year |
+|-----------|----------------|------|
+| DSTC9 | SIMMC 1.0 | 2020 |
+| DSTC10 | SIMMC 2.0 | 2021 |
+| DSTC11 | SIMMC 2.1 | 2022 |
+
+This progression shows the dataset is actively maintained and has served as a standard benchmark across three consecutive international competitions.
+
+### Full Dataset Numbers (Paper)
+
+The EMNLP 2021 paper reports figures for the **complete dataset** (all splits combined):
+
+| Metric | Value |
+|--------|-------|
+| Total dialogues | 11,244 |
+| Total utterances | ~117K |
+| Domains | Fashion + Furniture |
+| Official split | 65% train / 5% dev / 15% devtest / 15% test-std |
+| Avg utterance pairs per dialogue | 5.2 |
+| Avg objects per scene | 27.6 (max 141) |
+| Avg unique objects referenced per dialogue | 4.5 |
+
+The numbers in this document (7,307 dialogues, 38,127 user turns) come specifically from the train-split JSON file (`simmc2.1_dials_dstc11_train.json`), which is the subset used for retraining — not the complete dataset described in the paper.
+
+### What the Dataset Was Built For (The VR Shopping Context)
+
+SIMMC 2.1 was designed to train AI assistants that exist inside a **3D virtual shopping environment**. The user "walks around" a virtual store wearing a VR-like setup, sees racks of clothing rendered as photo-realistic scenes, and converses with an assistant about items they can literally see in front of them — pointing at specific items, referring to their positions, and navigating through the scene. The conversational context is dynamically updated each turn based on user actions such as verbal interactions and navigation within the virtual scene.
+
+This is why the dataset has a high degree of referential ambiguity: with up to 141 objects visible in a scene at once, users frequently use positional expressions ("the one on the left", "second from the right") that are only resolvable by inspecting the scene image. This multimodal design feature is the root cause of the visual reference filtering described in Step 3.
+
+### How the Data Was Collected (Quality Justification)
+
+The dialogues were collected using a **two-phase pipeline**:
+
+1. **Dialogue simulator** — A multimodal dialogue simulator generates structured dialogue flows with programmatically assigned intent labels (acts). The simulator's dialogue policy determines the intent of each turn with controlled diversity; human judgment is not involved at this stage.
+2. **Crowd-sourced paraphrasing** — Human crowd-workers paraphrased the simulator's templated sentences into natural, diverse language. Workers changed *how* something was phrased — not *what* the underlying intent was.
+
+This means the dialogue act labels (`REQUEST:GET`, `INFORM:REFINE`, etc.) come from the simulator's controlled logic rather than from subjective human annotation, which is why they can be treated as reliable ground truth without manual re-verification. Combined with peer review at EMNLP 2021 (a top-tier NLP venue), the annotation quality is considered high.
+
+---
+
 ## Why SIMMC 2.1 Was Selected
 
 Four publicly available fashion conversation datasets were evaluated:
@@ -42,7 +91,7 @@ FashionRec has no intent annotations — there is no label indicating what the u
 MMD labels are question-type only (e.g. "what is the price?") and do not include initial request labels — the most important class for our system. Additionally, MMD is written in Indian English, which does not match the American English register of our synthetic training data, risking vocabulary and phrasing mismatch during fine-tuning.
 
 **Why SIMMC 2.1 annotation quality can be trusted:**
-SIMMC 2.1 was published at EMNLP 2021, a top-tier academic NLP conference where submissions are peer-reviewed by domain experts before acceptance. The dataset was built by Facebook AI Research using trained human annotators following a formal annotation guide. This means the intent labels are verified, consistent ground truth — not noisy or self-labelled — and can be academically cited without manual re-verification.
+SIMMC 2.1 was published at EMNLP 2021, a top-tier academic NLP conference where submissions are peer-reviewed by domain experts before acceptance. The dataset was built by Facebook AI Research using a two-phase pipeline: first, a dialogue simulator assigned all intent labels (acts) programmatically according to its dialogue policy — human judgment was not involved in labelling; second, crowd-workers only paraphrased the wording, leaving the underlying intent structure untouched. This means the act labels come from controlled simulator logic rather than subjective human annotation, giving them the consistency of programmatically generated ground truth with the linguistic variety of crowd-sourced text. They are verified, consistent ground truth that can be academically cited without manual re-verification.
 
 ---
 
@@ -199,7 +248,7 @@ This approach is formally called **label transfer via taxonomy alignment** — a
 
 **What:** Remove user turns that reference items by their physical position in the virtual AR shopping scene.
 
-**Why:** SIMMC 2.1 was designed for an augmented reality shopping environment where users see items placed in a virtual room and refer to them by position ("the one on the left wall", "second from the right", "that one"). These positional references are meaningless in our text-only CRS where users describe what they want in natural language. Training on such turns would teach the classifier to associate position language with intent labels, which would not transfer to our system.
+**Why:** SIMMC 2.1 was designed for an immersive, photo-realistic **virtual reality shopping environment** where users can see up to 141 objects simultaneously placed in a virtual room. The SIMMC challenge's sub-tasks explicitly include disambiguation and coreference resolution — the ability to resolve "the second one from the left" by inspecting the scene image. Users routinely refer to items by their physical position within this scene. These positional references are entirely meaningless in our text-only CRS where no shared visual scene exists between user and system; the user describes what they want in natural language rather than pointing at objects in a virtual room. Removing these turns is therefore a necessary domain adaptation step — not a data quality issue — because we are repurposing a multimodal dataset for a text-only task. Training on such turns would teach the classifier to associate positional language with intent labels, a pattern that can never appear during inference in our system.
 
 **Visual reference patterns filtered:**
 - Position + wall/row/side: `"left wall"`, `"bottom row"`, `"right side"`
@@ -475,3 +524,41 @@ EXPLANATION_WHY and CHITCHAT do not exist in SIMMC 2.1. The 913 rows added per l
 | `v2_test_augmented.csv` | — | Original synthetic test (baseline) | Synthetic |
 
 The retrained model (trained on `v5_train_mixed.csv`) can be directly compared against the original model (trained on `v4_train_midSession.csv`) to measure the improvement from incorporating real conversation data.
+
+---
+
+## Likely Evaluator Questions and Answers
+
+**Q: "Why is the paper called SIMMC 2.0 but you used SIMMC 2.1 files?"**
+
+A: 2.1 is the refined and corrected version of the same dataset, released for the DSTC11 challenge in June 2022 — approximately one year after the EMNLP 2021 paper was published. The original paper remains the canonical citation because the design, collection methodology, annotation scheme, and dialogue act taxonomy it describes carry over entirely to 2.1. The version increment reflects data cleaning and correction, not a change in methodology.
+
+---
+
+**Q: "This is a multimodal dataset — how can you use it for a text-only system?"**
+
+A: SIMMC 2.1 stores the full text transcript of every dialogue turn alongside its intent label, independently of the visual scene. I used only the text transcripts and intent labels. The dataset's visual/multimodal feature manifests as positional references in the text (e.g. "the one on the left"), which I explicitly identified and filtered out — 4,464 turns (16.2%) were removed. The remaining 23,095 turns are natural shopping-conversation language that transfers directly to a text-based CRS. Removing the multimodal feature is a deliberate domain adaptation step, not a flaw.
+
+---
+
+**Q: "Why trust the dialogue act labels without checking them yourself?"**
+
+A: The act labels were not assigned by human annotators exercising judgment — they were assigned by the dataset's controlled dialogue simulator during generation. Human crowd-workers only paraphrased the wording; the underlying intent structure came from the simulator's dialogue policy. This gives the labels the consistency of programmatically generated ground truth combined with the linguistic variety of crowd-sourced text. Combined with peer review at EMNLP 2021, this provides strong confidence in label correctness without manual re-annotation.
+
+---
+
+**Q: "Why fashion only, not furniture too?"**
+
+A: SIMMC 2.1 covers two domains (fashion and furniture) within the same dialogue collection. My CRS is fashion-specific, and including furniture vocabulary (sofas, armchairs, tables) would introduce domain-irrelevant noise into the classifier. Of the 7,307 train-split dialogues, 2,640 were furniture dialogues removed at Step 0, leaving 4,667 fashion dialogues (27,567 user turns) as the working dataset.
+
+---
+
+**Q: "Is this a well-known/respected dataset?"**
+
+A: Yes. It was published at EMNLP 2021 by Facebook AI Research — one of the top-tier academic NLP conferences with rigorous peer review. It has anchored three consecutive years of the DSTC competition series (DSTC9 as SIMMC 1.0, DSTC10 as SIMMC 2.0, DSTC11 as SIMMC 2.1), meaning it has been adopted as a standard benchmark by the international dialogue-systems research community for multiple years.
+
+---
+
+**Q: "Why do your numbers (7,307 dialogues, 38,127 turns) differ from the paper's (11,244 dialogues, 117K utterances)?"**
+
+A: The paper's figures describe the complete dataset across all official splits (train + dev + devtest + test-std). My numbers come specifically from the train-split JSON file (`simmc2.1_dials_dstc11_train.json`), which represents approximately 65% of the full dataset — consistent with the paper's stated 65% train allocation. The figures are therefore directly compatible; no discrepancy exists.

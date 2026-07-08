@@ -274,7 +274,45 @@ correct architecture.
 
 ---
 
-## 7. Model Files
+## 7. Likely Evaluator Questions and Answers
+
+**Q: "Why did you choose DistilBERT instead of other models?"**
+
+A: Three compounding reasons. First, the input format uses `[SEP]` to join conversation turns — `[SEP]` is a native pre-training token in DistilBERT/BERT, meaning the model already encodes it as a meaningful segment boundary. Every alternative (RoBERTa, T5, LLMs) loses this structural alignment. Second, DistilBERT classifies in under 50ms locally with no external API dependency — the classifier runs on every single user turn, so latency directly affects conversation feel. Third, fine-tuned BERT-family models are the established standard for intent classification in dialogue systems, validated across multiple published benchmarks (ATIS, SNIPS, MultiWOZ), making the choice methodologically defensible.
+
+---
+
+**Q: "Why not use full BERT instead of DistilBERT?"**
+
+A: DistilBERT retains 97% of BERT's language understanding at 40% of the size and 60% faster inference. On an 8-class short-text classification task like intent detection, the 3% performance difference is negligible — likely smaller than the margin of error on the test set. Using full BERT would add latency and memory cost with no meaningful accuracy benefit.
+
+---
+
+**Q: "Why not RoBERTa — it's a stronger model?"**
+
+A: RoBERTa was pre-trained without `token_type_ids` and does not use segment embeddings. The `[SEP]` token in the input format would be treated as an ordinary word token rather than a segment boundary, losing the structural signal that DistilBERT encodes natively. Additionally, RoBERTa is approximately 3× larger than DistilBERT, adding inference overhead. For short conversational text classification, the accuracy improvement over DistilBERT does not justify either the architectural mismatch or the latency cost.
+
+---
+
+**Q: "Why not T5 — it's one of the most capable models?"**
+
+A: T5 is an encoder-decoder architecture designed for generative tasks. For classification, only the encoder is needed — the decoder is entirely wasted computation. More critically, T5 classifies by generating the label name token-by-token using autoregressive decoding ("R", "E", "F", "I", "N", "E", "M", "E", "N", "T"...) rather than producing 8 logits in a single forward pass. This is slower, and nothing prevents it from generating an invalid or misspelled label. T5-large is also 770M parameters requiring ~3GB of VRAM — not deployable alongside the other models already loaded (Qdrant, MiniLM, DeBERTa) on a development machine. Finally, T5 has no concept of `[SEP]` as a segment boundary, so the input format alignment is completely absent.
+
+---
+
+**Q: "Why not use an LLM (GPT/Claude/Llama) for classification instead?"**
+
+A: Three problems. First, LLMs zero-shot are unreliable on the ambiguous class boundaries in this taxonomy — particularly REFINEMENT vs FEEDBACK, where nearly identical surface forms have different intents depending on conversational context. Fine-tuned DistilBERT is trained specifically on these boundaries. Second, LLM inference adds 500ms–2s per call versus under 50ms for DistilBERT locally. Third, the system already uses an external LLM API (Groq) for response generation — adding LLM dependency for classification creates a cascading failure point: if the API is unavailable, both classification and generation fail simultaneously. DistilBERT runs entirely locally with no such dependency.
+
+---
+
+**Q: "Why not a simpler approach like SVM or keyword matching?"**
+
+A: The 8 intent classes have subtle, context-dependent boundaries that surface-level features cannot capture. REFINEMENT and FEEDBACK can be expressed with nearly identical wording (*"too expensive"* = FEEDBACK; *"show me something cheaper"* = REFINEMENT) — the difference is whether a new request is being made, which requires understanding the conversational context. Additionally, the system's 6 user personas introduce extreme linguistic variation (from *"ngl first one"* to *"Could you please show me the first option?"*) — keyword rules and TF-IDF features collapse entirely across these styles. A contextual transformer that reads the full conversation turn with prior context is the only architecture that handles both problems.
+
+---
+
+## 8. Model Files
 
 | File | Location |
 |------|----------|

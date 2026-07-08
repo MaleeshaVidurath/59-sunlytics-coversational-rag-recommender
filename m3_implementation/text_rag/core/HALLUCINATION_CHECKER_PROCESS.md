@@ -411,3 +411,166 @@ response_text + evidence
 | `item_attribute_lookup` | not needed (1 item) | all fields | works | works |
 | `item_compare` | not needed (free search) | all fields | works (handles "Option 1:" prefix) | works |
 | `explanation_generate` | not needed (1 item) | all fields | works | works |
+
+---
+
+## Novelty Assessment
+
+Each individual component of this checker is established in the literature:
+- NLI for hallucination detection is a known technique (Ji et al., 2023)
+- DeBERTa cross-encoder for NLI is standard use of an existing model
+- Retry/regeneration loops appear in various RAG systems
+
+The genuine research contribution lies in the **system design applied to conversational recommendation**:
+
+| Component | Contribution |
+|---|---|
+| Evidence-field-first loop | Most NLI hallucination work checks the full response against the full document. This system checks each evidence field (colour, price, name) individually against the specific sentence that mentions it |
+| Item→sentence lock map | Greedy MiniLM assignment before NLI prevents cross-item collisions in multi-item catalog responses. No prior work addresses this specific problem for CRS |
+| Contradiction-only, not entailment | Deliberate design decision to avoid false positives from descriptive extra information. Justified by the asymmetric cost of false positives in a recommender context |
+| 9-gate filtering pipeline | Name and price verified by string containment (exact values), NLI reserved for semantic fields like colour where verbatim match is not sufficient |
+| Application domain | NLI hallucination checking evaluated within a fashion conversational recommender is not a prior existing system |
+
+The framing for dissertation write-up: *"We apply and adapt NLI-based contradiction detection to the specific challenges of multi-item conversational recommendation, introducing an item-sentence locking mechanism and field-level contradiction checking to address cross-item collision and false positive problems that arise in structured catalog response formats."*
+
+---
+
+## Evaluation Plan
+
+### 1. Hallucination Detection Accuracy
+
+Requires ground-truth labels. Two collection methods:
+
+**Method A — Synthetic injection (recommended):**
+1. Collect real system responses that the checker passed as correct
+2. Manually corrupt one field per response (e.g. change "Black" → "Red" in the LLM response while keeping evidence as Black)
+3. Run the checker on both the clean and the corrupted version
+4. Record whether the injection was detected
+
+**Method B — Manual annotation:**
+1. Run 50–100 real conversations through the full system
+2. Manually compare each LLM response against its evidence bundle
+3. Label each checked fact as correct or hallucinated
+4. Compare labels with checker decisions
+
+**Metrics:**
+
+```
+Precision = TP / (TP + FP)
+Recall    = TP / (TP + FN)
+F1        = 2 × (Precision × Recall) / (Precision + Recall)
+```
+
+Where:
+- TP = checker flagged hallucination, fact was genuinely wrong
+- FP = checker flagged hallucination, fact was actually correct (false alarm)
+- FN = checker passed fact, fact was actually wrong (missed hallucination)
+- TN = checker passed fact, fact was genuinely correct
+
+---
+
+### 2. Loop Behaviour Metrics
+
+Measurable directly from runtime logs — no labeling required.
+
+| Metric | Definition | How to measure |
+|---|---|---|
+| First-pass acceptance rate | % of responses that pass hallucination check on attempt 1 | Count attempt=1 passes / total responses |
+| Retry rate | % of responses that required at least one retry | Count responses with attempt >= 2 / total |
+| Convergence rate | % of responses that passed by attempt 3 | Count final passes / total (should be ~100% since attempt 3 is always accepted) |
+| Average attempts per response | Mean number of LLM calls needed | Sum of attempt numbers / total responses |
+| Field contradiction frequency | Which evidence fields are most often contradicted | Aggregate `contradicted_fields` across all flagged results |
+| Strictness escalation success rate | % of retried responses that pass on attempt 2 | Count attempt=2 passes / total retries |
+
+These metrics characterise the detect-reject-regenerate loop as a system, independent of whether individual flags are correct.
+
+---
+
+### 3. False Positive Rate
+
+A checker that flags everything achieves 100% recall but is not useful. False positive rate must be measured separately.
+
+**Procedure:**
+1. Collect 30–50 LLM responses that are manually verified as fully correct
+2. Run the checker on each
+3. Count how many are incorrectly flagged
+
+```
+False Positive Rate (FPR) = FP / (FP + TN)
+```
+
+The 9-gate design (Gates 4–7) is specifically engineered to suppress false positives from conversational text, garment descriptions, and exact-value fields. This evaluation validates that design decision.
+
+---
+
+### 4. Strictness Escalation Effectiveness
+
+The retry loop escalates strictness across three attempts. This evaluation checks whether escalation actually causes the LLM to correct the detected contradiction.
+
+**Procedure:**
+1. Collect all cases where attempt 1 was rejected
+2. Compare attempt 2 response: did the contradicted field change to match evidence?
+3. Repeat for attempt 2 → attempt 3
+
+**Metric:**
+```
+P(correction | retry) = % of retried responses where the flagged field was corrected
+```
+
+A high value confirms that the strictness prompt works. A low value would indicate the retry prompt needs revision.
+
+---
+
+### 5. NLI Threshold Sensitivity
+
+The checker uses `NLI_CONTRADICTION_THRESHOLD` (config value) to decide what contradiction score counts as a hallucination. This threshold is a hyperparameter and must be justified.
+
+**Procedure:**
+1. Run the checker over the labelled test set at multiple threshold values (e.g. 0.4, 0.5, 0.6, 0.7, 0.8)
+2. Compute Precision and Recall at each threshold
+3. Plot the Precision-Recall curve
+
+The operating threshold should be chosen at the point of best F1 or at the target Precision depending on acceptable false positive cost. This also shows the threshold choice is data-driven, not arbitrary.
+
+---
+
+### 6. Ablation Study
+
+Remove one design component at a time and measure the change in false positive rate and detection accuracy. This validates the individual contribution of each gate.
+
+| Ablation | What is removed | Expected effect if component is effective |
+|---|---|---|
+| No item→sentence lock (Stage 3) | All facts use free MiniLM search | Increased FP from cross-item name collisions in catalog responses |
+| No Gate 6 — name containment | Name facts go to DeBERTa | Increased FP when items share name prefixes or sentences have long descriptive tails |
+| No Gate 7 — price containment | Price facts go to DeBERTa | Increased FP on correctly priced structured list responses |
+| No Gate 4 — sentence type skip | Conversational openers and garment descriptions are NLI-checked | Increased FP from description words misread as contradictions |
+| No contradiction-only filter | Low entailment also triggers hallucination flag | Very high FP from descriptive extra information in LLM sentences |
+| Full system | All gates active | Baseline |
+
+Each ablation is run on the same labelled test set. The difference in FP rate between the ablated version and the full system quantifies the contribution of that component.
+
+---
+
+### Recommended Minimum Evaluation for Dissertation
+
+Given time constraints, prioritise in this order:
+
+| Priority | Evaluation | Why |
+|---|---|---|
+| 1 | Synthetic injection test (50 cases) | Directly measures Precision, Recall, F1 — core claim of the checker |
+| 2 | Loop metrics from 50 real conversations | Retry rate, convergence rate — characterises the detect-reject-regenerate loop |
+| 3 | False positive check on 30 clean responses | Validates the 9-gate false positive suppression design |
+| 4 | Ablation on item→sentence locking | Validates the most novel architectural component |
+| 5 | Threshold sensitivity curve | Justifies the NLI threshold hyperparameter choice |
+
+Items 1–3 together provide detection accuracy, loop behaviour, and false positive validation — sufficient for a complete evaluation chapter. Items 4 and 5 strengthen the research contribution claims.
+
+---
+
+### Reference Papers for Evaluation Section
+
+- Ji et al. (2023) — "Survey of Hallucination in Natural Language Generation" — hallucination taxonomy and evaluation methods
+- Maynez et al. (2020) — "On Faithfulness and Factuality in Abstractive Summarization" — faithfulness evaluation
+- He et al. (2023) — "HaluEval: A Large-Scale Hallucination Evaluation Benchmark" — injection-based evaluation methodology
+- Es et al. (2023) — "RAGAS: Automated Evaluation of Retrieval Augmented Generation" — RAG-specific evaluation framework
+- Laurer et al. (2022) — "Less Annotating, More Classifying: Addressing the Data Scarcity Issue of Supervised Machine Learning with Deep Transfer of Pre-trained Language Models" — NLI cross-encoder benchmarks including DeBERTa variants
