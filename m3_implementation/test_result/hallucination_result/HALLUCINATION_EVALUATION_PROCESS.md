@@ -25,6 +25,78 @@ system's own outputs using **synthetic corruption** — the methodology of
 FactCC (Kryscinski et al., 2020: entity/number swap transformations) and
 HaluEval (Li et al., 2023: injected hallucinated samples).
 
+
+---
+
+## 1b. How the evaluation was planned — literature survey and design decisions
+
+### The research question, split in two
+
+The novelty makes two separable claims, each needing its own experiment:
+
+1. **Detection claim** — the checker accurately identifies hallucinated
+   responses → a *classification* problem → Precision / Recall / F1.
+2. **Mitigation claim** — the detect-reject-regenerate loop prevents
+   hallucinations from reaching the user → an *intervention* problem →
+   system-ON vs system-OFF outcome rates (P/R do not apply to interventions).
+
+### What prior work did (survey conducted 2026-07-08)
+
+| Prior work | What it is | How it was evaluated | Metric(s) |
+|---|---|---|---|
+| SelfCheckGPT (Manakul 2023) | sampling-consistency hallucination detector | human-labeled GPT-3 WikiBio sentences | AUC-PR (NLI variant ≈ 92.5) |
+| SummaC (Laban 2022) | NLI-based inconsistency detection | 6 existing labeled benchmark datasets | balanced accuracy (74.4%) |
+| FactCC (Kryscinski 2020) | trained consistency classifier | **synthetic corruption**: entity/number/pronoun swaps, negation | accuracy / F1 |
+| HaluEval (Li 2023) | injected-hallucination benchmark | sampling-then-filtering generation + human verification | classification accuracy |
+| FActScore / RefChecker (2023-24) | atomic-claim / triplet verification | claim-level checks vs human annotation | claim precision |
+| RAGAS (Es 2023) | LLM-judge faithfulness | supported claims ÷ total claims | faithfulness score 0-1 |
+| CRAG / Self-RAG (2024) | corrective retrieval/generation loops | task performance **with vs without** the corrective mechanism | accuracy / FactScore deltas |
+
+### Design decisions and their rationale
+
+- **D1 — Build our own labeled test set.** No public benchmark exists for
+  hallucination detection in multi-item conversational fashion
+  recommendation. Consequence: published baseline numbers (WikiBio, CNN/DM)
+  are NOT comparable — baselines must be **re-implemented and re-run on our
+  test set**. This is standard practice when working in a new domain.
+- **D2 — Ground truth via synthetic corruption** (FactCC / HaluEval
+  precedent). Corrupting one field of a correct response while keeping the
+  evidence intact yields labels that are *certain by construction* for the
+  positive class, with zero manual annotation. Clean labels are only
+  *presumed* (the live checker passed them) → exported to `clean_audit.txt`
+  for human audit, avoiding the circularity of trusting the checker's own
+  verdicts.
+- **D3 — Corruption types mirror the checker's verified fields** (name,
+  colour, price) **plus the novelty's target case** (cross-item value swaps,
+  which specifically stress the item→sentence lock map).
+- **D4 — Baselines bracket the design space.** Naive NLI = our own NLI model
+  with every novel component removed (lower bracket / ablation-as-baseline:
+  quantifies what the architecture contributes). LLM judge = the strong,
+  expensive alternative (upper bracket: what an API-call-per-check approach
+  buys). Beating the first proves the design matters; matching/beating the
+  second proves the design is sufficient.
+- **D5 — Two metric families.** Detector → P/R/F1/balanced accuracy
+  (classification standard, per SelfCheckGPT/SummaC). Loop → residual
+  hallucination rate ON vs OFF plus P(correction | detection)
+  (intervention standard, per CRAG). Forcing P/R onto the loop would be a
+  category error.
+- **D6 — Independent referee for the loop.** The loop ships only
+  checker-approved text, so the checker cannot grade the loop's output
+  (self-grading reports 100% by definition). Final outputs are graded by a
+  model-free value-verification script against the structured database truth.
+- **D7 — Reproducibility.** Deterministic seeds (corruption seed 42),
+  committed scripts, committed raw data, and a Colab notebook that re-runs
+  the same scripts.
+
+### Why NOT other candidate approaches
+
+| Considered | Rejected because |
+|---|---|
+| Evaluate on public benchmarks (WikiBio, SummaC datasets) | different task: those test document-level consistency, not structured product-field grounding in dialogue |
+| SelfCheckGPT-style sampling baseline | measures self-consistency across samples; our hallucinations contradict *evidence*, and sampling can be consistently wrong; also needs N generations per response |
+| Training a FactCC-style classifier | needs large in-domain training data; our checker is zero-shot by design |
+| Manual annotation only | slow, small-N, and unnecessary for the positive class given D2 |
+
 ---
 
 ## 2. Pipeline overview
@@ -209,6 +281,96 @@ Accuracy; plus recall per corruption type, false-positive and missed case IDs
 `--skip-llm`, `--skip-naive` (baselines are checker-version-independent),
 `--limit N` (smoke test).
 
+
+---
+
+## 5b. Metrics and baselines — full detail
+
+### Metric definitions (positive class = hallucinated)
+
+For each case the detector answers "hallucinated?" and is scored against the
+label:
+
+- **TP** — flagged a genuinely corrupted case
+- **FP** — flagged a clean case (false alarm)
+- **FN** — passed a corrupted case (missed lie)
+- **TN** — passed a clean case
+
+```
+Precision          = TP / (TP + FP)        "when it accuses, is it right?"
+Recall             = TP / (TP + FN)        "how many real lies caught?"
+F1                 = 2PR / (P + R)         single comparison number
+Specificity        = TN / (TN + FP)        "how well it leaves clean alone"
+Balanced accuracy  = (Recall + Specificity) / 2   fair under class imbalance
+                                                  (205 hallucinated vs 33 clean)
+```
+
+Why precision (zero FP) is weighted so heavily in this system: a false alarm
+triggers a pointless regeneration — extra latency, extra LLM cost, and a
+degraded (stricter, terser) response for a user who got a correct answer.
+The asymmetric-cost argument is part of the design thesis.
+
+Loop metrics (Experiment 2): residual hallucination rate
+(wrong-shipped ÷ cases) for loop OFF vs ON; P(correction | detection);
+attempts histogram; regeneration latency. See `loop_mitigation/LOOP_RESULTS.md`.
+
+### Baseline 1 — Naive NLI (SummaC-style all-pairs)
+
+*What it is:* the exact same DeBERTa NLI model our checker uses, with every
+novel component removed:
+
+| Component | Ours (v3) | Naive baseline |
+|---|---|---|
+| Item→sentence lock map | yes | no |
+| Field filter / sentence-skip gates | yes | no |
+| Two-sided exact-value gates (name/price) | yes | no — everything goes to NLI |
+| Sentence pairing | locked / best-match | **every** (fact, sentence) pair |
+| Decision | contradiction logit > 0.65 and > entailment | softmax P(contra) > 0.5 and > P(entail) on any pair |
+
+*Why it exists:* it is the ablation-as-baseline — since it shares the NLI
+model, any performance difference is attributable to the architecture around
+the model, i.e. the claimed contribution.
+
+*Result:* recall 0.961 but **29/33 clean responses falsely flagged**
+(precision 0.872, balanced accuracy 0.541 ≈ chance). In production it would
+reject nearly every correct answer. Conclusion: ungated NLI is unusable;
+the gate architecture is what makes NLI practical here.
+
+### Baseline 2 — LLM judge (RAGAS-style)
+
+*What it is:* Groq `llama-3.1-8b-instant`, temperature 0, receives the
+flattened evidence facts + the response, answers strict JSON
+`{"hallucinated": true|false}`. Retries with backoff on rate limits.
+
+*Why it exists:* represents the "just ask an LLM" family — the strong,
+costly alternative an examiner will ask about.
+
+*Result:* F1 0.966, balanced accuracy 0.902, but 5/33 false alarms, an
+API call per check and ~3.5 s observed latency. Conclusion: our checker
+matches/exceeds its quality (F1 0.975, BalAcc 0.976, 0 false alarms) at
+zero API cost and millisecond latency.
+
+### Headline results (authoritative numbers: `results_summary.json`)
+
+238 cases = 205 corrupted + 33 clean. Positive class = hallucinated.
+
+| System | Precision | Recall | F1 | Balanced acc. | FP on 33 clean |
+|---|---|---|---|---|---|
+| **Our checker v3** | **1.000** | 0.951 | **0.975** | **0.976** | **0** |
+| Our checker v2 | 0.994 | 0.815 | 0.895 | 0.892 | 1 |
+| Our checker v1 (original) | 1.000 | 0.571 | 0.727 | 0.785 | 0 |
+| Naive NLI | 0.872 | 0.961 | 0.914 | 0.541 | 29 |
+| LLM judge | 0.975 | 0.956 | 0.966 | 0.902 | 5 |
+
+Per-corruption recall (v3): colour 0.896 · price 0.982 · name 0.948 ·
+cross-item 0.977. Colour remains NLI-verified (semantic field) and is the
+main recall gap.
+
+Loop experiment: hallucinated responses reaching the user — loop OFF
+**205/205 (100%)** vs loop ON **16/205 (7.8%)**; P(correction | detection)
+96.9%; 94.4% of detected lies fixed by a single regeneration; ~0.41 s
+regeneration cost per detected case.
+
 ---
 
 ## 6. Evaluation-driven checker refinement (v1 → v3)
@@ -263,6 +425,9 @@ excluded as ambiguous truncations).
   carry a synthetic score of 1.0).
 - `RESULTS.md`: written results chapter — setup, tables, v1→v3 narrative,
   threats to validity, reproduction commands.
+- Loop-experiment figures (fig6 ON/OFF effect, fig7 residual by type,
+  fig8 attempts × outcome) are generated by
+  `loop_mitigation/make_loop_figures.py` into `loop_mitigation/figures/`.
 
 ---
 
@@ -288,6 +453,7 @@ excluded as ambiguous truncations).
 | `eval_run.log` | console log of the v1 full run |
 | `hallucination_eval_colab.ipynb` | Colab notebook — reproduces Stages 2–4 with the same scripts |
 | `make_colab_bundle.py` / `colab_bundle.zip` | builds the minimal upload bundle for the notebook |
+| `loop_mitigation/` | loop-mitigation experiment: `run_loop_eval.py` (experiment), `referee.py` (independent grader), `regrade_shipped.py` (offline re-grade), `results_loop_eval.json` + `shipped_responses.jsonl` (outputs), `LOOP_RESULTS.md` (write-up), `make_loop_figures.py` + `figures/` (figs 6–8) |
 
 ## 9. Reproduction (run from repo root, use the repo venv)
 
@@ -306,6 +472,76 @@ venv\Scripts\python.exe m3_implementation\test_result\hallucination_result\build
 venv\Scripts\python.exe m3_implementation\test_result\hallucination_result\make_figures.py
 ```
 
+## 9a. Growing the dataset from live chat — and reproducing the evaluation later
+
+The capture hook works during normal interactive use, not only under the
+scripted driver. This is how to collect more real conversations and re-run
+the identical evaluation on the enlarged dataset.
+
+### When capture happens
+
+The hook fires inside `TextRAGPipeline.process()` — the exact code path the
+chat API uses. While the backend process has `EVAL_CAPTURE=1` set, **every
+generation attempt that goes through the hallucination check** appends one
+row to `captured_cases.jsonl` (all checkable actions: catalog_search,
+item_attribute_lookup, item_detail_lookup, item_compare,
+explanation_generate; retries appear as attempt=2/3 rows). Not captured:
+chitchat/refusal turns (never hallucination-checked) and the
+cached-recommendation path. With the flag unset the hook is a no-op.
+
+### Step-by-step: capture from live chatting
+
+1. Enable the flag — either add `EVAL_CAPTURE=1` to `.env`, or in the
+   terminal before starting the backend: `$env:EVAL_CAPTURE = "1"`.
+2. Start the system as usual and chat normally. Watch for
+   `[EvalCapture] case saved: ...` lines in the backend console.
+3. When done, remove the flag (delete the `.env` line / new terminal).
+4. **Snapshot the raw data**: commit `captured_cases.jsonl` to git. The
+   commit hash IS the dataset version — any past evaluation can be
+   reproduced by checking out that hash.
+
+⚠ Note: running `collect_cases.py` ROTATES the capture file (renames the
+existing one with a timestamp) before writing fresh scripted cases. Live
+chatting only APPENDS. To combine scripted + chat data, chat AFTER the
+driver run, or concatenate the rotated files back together.
+
+### Step-by-step: re-run the evaluation on the enlarged dataset
+
+```powershell
+# 1. rebuild the labeled test set — seeded (42), so the same captured file
+#    always yields the identical test set
+venv\Scripts\python.exe m3_implementation\test_result\hallucination_result\corrupt_cases.py
+
+# 2. re-run the three detectors
+venv\Scripts\python.exe m3_implementation\test_result\hallucination_result\run_detector_eval.py
+
+# 3. refresh summary + figures
+venv\Scripts\python.exe m3_implementation\test_result\hallucination_result\build_summary.py
+venv\Scripts\python.exe m3_implementation\test_result\hallucination_result\make_figures.py
+
+# 4. (optional) re-run the loop experiment on the new corrupted cases
+venv\Scripts\python.exe m3_implementation\test_result\hallucination_result\loop_mitigation\run_loop_eval.py
+venv\Scripts\python.exe m3_implementation\test_result\hallucination_result\loop_mitigation\regrade_shipped.py
+venv\Scripts\python.exe m3_implementation\test_result\hallucination_result\loop_mitigation\make_loop_figures.py
+```
+
+### Rules that keep the numbers scientifically valid
+
+- **Audit the new clean cases.** `corrupt_cases.py` regenerates
+  `clean_audit.txt`; every newly captured checker-passed response must be
+  manually verified before its clean label is trusted (same anti-circularity
+  rule as §4.4). New checker-flagged responses land in
+  `flagged_for_review.jsonl` for adjudication.
+- **Version results with their dataset.** Numbers from different test-set
+  versions are not directly comparable — when the dataset grows, either
+  re-run ALL systems (ours + both baselines) on the new set, or clearly
+  report which dataset version each number came from (results JSONs +
+  the jsonl commit hash).
+- **Determinism boundaries.** Checker and naive-NLI results are
+  deterministic for a given test set; the LLM-judge and loop-regeneration
+  numbers can vary slightly between runs (live LLM), which is why raw
+  responses are stored (`shipped_responses.jsonl`) alongside the metrics.
+
 ## 9b. Loop-mitigation experiment (subfolder `loop_mitigation/`)
 
 Evaluates the second half of the contribution: the retry loop itself.
@@ -317,6 +553,46 @@ the checker never grades its own output. Files: `run_loop_eval.py`,
 `referee.py`, `regrade_shipped.py`, `make_loop_figures.py`,
 `results_loop_eval.json`, `LOOP_RESULTS.md`, `figures/`.
 
+
+---
+
+## 9c. Decision log and open items
+
+### Chronological log
+
+| Date | What happened |
+|---|---|
+| 2026-07-08 | Literature survey (SelfCheckGPT, SummaC, FactCC, HaluEval, RAGAS, CRAG, RefChecker) → evaluation design chosen (see §1b) |
+| 2026-07-08 | Capture hook + driver built; 16 scripted conversations run live → 41 captured cases (35 first-attempt, 6 retry attempts) |
+| 2026-07-08 | Test set built: 33 clean + corrupted variants (initially 199 cases; cross-item extended to price/name → 238); 8 live-flagged cases quarantined |
+| 2026-07-08 | v1 detector eval: P 1.000 / R 0.571 — diagnosis: one-sided gates, NLI blind to exact-value mismatches |
+| 2026-07-08 | v2 (two-sided gates + whitespace + price-regex fixes): R 0.815 — diagnosis: similarity gate hides renamed items; 1 FP from derived arithmetic |
+| 2026-07-08 | v3 (similarity-gate bypass + response-level verification): P 1.000 / R 0.951 / F1 0.975 |
+| 2026-07-09 | Docs consolidated; evidence slimming; folder moved to `test_result/hallucination_result/`; Colab notebook + bundle |
+| 2026-07-09 | Loop-mitigation experiment: 100% → 12.2% first grading; referee refined (derived price diffs allowed, truncated names = minor) → final 100% → 7.8% |
+| 2026-07-09 | Checker doc updated to v3; everything committed as `a274364` |
+
+### Open items checklist
+
+- [ ] **Manual audit** of the 33 clean cases (`clean_audit.txt`) — turns
+      "presumed clean" into "human-verified"; required before final
+      dissertation numbers.
+- [ ] **Adjudicate** the 8 quarantined live flags
+      (`flagged_for_review.jsonl`) — analysis suggests all 8 are v1 false
+      positives (double-space name, truncated description, price-only
+      sentence flagged on `type`); confirm or correct.
+- [ ] **Experiment B (optional)** — live loop-behaviour stats with checker
+      v3 (re-run `collect_cases.py`, measure first-pass acceptance / retry
+      rate in production conditions; v1 live run had 3 spurious retry
+      episodes to compare against).
+- [ ] **Push + merge** — commit `a274364` exists locally; push and merge to
+      main is a manual step.
+- [ ] **Write-up caveats to state**: threshold sweep ≥ 1.0 artifact
+      (containment flags carry synthetic score 1.0); v3 designed against
+      this test set (fresh capture run would give held-out confirmation);
+      synthetic corruption does not cover free-form fabrication; loop
+      regeneration numbers vary slightly between runs (LLM temperature).
+
 ## 10. Methodology references
 
 - Kryscinski et al. (2020) — *Evaluating the Factual Consistency of Abstractive
@@ -326,5 +602,5 @@ the checker never grades its own output. Files: `run_loop_eval.py`,
   naive baseline follows its all-pairs design; balanced accuracy metric.
 - Manakul et al. (2023) — *SelfCheckGPT* — detection-quality evaluation framing.
 - Es et al. (2023) — *RAGAS* — LLM-judge faithfulness; basis of baseline 3.
-- Yan et al. (2024) — *Corrective RAG* — system-on/off mitigation evaluation
-  (planned loop experiment).
+- Yan et al. (2024) — *Corrective RAG* — system-on/off mitigation evaluation;
+  the loop-mitigation experiment follows this design.
