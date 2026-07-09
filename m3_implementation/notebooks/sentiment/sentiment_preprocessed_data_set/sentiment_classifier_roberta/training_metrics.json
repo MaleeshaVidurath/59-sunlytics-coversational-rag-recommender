@@ -1,0 +1,20 @@
+{
+  "base_model": "cardiffnlp/twitter-roberta-base-sentiment-latest",
+  "dataset": "cardiffnlp/tweet_eval sentiment (SemEval 2017) \u2014 preprocessed",
+  "class_weights": "none",
+  "train_size": 45613,
+  "val_size": 2000,
+  "test_size": 12241,
+  "max_epochs": 4,
+  "learning_rate": 1e-05,
+  "warmup_steps": 570,
+  "early_stopping_patience": 2,
+  "test_results": {
+    "loss": 0.6948330998420715,
+    "accuracy": 0.7175,
+    "f1_macro": 0.7182,
+    "f1_negative": 0.739,
+    "f1_neutral": 0.7049,
+    "f1_positive": 0.7105
+  }
+}

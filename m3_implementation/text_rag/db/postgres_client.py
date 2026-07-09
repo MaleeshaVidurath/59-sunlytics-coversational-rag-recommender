@@ -226,26 +226,22 @@ async def get_articles_by_ids(article_ids: list[str]) -> list[dict]:
 async def search_articles_filtered(
     filters: dict,
     exclude_ids: list[str] = None,
-    preference_boosts: list[dict] = None,
-    purchase_hints: dict = None,
-    penalties: dict = None,
     limit: int = 20
 ) -> list[dict]:
     """
     Searches articles using hard filters from retrieval_input.payload.filters.
-    Returns up to `limit` results ranked by preference boosts and purchase history.
+    Returns up to `limit` results in price-ascending order.
+    Preference re-ranking is handled by EvidenceAssembler after merging with
+    Qdrant results so that both sources are ranked on the same scale.
 
     Args:
-        filters:          Hard constraints from payload.filters
-                          Keys: colour_group_name, product_type_name,
-                                graphical_appearance_name, index_group_name,
-                                price_max, price_min
-        exclude_ids:      article_ids to exclude
-        preference_boosts: Soft ranking weights from payload.preference_boosts
-        purchase_hints:   From payload.purchase_history_hints for secondary ranking
-        limit:            How many candidates to fetch (Qdrant re-ranks to top 2)
+        filters:     Hard constraints — colour_group_name, product_type_name,
+                     graphical_appearance_name, index_group_name, price_max, price_min
+        exclude_ids: article_ids to exclude (rejected items)
+        penalties:   Disliked attribute values excluded via SQL NOT IN
+        limit:       How many candidates to fetch
 
-    Returns ranked list of article dicts.
+    Returns list of article dicts in price-ascending order.
     """
     conditions = []
     params     = []
@@ -295,35 +291,6 @@ async def search_articles_filtered(
             params.append(ex_ids)
             p += 1
 
-    # Apply penalties — exclude disliked attribute values
-    # e.g. penalties = {"colour_group_name": ["Orange", "Yellow"]}
-    if penalties:
-        penalty_field_map = {
-            "colour_group_name":          "colour_group_name",
-            "product_type_name":          "product_type_name",
-            "graphical_appearance_name":  "graphical_appearance_name",
-            "index_group_name":           "index_group_name",
-        }
-        for attr, disliked_values in penalties.items():
-            pg_field = penalty_field_map.get(attr)
-            if pg_field and disliked_values:
-                conditions.append(f"{pg_field} != ALL(${p}::text[])")
-                params.append(list(disliked_values))
-                p += 1
-
-    # Also filter by inferred gender from purchase hints
-    if purchase_hints and purchase_hints.get('inferred_gender'):
-        gender = purchase_hints['inferred_gender']
-        gender_map = {
-            'female': ['Ladieswear', 'Divided'],
-            'male':   ['Menswear'],
-        }
-        allowed = gender_map.get(gender)
-        if allowed:
-            conditions.append(f"index_group_name = ANY(${p}::text[])")
-            params.append(allowed)
-            p += 1
-
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
     sql = f"""
@@ -337,56 +304,7 @@ async def search_articles_filtered(
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, *params)
 
-    articles = [_row_to_dict(r) for r in rows]
-
-    # Apply preference boost ranking
-    articles = _rank_by_preferences(articles, preference_boosts, purchase_hints)
-    return articles
-
-
-def _rank_by_preferences(
-    articles: list[dict],
-    preference_boosts: list[dict] = None,
-    purchase_hints: dict = None
-) -> list[dict]:
-    """
-    Re-ranks articles by preference boost weights and purchase history hints.
-    Higher score = ranked first.
-    """
-    if not articles:
-        return []
-
-    boost_map = {}
-    if preference_boosts:
-        for boost in preference_boosts:
-            key = (boost['attribute'], boost['value'])
-            boost_map[key] = boost['weight']
-
-    top_colours = []
-    top_types   = []
-    if purchase_hints:
-        top_colours = purchase_hints.get('top_colours', [])
-        top_types   = purchase_hints.get('top_product_types', [])
-
-    def score(art):
-        s = 0.0
-        # Preference boost scores
-        for (attr, val), weight in boost_map.items():
-            if art.get(attr) == val:
-                s += weight
-
-        # Purchase history secondary boost (lower weight)
-        if art.get('colour_group_name') in top_colours:
-            idx = top_colours.index(art['colour_group_name'])
-            s += 0.3 * (1 - idx / max(len(top_colours), 1))
-
-        if art.get('product_type_name') in top_types:
-            idx = top_types.index(art['product_type_name'])
-            s += 0.2 * (1 - idx / max(len(top_types), 1))
-
-        return s
-
-    return sorted(articles, key=score, reverse=True)
+    return [_row_to_dict(r) for r in rows]
 
 
 async def get_articles_for_comparison(

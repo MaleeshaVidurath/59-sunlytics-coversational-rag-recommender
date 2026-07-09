@@ -37,6 +37,14 @@ from text_rag.core.response_generator    import ResponseGenerator
 from text_rag.core.hallucination_checker import HallucinationChecker
 from memory.core.contradiction_detector  import ContradictionDetector
 
+# Evaluation capture hook — no-op unless EVAL_CAPTURE=1
+# (see test_result/hallucination_result)
+try:
+    from test_result.hallucination_result.capture import capture_case as _capture_case
+except Exception:
+    def _capture_case(**_kwargs):
+        pass
+
 # Actions that skip hallucination checking (no factual product claims)
 _SKIP_HALLUCINATION_CHECK = {"no_retrieval"}
 
@@ -279,6 +287,18 @@ class TextRAGPipeline:
                                 "flagged_sentences": [], "hallucination_score": 0.0,
                                 "contradicted_fields": []}
 
+            # Evaluation capture — persists (evidence, response, check) pairs
+            # for the hallucination evaluation test set. No-op unless EVAL_CAPTURE=1.
+            _capture_case(
+                evidence=evidence,
+                response_text=response_text,
+                action=action,
+                attempt=attempt_count,
+                session_id=session_id,
+                user_message=_ri_dbg.get("user_message", ""),
+                check_result=check_result,
+            )
+
             if check_result.get("passed", True):
                 # Passed — no hallucinations
                 final_response = response_text
@@ -448,7 +468,7 @@ class TextRAGPipeline:
         elif action == "item_attribute_lookup":
             article = evidence.get("article") or {}
             return (f"Here are the details for {article.get('name','the item')}: "
-                    f"{article.get('material_description','No description available')[:150]}")
+                    f"{(article.get('material_description') or 'No description available')[:150]}")
         elif action == "no_retrieval":
             return evidence.get("refusal_message", "How can I help you today?")
         return "I'm here to help with fashion recommendations. What are you looking for?"

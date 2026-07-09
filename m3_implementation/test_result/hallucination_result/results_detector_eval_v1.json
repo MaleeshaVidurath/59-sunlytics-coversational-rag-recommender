@@ -1,0 +1,262 @@
+{
+  "n_cases": 238,
+  "ours": {
+    "metrics": {
+      "tp": 117,
+      "fp": 0,
+      "fn": 88,
+      "tn": 33,
+      "precision": 1.0,
+      "recall": 0.5707,
+      "f1": 0.7267,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.7854,
+      "accuracy": 0.6303
+    },
+    "recall_by_corruption": {
+      "colour_swap": {
+        "detected": 43,
+        "total": 48,
+        "recall": 0.8958
+      },
+      "cross_item_swap": {
+        "detected": 30,
+        "total": 43,
+        "recall": 0.6977
+      },
+      "name_swap": {
+        "detected": 22,
+        "total": 58,
+        "recall": 0.3793
+      },
+      "price_change": {
+        "detected": 22,
+        "total": 56,
+        "recall": 0.3929
+      }
+    },
+    "false_positive_case_ids": [],
+    "missed_case_ids": [
+      "case_0004",
+      "case_0005",
+      "case_0006",
+      "case_0007",
+      "case_0008",
+      "case_0012",
+      "case_0014",
+      "case_0015",
+      "case_0017",
+      "case_0018",
+      "case_0019",
+      "case_0024",
+      "case_0026",
+      "case_0030",
+      "case_0031",
+      "case_0033",
+      "case_0035",
+      "case_0039",
+      "case_0043",
+      "case_0048",
+      "case_0051",
+      "case_0052",
+      "case_0055",
+      "case_0056",
+      "case_0057",
+      "case_0058",
+      "case_0059",
+      "case_0060",
+      "case_0065",
+      "case_0066",
+      "case_0067",
+      "case_0069",
+      "case_0070",
+      "case_0075",
+      "case_0077",
+      "case_0083",
+      "case_0084",
+      "case_0085",
+      "case_0086",
+      "case_0092",
+      "case_0097",
+      "case_0098",
+      "case_0100",
+      "case_0105",
+      "case_0106",
+      "case_0108",
+      "case_0110",
+      "case_0111",
+      "case_0112",
+      "case_0113",
+      "case_0123",
+      "case_0124",
+      "case_0125",
+      "case_0132",
+      "case_0133",
+      "case_0138",
+      "case_0144",
+      "case_0148",
+      "case_0149",
+      "case_0151",
+      "case_0159",
+      "case_0161",
+      "case_0162",
+      "case_0170",
+      "case_0171",
+      "case_0172",
+      "case_0174",
+      "case_0178",
+      "case_0179",
+      "case_0181",
+      "case_0188",
+      "case_0189",
+      "case_0190",
+      "case_0197",
+      "case_0198",
+      "case_0211",
+      "case_0212",
+      "case_0214",
+      "case_0215",
+      "case_0218",
+      "case_0220",
+      "case_0224",
+      "case_0225",
+      "case_0226",
+      "case_0227",
+      "case_0228",
+      "case_0234",
+      "case_0237"
+    ]
+  },
+  "threshold_sweep": [
+    {
+      "threshold": 0.25,
+      "precision": 1.0,
+      "recall": 0.5707,
+      "f1": 0.7267,
+      "balanced_accuracy": 0.7854
+    },
+    {
+      "threshold": 0.5,
+      "precision": 1.0,
+      "recall": 0.5707,
+      "f1": 0.7267,
+      "balanced_accuracy": 0.7854
+    },
+    {
+      "threshold": 0.65,
+      "precision": 1.0,
+      "recall": 0.5707,
+      "f1": 0.7267,
+      "balanced_accuracy": 0.7854
+    },
+    {
+      "threshold": 1.0,
+      "precision": 1.0,
+      "recall": 0.5707,
+      "f1": 0.7267,
+      "balanced_accuracy": 0.7854
+    },
+    {
+      "threshold": 2.0,
+      "precision": 1.0,
+      "recall": 0.5659,
+      "f1": 0.7227,
+      "balanced_accuracy": 0.7829
+    },
+    {
+      "threshold": 3.0,
+      "precision": 1.0,
+      "recall": 0.5415,
+      "f1": 0.7025,
+      "balanced_accuracy": 0.7707
+    },
+    {
+      "threshold": 4.0,
+      "precision": 1.0,
+      "recall": 0.4878,
+      "f1": 0.6557,
+      "balanced_accuracy": 0.7439
+    },
+    {
+      "threshold": 5.0,
+      "precision": 1.0,
+      "recall": 0.3366,
+      "f1": 0.5036,
+      "balanced_accuracy": 0.6683
+    }
+  ],
+  "naive_nli": {
+    "metrics": {
+      "tp": 197,
+      "fp": 29,
+      "fn": 8,
+      "tn": 4,
+      "precision": 0.8717,
+      "recall": 0.961,
+      "f1": 0.9142,
+      "specificity": 0.1212,
+      "balanced_accuracy": 0.5411,
+      "accuracy": 0.8445
+    },
+    "recall_by_corruption": {
+      "colour_swap": {
+        "detected": 48,
+        "total": 48,
+        "recall": 1.0
+      },
+      "cross_item_swap": {
+        "detected": 43,
+        "total": 43,
+        "recall": 1.0
+      },
+      "name_swap": {
+        "detected": 52,
+        "total": 58,
+        "recall": 0.8966
+      },
+      "price_change": {
+        "detected": 54,
+        "total": 56,
+        "recall": 0.9643
+      }
+    }
+  },
+  "llm_judge": {
+    "metrics": {
+      "tp": 196,
+      "fp": 5,
+      "fn": 9,
+      "tn": 28,
+      "precision": 0.9751,
+      "recall": 0.9561,
+      "f1": 0.9655,
+      "specificity": 0.8485,
+      "balanced_accuracy": 0.9023,
+      "accuracy": 0.9412
+    },
+    "n_answered": 238,
+    "n_unanswered": 0,
+    "recall_by_corruption": {
+      "colour_swap": {
+        "detected": 48,
+        "total": 48,
+        "recall": 1.0
+      },
+      "cross_item_swap": {
+        "detected": 42,
+        "total": 43,
+        "recall": 0.9767
+      },
+      "name_swap": {
+        "detected": 53,
+        "total": 58,
+        "recall": 0.9138
+      },
+      "price_change": {
+        "detected": 53,
+        "total": 56,
+        "recall": 0.9464
+      }
+    }
+  }
+}

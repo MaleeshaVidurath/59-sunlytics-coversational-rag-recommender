@@ -1,0 +1,37 @@
+{
+  "evaluation_A_full_context": {
+    "accuracy": 0.9972,
+    "macro_f1": 0.9969,
+    "weighted_f1": 0.9972,
+    "per_class_f1": {
+      "INITIAL_REQUEST": 1.0,
+      "REFINEMENT": 1.0,
+      "ATTRIBUTE_QUESTION": 1.0,
+      "EXPLANATION_WHY": 0.9974,
+      "COMPARISON": 1.0,
+      "SELECTION_REFERENCE": 0.9902,
+      "FEEDBACK": 0.9878,
+      "CHITCHAT": 1.0
+    },
+    "description": "Full conversation history \u2014 upper bound on synthetic data"
+  },
+  "evaluation_B_mixed": {
+    "accuracy": 0.9312,
+    "macro_f1": 0.9437,
+    "weighted_f1": 0.9289,
+    "per_class_f1": {
+      "INITIAL_REQUEST": 0.7798,
+      "REFINEMENT": 0.8519,
+      "ATTRIBUTE_QUESTION": 1.0,
+      "EXPLANATION_WHY": 0.9974,
+      "COMPARISON": 0.9974,
+      "SELECTION_REFERENCE": 0.9756,
+      "FEEDBACK": 0.9676,
+      "CHITCHAT": 0.9797
+    },
+    "mix_ratio": 0.7,
+    "description": "70% of examples evaluated without conversation history"
+  },
+  "model": "DistilBERT fine-tuned, v4 balanced (52,028 training samples)",
+  "test_set": "v2_test_augmented.csv (1,787 samples)"
+}
