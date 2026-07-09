@@ -1,0 +1,10 @@
+{
+  "model": "distilbert-base-uncased (fine-tuned)",
+  "dataset": "cardiffnlp/tweet_eval sentiment (SemEval 2017)",
+  "test_samples": 12284,
+  "accuracy": 0.6877,
+  "f1_macro": 0.6864,
+  "f1_negative": 0.706,
+  "f1_neutral": 0.6822,
+  "f1_positive": 0.6709
+}
