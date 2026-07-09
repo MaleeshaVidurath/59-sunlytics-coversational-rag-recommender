@@ -1,0 +1,32 @@
+
+=======================================================
+ Adaptive RAG Latency - Statistical Report
+=======================================================
+
+Raw rows  : 122
+Removed   : 23  (rules R1-R8)
+Clean rows: 99
+
+--- 3-Tier Grouped ---
+  NO      n= 23  mean=  865.9ms  median=  888.3ms
+  PARTIAL n= 41  mean= 3134.4ms  median= 3183.5ms
+  FULL    n= 35  mean= 4989.5ms  median= 4829.2ms
+
+--- Kruskal-Wallis (NO vs PARTIAL vs FULL) ---
+  H = 80.908,  p = 2.70e-18  (SIGNIFICANT)
+
+--- Pairwise Mann-Whitney U (one-tailed: A < B) ---
+  NO < PARTIAL   : U=    6  p=3.85e-11  Cohen d=3.75
+  PARTIAL < FULL : U=   46  p=1.35e-12  Cohen d=2.18
+  NO < FULL      : U=    0  p=8.30e-11
+
+--- PARTIAL sub-tier: RECENT vs SESSION (two-tailed) ---
+  RECENT  n=24  mean=3102.7ms
+  SESSION n=17  mean=3179.1ms
+  Mann-Whitney U=198  p=0.884  Cohen d=0.13
+  Result: sub-tiers are NOT significantly different (p >=0.05)
+
+--- Savings vs FULL ---
+  PARTIAL : 37.2% faster (mean)
+  NO      : 82.6% faster (mean)
+=======================================================

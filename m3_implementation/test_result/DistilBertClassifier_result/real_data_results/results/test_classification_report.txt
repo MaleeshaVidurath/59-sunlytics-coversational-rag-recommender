@@ -1,0 +1,17 @@
+TEST SET — real_test_simmc.csv
+=======================================================
+
+                     precision    recall  f1-score   support
+
+    INITIAL_REQUEST     0.9756    0.9711    0.9733      2180
+         REFINEMENT     0.9527    0.9558    0.9542      1200
+ ATTRIBUTE_QUESTION     0.9403    0.9282    0.9342       543
+    EXPLANATION_WHY     1.0000    1.0000    1.0000       913
+         COMPARISON     0.9058    0.9374    0.9213       431
+SELECTION_REFERENCE     1.0000    0.9974    0.9987       387
+           FEEDBACK     1.0000    0.9987    0.9993       742
+           CHITCHAT     1.0000    1.0000    1.0000       913
+
+           accuracy                         0.9748      7309
+          macro avg     0.9718    0.9736    0.9726      7309
+       weighted avg     0.9750    0.9748    0.9749      7309

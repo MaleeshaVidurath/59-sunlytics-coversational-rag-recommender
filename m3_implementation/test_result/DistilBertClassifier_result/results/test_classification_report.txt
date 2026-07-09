@@ -1,0 +1,18 @@
+Evaluation B — Mixed Test Set (MIX_RATIO=0.7)
+Accuracy: 93.12%  Macro-F1: 0.9437
+============================================================
+
+                     precision    recall  f1-score   support
+
+    INITIAL_REQUEST     0.9897    0.6433    0.7798       300
+         REFINEMENT     0.7438    0.9967    0.8519       300
+ ATTRIBUTE_QUESTION     1.0000    1.0000    1.0000       204
+    EXPLANATION_WHY     1.0000    0.9948    0.9974       191
+         COMPARISON     0.9948    1.0000    0.9974       191
+SELECTION_REFERENCE     0.9804    0.9709    0.9756       206
+           FEEDBACK     0.9749    0.9604    0.9676       202
+           CHITCHAT     0.9602    1.0000    0.9797       193
+
+           accuracy                         0.9312      1787
+          macro avg     0.9555    0.9458    0.9437      1787
+       weighted avg     0.9453    0.9312    0.9289      1787

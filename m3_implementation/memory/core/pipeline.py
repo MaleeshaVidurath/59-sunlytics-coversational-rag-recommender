@@ -49,6 +49,9 @@ from memory.models.schemas import (
     RecommendationDocument, now_utc
 )
 from memory.db.mongo import get_db, get_collection_name
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from adaptive_rag.distilbert_training.predict import Predictor
 
 
 def _load_distilbert_predictor():
@@ -120,6 +123,7 @@ class MemoryPipeline:
         self.user_mgr    = UserManager()
         self.enricher    = EnrichmentLayer()
 
+        self.predictor: "Predictor | None" = None
         if distilbert_predictor is not None:
             self.predictor = distilbert_predictor
             print("[MemoryPipeline] Using provided DistilBERT predictor.")
@@ -461,6 +465,7 @@ class MemoryPipeline:
             history=history,
             session_id=active_session_id,
             confidence=confidence,
+            user_id=user_id,
         )
 
         # Override retrieval strategy with CSE result
@@ -501,16 +506,35 @@ class MemoryPipeline:
         )
 
         # ── Step 7: Enrich with memory context ────────────────────────────
-        print(f"[DBG-3] ENRICHMENT: calling for label={label}")
-        print(f"[PIPELINE-6] calling enricher...")
-        enriched = await self.enricher.enrich(
-            label=label,
-            retrieval_strategy=retrieval_strategy,
-            session_id=active_session_id,
-            user_id=user_id,
-            current_message=message,
-            entities=entities
-        )
+        # For ATTRIBUTE_QUESTION, CSE already called enrichment internally.
+        # Reuse its result to avoid a duplicate round-trip.
+        if label in ("ATTRIBUTE_QUESTION", "COMPARISON", "EXPLANATION_WHY", "SELECTION_REFERENCE") and _cse_result.enriched_retrieval_input is not None:
+            print(f"[PIPELINE] {label}: using CSE-cached enrichment (skipping duplicate call)")
+            enriched = {
+                "label":              label,
+                "retrieval_strategy": retrieval_strategy,
+                "retrieval_input":    _cse_result.enriched_retrieval_input,
+                "memory_context":     _cse_result.enriched_memory_context or {},
+                "side_effects":       _cse_result.enriched_side_effects or [],
+            }
+            _mc = enriched["memory_context"]
+            if _mc.get("use_historical_items"):
+                _hist = _mc.get("historical_items", [])
+                _names = [it.get("prod_name", "?") for it in _hist]
+                print(f"[PIPELINE] historical_items={_names}  use_historical_items=True")
+            else:
+                print("[PIPELINE] use_historical_items=False (item from currently_discussing)")
+        else:
+            print(f"[DBG-3] ENRICHMENT: calling for label={label}")
+            print("[PIPELINE-6] calling enricher...")
+            enriched = await self.enricher.enrich(
+                label=label,
+                retrieval_strategy=retrieval_strategy,
+                session_id=active_session_id,
+                user_id=user_id,
+                current_message=message,
+                entities=entities
+            )
 
         # ── Patch CSE subtypes and excluded_ids into retrieval_input ─────────
         if enriched.get("retrieval_input"):
@@ -1077,8 +1101,12 @@ class MemoryPipeline:
             return True, None
 
         all_turns = await self.turn_mgr.get_all_session_turns(session_id)
+        _ITEM_INTRODUCING = {
+            "INITIAL_REQUEST", "REFINEMENT",
+            "SELECTION_REFERENCE", "ATTRIBUTE_QUESTION",
+        }
         has_prior_ir = any(
-            (t.get("classification") or {}).get("label") == "INITIAL_REQUEST"
+            (t.get("classification") or {}).get("label") in _ITEM_INTRODUCING
             for t in all_turns
         )
         if has_prior_ir:

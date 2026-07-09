@@ -422,6 +422,50 @@ def _resolve_item_reference(
     return item_list[0]
 
 
+def _resolve_item_reference_checked(
+    message: str,
+    *items: Optional[ItemInContext],
+) -> tuple:
+    """
+    Like _resolve_item_reference but also returns is_default=True when
+    result was a fallback to item_list[0] (no real match found in message).
+    Returns (item, is_default).
+    """
+    item_list = [it for it in items if it is not None]
+    if not item_list:
+        return None, False
+
+    msg = message.lower()
+
+    _ORDINALS = [
+        (0, ["first",   "option 1", "item 1", "1st", "number one",   "the 1st"]),
+        (1, ["second",  "option 2", "item 2", "2nd", "number two",   "the 2nd", "the other"]),
+        (2, ["third",   "option 3", "item 3", "3rd", "number three", "the 3rd"]),
+        (3, ["fourth",  "option 4", "item 4", "4th", "number four",  "the 4th"]),
+        (4, ["fifth",   "option 5", "item 5", "5th", "number five",  "the 5th"]),
+        (5, ["sixth",   "option 6", "item 6", "6th", "number six",   "the 6th"]),
+        (6, ["seventh", "option 7", "item 7", "7th", "number seven", "the 7th"]),
+        (7, ["eighth",  "option 8", "item 8", "8th", "number eight", "the 8th"]),
+    ]
+    for idx, phrases in _ORDINALS:
+        if any(phrase in msg for phrase in phrases) and idx < len(item_list):
+            return item_list[idx], False
+
+    price_match = _match_item_by_price(msg, item_list)
+    if price_match:
+        return price_match, False
+
+    for item in reversed(item_list):
+        if item.colour_group_name.lower() in msg:
+            return item, False
+
+    for item in reversed(item_list):
+        if item.prod_name.lower() in msg:
+            return item, False
+
+    return item_list[0], True
+
+
 # ── Comparison item resolver ──────────────────────────────────────────────────
 
 def _resolve_selection_item(
@@ -458,42 +502,68 @@ def _resolve_selection_item(
     return name_item
 
 
-async def _resolve_comparison_items(
-    message: str, all_ctx_items: list, session_id: str
+def _find_second_item(message: str, item_pool: list) -> Optional[ItemInContext]:
+    """
+    Finds the best-matching item from pool by word overlap with no threshold.
+    Used when one item is already identified and we need the second for a comparison.
+    Returns None only when every item scores 0.
+    """
+    if not item_pool:
+        return None
+    msg_lower = message.lower()
+    msg_words = {w for w in msg_lower.split() if len(w) >= 3}
+    best_score, best_item = 0, None
+    for item in item_pool:
+        name_lower = (item.prod_name or "").lower()
+        if name_lower and name_lower in msg_lower:
+            score = 100
+        else:
+            name_words = {w for w in name_lower.split() if len(w) >= 3}
+            score = len(name_words & msg_words)
+        colour = (item.colour_group_name or "").lower()
+        if colour and colour in msg_lower:
+            score += 50
+        if score > best_score:
+            best_score, best_item = score, item
+    return best_item if best_score > 0 else None
+
+
+def _resolve_comparison_items(
+    message: str, all_ctx_items: list
 ) -> tuple:
     """
-    Returns (compare_a, compare_b, compare_list) for a COMPARISON turn.
-    Priority: ordinals → name-match last turn → name-match session history → generic fallback.
+    Returns (compare_a, compare_b, compare_list, resolved_both) from current context only.
+    resolved_both=True when both items were explicitly identified (not generic fallback).
+    Priority: ordinals → name-match ≥2 → name-match 1 + permissive second → generic fallback.
+    Session history lookup is handled by the caller (_enrich_comparison).
     """
     msg_lower = message.lower()
 
     ordinal_items = _resolve_ordinal_items(msg_lower, all_ctx_items)
     if len(ordinal_items) >= 2:
         print(f"[ENRICH-COMPARE] ordinal-match: {[it.prod_name for it in ordinal_items]}")
-        return ordinal_items[0], ordinal_items[1], ordinal_items
+        return ordinal_items[0], ordinal_items[1], ordinal_items, True
 
     resolved = _score_items_by_name(message, all_ctx_items)
-    print(f"[ENRICH-COMPARE] name-match (last turn): {[it.prod_name for it in resolved]}")
-
-    if len(resolved) < 2:
-        hist_pool = await _collect_session_items(session_id)
-        if hist_pool:
-            hist_resolved = _score_items_by_name(message, hist_pool)
-            if len(hist_resolved) >= 2:
-                resolved = hist_resolved
-                print(f"[ENRICH-COMPARE] name-match (session history): "
-                      f"{[it.prod_name for it in resolved]}")
+    print(f"[ENRICH-COMPARE] name-match (current): {[it.prod_name for it in resolved]}")
 
     if len(resolved) >= 2:
-        print(f"[ENRICH-COMPARE] named {len(resolved)} item(s): "
-              f"{[it.prod_name for it in resolved]}")
-        return resolved[0], resolved[1], resolved
+        return resolved[0], resolved[1], resolved, True
+
+    if len(resolved) == 1:
+        # One item identified clearly — search remaining items permissively for the second
+        remaining = [it for it in all_ctx_items if it.article_id != resolved[0].article_id]
+        second = _find_second_item(message, remaining)
+        if second:
+            print(f"[ENRICH-COMPARE] second item (permissive match): '{second.prod_name}'")
+            pair = [resolved[0], second]
+            return pair[0], pair[1], pair, True
 
     # Generic fallback — compare all last-turn items
-    print(f"[ENRICH-COMPARE] generic: comparing all {len(all_ctx_items)} last-turn items")
+    print(f"[ENRICH-COMPARE] generic fallback: comparing all {len(all_ctx_items)} current items")
     compare_a = all_ctx_items[0] if all_ctx_items else None
     compare_b = all_ctx_items[1] if len(all_ctx_items) > 1 else None
-    return compare_a, compare_b, all_ctx_items
+    return compare_a, compare_b, all_ctx_items, False
 
 
 def _resolve_ordinal_items(msg_lower: str, item_list: list) -> list:
@@ -636,6 +706,34 @@ async def _collect_session_items(session_id: str) -> list:
     except Exception as e:
         print(f"[ENRICH-COMPARE] session history query failed: {e}")
         return []
+
+
+async def _find_item_in_session_history(message: str, session_id: str) -> Optional[ItemInContext]:
+    """
+    Searches all recommendations in the session for an item matching the message.
+    Uses _collect_session_items + _score_items_by_name. Returns best match or None.
+    """
+    session_items = await _collect_session_items(session_id)
+    if not session_items:
+        return None
+    scored = _score_items_by_name(message, session_items)
+    if not scored:
+        return None
+    return scored[0]
+
+
+async def _find_items_in_session_history(
+    message: str, session_id: str, n: int = 2
+) -> list:
+    """
+    Searches session history for up to n items matching the message.
+    Returns a list of up to n ItemInContext (empty list if not enough found).
+    """
+    session_items = await _collect_session_items(session_id)
+    if not session_items:
+        return []
+    scored = _score_items_by_name(message, session_items)
+    return scored[:n]
 
 
 # ── Helper: build items_in_context dict ───────────────────────────────────────
@@ -973,7 +1071,7 @@ class EnrichmentLayer:
     async def _enrich_attribute_question(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        print(f"[ENRICH-ATTR] ━━━ called msg='{current_message[:50]}' entities={entities}")
+        print(f"[ENRICH-ATTR] ━━━ called msg='{current_message[:50]}'")
         """ATTRIBUTE_QUESTION → action: item_attribute_lookup.
         
         Guard: if no items are in context, cannot look up an attribute.
@@ -994,7 +1092,7 @@ class EnrichmentLayer:
                 "recommended yet. Treating as a new search request."
             )
             return {
-                "label":              "INITIAL_REQUEST",
+                "label":"ATTRIBUTE_QUESTION",
                 "retrieval_strategy": "FULL",
                 "retrieval_input": self._make_retrieval_input(
                     action="catalog_search",
@@ -1009,11 +1107,65 @@ class EnrichmentLayer:
                     }
                 ),
                 "memory_context": memory_ctx,
-                "side_effects":   ["Reclassified: no items in context → INITIAL_REQUEST"],
+                "side_effects":   ["Reclassified: no items in context → ATTRIBUTE_QUESTION"],
             }
 
         # Resolve which item the question is about
-        target_item = _resolve_item_reference(current_message, *all_ctx_items)
+        target_item, is_default = _resolve_item_reference_checked(current_message, *all_ctx_items)
+
+        # If fallback default (no real match in currently_discussing), search session history
+        if is_default:
+            hist_item = await _find_item_in_session_history(current_message, session_id)
+            if hist_item:
+                print(f"[ENRICH-ATTR] session history match: '{hist_item.prod_name}' (was default fallback)")
+                attribute_topic = _identify_attribute_topic(current_message)
+                memory_ctx = await self._base_memory_context(user_id, state, include_preferences=False)
+                memory_ctx["historical_items"]    = [hist_item.model_dump()]
+                memory_ctx["use_historical_items"] = True
+                return {
+                    "label": "ATTRIBUTE_QUESTION",
+                    "retrieval_strategy": "PARTIAL",
+                    "retrieval_input": self._make_retrieval_input(
+                        action="item_attribute_lookup",
+                        retrieval_strategy="PARTIAL",
+                        user_message=current_message,
+                        ctx_items=[hist_item],
+                        exclude_ids=state.rejected_items,
+                        payload={
+                            "article_id":          hist_item.article_id,
+                            "attribute_topic":     attribute_topic,
+                            "historical_items":    [hist_item.model_dump()],
+                            "use_historical_items": True,
+                        }
+                    ),
+                    "memory_context": memory_ctx,
+                    "side_effects": ["session history fallback: item found in past recommendations"],
+                }
+            else:
+                print("[ENRICH-ATTR] no match in session history → escalating to FULL retrieval")
+                memory_ctx = await self._base_memory_context(user_id, state)
+                memory_ctx["needs_clarification"] = True
+                memory_ctx["clarification_reason"] = (
+                    "User asked about an item not found in current or past recommendations."
+                )
+                return {
+                    "label": "ATTRIBUTE_QUESTION",
+                    "retrieval_strategy": "FULL",
+                    "retrieval_input": self._make_retrieval_input(
+                        action="catalog_search",
+                        retrieval_strategy="FULL",
+                        user_message=current_message,
+                        ctx_items=[],
+                        exclude_ids=state.rejected_items,
+                        payload={
+                            "filters":           state.hard_constraints,
+                            "preference_boosts": [],
+                            "penalties":         {},
+                        }
+                    ),
+                    "memory_context": memory_ctx,
+                    "side_effects": ["session history fallback: item not found → FULL retrieval"],
+                }
 
         # Identify what attribute is being asked about (hybrid similarity)
         attribute_topic = _identify_attribute_topic(current_message)
@@ -1023,7 +1175,7 @@ class EnrichmentLayer:
         )
 
         return {
-            "label":              "ATTRIBUTE_QUESTION",
+            "label":"ATTRIBUTE_QUESTION",
             "retrieval_strategy": "PARTIAL",
             "retrieval_input": self._make_retrieval_input(
                 action="item_attribute_lookup",
@@ -1043,7 +1195,7 @@ class EnrichmentLayer:
     async def _enrich_explanation_why(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        print(f"[ENRICH-WHY] ━━━ called msg='{current_message[:50]}' entities={entities}")
+        print(f"[ENRICH-WHY] ━━━ called msg='{current_message[:50]}'")
         """
         EXPLANATION_WHY → action: explanation_generate
 
@@ -1075,8 +1227,18 @@ class EnrichmentLayer:
             best_score = sum(1 for w in name_words if len(w) > 3 and w in msg_words)
         target_item = resolved if (best_score > 0 or _has_ordinal_or_price_ref(msg_lower)) else None
 
+        # If no specific item found in currently_discussing, search session history
+        use_historical = False
+        if target_item is None:
+            hist_item = await _find_item_in_session_history(current_message, session_id)
+            if hist_item:
+                print(f"[ENRICH-WHY] session history match: '{hist_item.prod_name}' (not in currently_discussing)")
+                target_item = hist_item
+                use_historical = True
+
         print(f"[ENRICH-WHY] target_item="
               f"'{target_item.prod_name if target_item else 'ALL ITEMS'}' "
+              f"use_historical={use_historical} "
               f"(scored from {len(all_ctx_items)} context items)")
 
         # ── Fetch stored explanation for target item ───────────────────────
@@ -1093,6 +1255,9 @@ class EnrichmentLayer:
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
         memory_ctx = await self._base_memory_context(user_id, state)
         memory_ctx["existing_explanation"] = existing_explanation
+        if use_historical:
+            memory_ctx["historical_items"]     = [target_item.model_dump()]
+            memory_ctx["use_historical_items"] = True
 
         return {
             "label":              "EXPLANATION_WHY",
@@ -1101,15 +1266,11 @@ class EnrichmentLayer:
                 action="explanation_generate",
                 retrieval_strategy="PARTIAL",
                 user_message=current_message,
-                ctx_items=all_ctx_items,
+                ctx_items=[target_item] if use_historical else all_ctx_items,
                 exclude_ids=state.rejected_items,
                 payload={
-                    # Single item explanation
-                    "article_id":     target_item.article_id if target_item else None,
-                    # Full item data stored at recommendation time — assembler uses
-                    # this to skip the DB query when detail_desc is already present.
+                    "article_id":      target_item.article_id if target_item else None,
                     "context_article": target_item.model_dump() if target_item else None,
-                    # All-items summary: passed when user asks "why" with no product name
                     "all_item_ids":   (
                         None if target_item
                         else [it.article_id for it in all_ctx_items]
@@ -1118,17 +1279,19 @@ class EnrichmentLayer:
                         existing_explanation.get("claims", [])
                         if existing_explanation else []
                     ),
-                    "matched_prefs": pref_summary.get("liked_attributes", []),
+                    "matched_prefs":        pref_summary.get("liked_attributes", []),
+                    "historical_items":     [target_item.model_dump()] if use_historical else None,
+                    "use_historical_items": use_historical,
                 }
             ),
             "memory_context": memory_ctx,
-            "side_effects":   [],
+            "side_effects":   ["session history fallback: item found in past recommendations"] if use_historical else [],
         }
 
     async def _enrich_comparison(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        print(f"[ENRICH-COMPARE] ━━━ called msg='{current_message[:50]}' entities={entities}")
+        print(f"[ENRICH-COMPARE] ━━━ called msg='{current_message[:50]}'")
         """COMPARISON → action: item_compare"""
         current_items = state.currently_discussing
 
@@ -1146,9 +1309,27 @@ class EnrichmentLayer:
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
         memory_ctx = await self._base_memory_context(user_id, state)
 
-        compare_a, compare_b, compare_list = await _resolve_comparison_items(
-            current_message, all_ctx_items, session_id
+        compare_a, compare_b, compare_list, resolved_both = _resolve_comparison_items(
+            current_message, all_ctx_items
         )
+        use_historical = False
+
+        # Only fall back to session history when current context couldn't identify either item
+        if not resolved_both:
+            hist_items = await _find_items_in_session_history(current_message, session_id)
+            if len(hist_items) >= 2:
+                print(f"[ENRICH-COMPARE] session history match: "
+                      f"'{hist_items[0].prod_name}' vs '{hist_items[1].prod_name}'")
+                compare_a, compare_b = hist_items[0], hist_items[1]
+                compare_list         = hist_items
+                use_historical       = True
+            else:
+                print("[ENRICH-COMPARE] no session history match (< 2 items) — keeping generic fallback")
+
+        print(f"[ENRICH-COMPARE] final pair: "
+              f"'{compare_a.prod_name if compare_a else '?'}' vs "
+              f"'{compare_b.prod_name if compare_b else '?'}'  "
+              f"resolved_both={resolved_both}  use_historical={use_historical}")
 
         payload = {
             "article_id_a":         compare_a.article_id if compare_a else None,
@@ -1175,6 +1356,16 @@ class EnrichmentLayer:
                 it.model_dump() for it in compare_list
             ]
 
+        if use_historical:
+            hist_list = [it.model_dump() for it in compare_list[:2]]
+            print(f"[ENRICH-COMPARE] session history fallback: "
+                  f"'{compare_a.prod_name if compare_a else '?'}' vs "
+                  f"'{compare_b.prod_name if compare_b else '?'}'")
+            payload["historical_items"]     = hist_list
+            payload["use_historical_items"] = True
+            memory_ctx["historical_items"]     = hist_list
+            memory_ctx["use_historical_items"] = True
+
         return {
             "label":              "COMPARISON",
             "retrieval_strategy": "PARTIAL",
@@ -1187,13 +1378,17 @@ class EnrichmentLayer:
                 payload=payload,
             ),
             "memory_context": memory_ctx,
-            "side_effects":   [],
+            "side_effects":   (
+                [f"Session history fallback: '{compare_a.prod_name if compare_a else '?'}' vs "
+                 f"'{compare_b.prod_name if compare_b else '?'}'"]
+                if use_historical else []
+            ),
         }
 
     async def _enrich_selection_reference(
         self, session_id, user_id, current_message, entities, state
     ) -> dict:
-        print(f"[ENRICH-SELECT] ━━━ called msg='{current_message[:50]}' entities={entities}")
+        print(f"[ENRICH-SELECT] ━━━ called msg='{current_message[:50]}'")
         """SELECTION_REFERENCE → action: item_detail_lookup.
         
         Guard: if no items are in context (session just started or no
@@ -1223,12 +1418,27 @@ class EnrichmentLayer:
                 "side_effects":       ["Reclassified: no items in context"],
             }
 
-        selected_item = _resolve_selection_item(current_message, all_ctx_items)
+        msg_lower   = current_message.lower()
+        name_scored = _score_items_by_name(current_message, all_ctx_items)
+        is_default  = not name_scored and not _has_ordinal_or_price_ref(msg_lower)
+
+        selected_item  = _resolve_selection_item(current_message, all_ctx_items)
+        use_historical = False
+
+        if is_default:
+            hist_item = await _find_item_in_session_history(current_message, session_id)
+            if hist_item:
+                print(f"[ENRICH-SELECT] session history match: '{hist_item.prod_name}' (was default fallback)")
+                selected_item  = hist_item
+                use_historical = True
+            else:
+                print("[ENRICH-SELECT] no session history match — keeping default fallback item")
 
         # Promote selected item to item_a position so all downstream turns
         # (explanation, follow-up, feedback) default to the correct item.
+        # Skip promotion when item is from session history (not in currently_discussing).
         side_effects = []
-        if selected_item:
+        if selected_item and not use_historical:
             selected_key = next(
                 (k for k, v in current_items.items()
                  if v and v.article_id == selected_item.article_id),
@@ -1246,10 +1456,15 @@ class EnrichmentLayer:
                     session_id, {"currently_discussing": updated_discussing}
                 )
                 side_effects.append(f"Item focus promoted: {selected_key} → item_a")
+        elif use_historical:
+            side_effects.append(f"Session history fallback: '{selected_item.prod_name}' (not promoted to item_a)")
 
         memory_ctx = await self._base_memory_context(
             user_id, state, include_preferences=False
         )
+        if use_historical:
+            memory_ctx["historical_items"]     = [selected_item.model_dump()]
+            memory_ctx["use_historical_items"] = True
 
         return {
             "label":              "SELECTION_REFERENCE",
@@ -1261,10 +1476,12 @@ class EnrichmentLayer:
                 ctx_items=all_ctx_items,
                 exclude_ids=state.rejected_items,
                 payload={
-                    "article_id":     selected_item.article_id if selected_item else None,
+                    "article_id":      selected_item.article_id if selected_item else None,
                     # Full item data stored at recommendation time — assembler uses
                     # this to skip the DB query when detail_desc is already present.
                     "context_article": selected_item.model_dump() if selected_item else None,
+                    **({"historical_items": [selected_item.model_dump()], "use_historical_items": True}
+                       if use_historical else {}),
                 }
             ),
             "memory_context": memory_ctx,
