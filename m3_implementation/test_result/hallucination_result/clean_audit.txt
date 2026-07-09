@@ -1,0 +1,139 @@
+MANUAL AUDIT — verify each 'clean' response truly matches its evidence.
+Mark any wrong ones; they must be relabeled before computing final metrics.
+
+case_0001 [catalog_search] user: I want a black dress under £50
+  evidence: London dress / Black / £11.08 | SS London dress / Black / £15.12
+  response: I'd be happy to help you find a black dress under £50. Here are two options:
+Option 1: London dress, Black, £11.08, This short dress is a great value for the price and has a lovely patterned viscose weave.
+Option 2: SS London dress, Black, £15.12, This short dress has a similar style to the London dress but with a slightly higher price point, making it a good option if you're willing to spend a bit more.
+
+case_0009 [item_attribute_lookup] user: What material is the first one made of?
+  evidence: London dress / Black / £11.08
+  response: The London dress is made of a patterned viscose weave. This gives it a lightweight and flowy texture, perfect for a casual yet stylish look.
+
+case_0011 [item_compare] user: Which one is cheaper?
+  evidence: London dress / Black / £11.08 | SS London dress / Black / £15.12
+  response: The London dress is the more affordable option, priced at £11.08, while the SS London dress is £4.04 more expensive at £15.12. This makes the London dress a better choice for those on a budget, offering a significant price difference of £4.04. Overall, the London dress is the more budget-friendly option for customers.
+
+case_0016 [explanation_generate] user: Why did you recommend the first one?
+  evidence: London dress / Black / £11.08
+  response: I recommended London dress because it perfectly matches your preferences for a dress and the colour black. You have a moderately strong preference for dresses and a slightly strong preference for black, which makes this dress a great fit for you. Additionally, the London dress is a short dress with a V-neck and puff sleeves, which adds a touch of style and femininity. And the best part? It's an affordable option at just £11.08, offering great value for its price.
+
+case_0020 [catalog_search] user: Show me red summer dresses
+  evidence: Luxe dress / Red / £14.10 | Galaxy / Red / £31.82
+  response: I found two options for you. Option 1: Luxe dress: Red Dress, £14.10. Calf-length dress in a soft, textured viscose weave with narrow, adjustable shoulder straps, a. Option 2: Galaxy: Red Dress, £31.82.
+
+case_0029 [item_compare] user: Compare option 1 and option 2
+  evidence: Luxe dress / Red / £14.10 | Galaxy / Red / £31.82
+  response: Here's a comparison of Luxe dress and Galaxy:
+* Both Luxe dress and Galaxy are dresses, with Luxe dress being a dress and Galaxy also being a dress.
+* Luxe dress is priced at £14.10, while Galaxy is priced at £31.82, making Luxe dress a more affordable option.
+* Considering the overall value, Luxe dress is a better option due to its lower price point, despite both dresses being described as calf-length and having a similar colour, red.
+
+case_0036 [catalog_search] user: Something cheaper instead please
+  evidence: Regular Printed tee 9.99 B2 / White / £8.06 | Regular Printed tee 9.99 B2 / White / £7.05
+  response: I found two options for you. Option 1: Regular Printed tee 9.99 B2: White T-shirt, £8.06. T-shirt in printed cotton jersey. Option 2: Regular Printed tee 9.99 B2: White T-shirt, £7.05.
+
+case_0044 [catalog_search] user: I need a black bra under £20
+  evidence: Hilly clean bra / Black / £17.97 | Charlotte lowback bra / Black / £17.78
+  response: I found two options for you. Option 1: Hilly clean bra: Black Bra, £17.97. Bra top in microfibre with a lined front, wide shoulder straps and padded cups with removable. Option 2: Charlotte lowback bra: Black Bra, £17.78.
+
+case_0053 [catalog_search] user: Show me blue jeans
+  evidence: Regular Fit Midprice / Blue / £24.20 | Tapered Premiumprice / Blue / £16.15
+  response: I found two options for you. Option 1: Regular Fit Midprice: Blue Trousers, £24.20. 5-pocket jeans in stretch denim with a regular waist, zip fly and button and straight legs with. Option 2: Tapered Premiumprice: Blue Trousers, £16.15.
+
+case_0062 [catalog_search] user: Do they have pockets?
+  evidence: Pull On Ankle. / Blue / £15.34 | Birdie Denim Dungaree / Blue / £20.83
+  response: I found two options for you. Option 1: Pull On Ankle.: Blue Trousers, £15.34. Ankle-length trousers in airy denim. High, elasticated waist with pleats and ties, side pockets,. Option 2: Birdie Denim Dungaree: Blue Trousers, £20.83.
+
+case_0071 [catalog_search] user: I want a warm winter jacket
+  evidence: Bruce flight jacket / Black / £40.33 | Summer jacket / Black / £28.23
+  response: I found two options for you. Option 1: Bruce flight jacket: Black Jacket, £40.33. Pile jacket with imitation leather details, a collar that can be turned up with an adjustable tab. Option 2: Summer jacket: Black Jacket, £28.23.
+
+case_0080 [catalog_search] user: Show me something in black instead
+  evidence: Arthur leo velour bomber / Black / £70.59 | Andreas / Black / £40.33
+  response: I found two options for you. Option 1: Arthur leo velour bomber: Black Jacket, £70.59. Bomber jacket in a soft weave with a fluffy finish. Ribbed stand-up collar, zip down the front,. Option 2: Andreas: Black Jacket, £40.33.
+
+case_0089 [explanation_generate] user: Why did you pick the first one?
+  evidence: Arthur leo velour bomber / Black / £70.59
+  response: I recommended Arthur leo velour bomber because its index group is Menswear, and its type is Jacket, and its colour is Black. It is a Black Jacket priced at £70.59. Bomber jacket in a soft weave with a fluffy finish. Ribbed stand-up collar, zip down the front, zipped side pockets and
+
+case_0093 [catalog_search] user: Casual shirts for the office please
+  evidence: BORIS SS / Black / £10.08 | Moss Viscose Shirt / Black / £8.06
+  response: I found two options for you. Option 1: BORIS SS: Black Shirt, £10.08. Short-sleeved shirt in a cotton weave with a turn-down collar and classic front. Yoke at the back,. Option 2: Moss Viscose Shirt: Black Shirt, £8.06.
+
+case_0102 [item_compare] user: Which one is better for a job interview?
+  evidence: BORIS SS / Black / £10.08 | Moss Viscose Shirt / Black / £8.06
+  response: Comparing BORIS SS and Moss Viscose Shirt: BORIS SS costs £10.08, Moss Viscose Shirt costs £8.06.
+
+case_0107 [catalog_search] user: Sneakers under £40
+  evidence: Liam runner / Black / £34.87 | Liam runner / White / £15.88
+  response: I found two options for you. Option 1: Liam runner: Black Sneakers, £34.87. Trainers in mesh with rubber details, a padded top edge, lacing at the front and a loop front and. Option 2: Liam runner: White Sneakers, £15.88.
+
+case_0116 [item_detail_lookup] user: Tell me more about the second one
+  evidence: Liam runner / White / £15.88
+  response: Liam runner: White Sneakers, £15.88. Trainers in mesh with rubber details, a padded top edge, lacing at the front and a loop front and back. Mesh linings and insoles and rubber soles.
+
+case_0120 [catalog_search] user: I'd like a pink skirt
+  evidence: Margaux / Pink / £20.08 | Florida skirt / Pink / £35.29
+  response: I found two options for you. Option 1: Margaux: Pink Skirt, £20.08. Calf-length skirt in woven fabric with pleats at the top for added width. High waist with. Option 2: Florida skirt: Pink Skirt, £35.29.
+
+case_0129 [item_compare] user: Compare the two options
+  evidence: Margaux / Pink / £20.08 | Florida skirt / Pink / £35.29
+  response: Comparing Margaux and Florida skirt: Margaux costs £20.08, Florida skirt costs £35.29.
+
+case_0134 [catalog_search] user: Show me some hoodies
+  evidence: Wow Hood 19.99 / Black / £13.55 | Michael Hood 24.99:- / Black / £23.19
+  response: I found two options for you. Option 1: Wow Hood 19.99: Black Hoodie, £13.55. Top in sweatshirt fabric with a motif, a double-layered drawstring hood, kangaroo pocket and. Option 2: Michael Hood 24.99:-: Black Hoodie, £23.19.
+
+case_0143 [item_attribute_lookup] user: What colour is the second one?
+  evidence: Michael Hood 24.99:- / Black / £23.19
+  response: About Michael Hood 24.99:-: Top in sweatshirt fabric with a lined drawstring hood and long raglan sleeves with grosgrain trims down the sides. Kangaroo pocket and ribbing at the cuffs and hem. Soft brushed inside.
+
+case_0145 [catalog_search] user: I need an elegant dress for a wedding
+  evidence: Darling dress / Black / £17.98 | Bridesmaid / Light Blue / £25.21
+  response: I found two options for you. Option 1: Darling dress: Black Dress, £17.98. Sleeveless, calf-length dress in airy jersey with a lightly pleated texture. Slightly wider. Option 2: Bridesmaid: Light Blue Dress, £25.21.
+
+case_0155 [explanation_generate] user: Why is this one a good choice for me?
+  evidence: 
+  response: I recommended this item because you prefer index group: Menswear, and you prefer colour: Pink, and you prefer occasion: wedding. It is a priced at ?.
+
+case_0156 [catalog_search] user: Sporty leggings for the gym
+  evidence: STRONG seamless HW tights / Pink / £25.21 | POWER tights / Black / £19.80
+  response: I found two options for you. Option 1: STRONG seamless HW tights: Pink Leggings/Tights, £25.21. High-waisted sports tights in fast-drying functional fabric with jacquard-patterned details. Wide,. Option 2: POWER tights: Black Leggings/Tights, £19.80.
+
+case_0166 [catalog_search] user: Do you have cheaper ones instead?
+  evidence: SUPREME conscious / Black / £11.79 | FIRRE conscious / Black / £13.73
+  response: I found two options for you. Option 1: SUPREME conscious: Black Leggings/Tights, £11.79. Sports tights in fast-drying functional fabric with wide ribbing to hold in and shape the waist.. Option 2: FIRRE conscious: Black Leggings/Tights, £13.73.
+
+case_0175 [catalog_search] user: Beige trousers please
+  evidence: Eva trousers / Beige / £39.97 | Basic sweatpants / Beige / £14.73
+  response: I found two options for you. Option 1: Eva trousers: Beige Trousers, £39.97. Trousers in woven fabric with a high waist that has gathered elastication at the back and pleats at. Option 2: Basic sweatpants: Beige Trousers, £14.73.
+
+case_0184 [catalog_search] user: What fabric are they made of?
+  evidence: Sweaty / Beige / £12.66 | Pixie HW woven TRS / Beige / £20.16
+  response: I found two options for you. Option 1: Sweaty: Beige Trousers, £12.66. Trousers in soft sweatshirt fabric made from a cotton blend. High waist with covered elastication. Option 2: Pixie HW woven TRS: Beige Trousers, £20.16.
+
+case_0193 [catalog_search] user: I'm looking for socks
+  evidence: Polly 3p minishaftless / Beige / £7.77 | TINDRA sport socks1 / Black / £4.02
+  response: I found two options for you. Option 1: Polly 3p minishaftless: Beige Socks, £7.77. Shaftless socks. 80 denier. Option 2: TINDRA sport socks1: Black Socks, £4.02.
+
+case_0203 [item_detail_lookup] user: Tell me more about the first one
+  evidence: Polly 3p minishaftless / Beige / £7.77
+  response: Polly 3p minishaftless: Beige Socks, £7.77. Shaftless socks. 80 denier.
+
+case_0207 [catalog_search] user: Show me denim jackets
+  evidence: Jacket Core Deco / Black / £28.48 | Jacket Oversize / Black / £39.12
+  response: I found two options for you. Option 1: Jacket Core Deco: Black Jacket, £28.48. Jacket in washed denim with worn details and sparkly stones. Flap chest pockets with a button and. Option 2: Jacket Oversize: Black Jacket, £39.12.
+
+case_0216 [item_compare] user: Which of these two is better quality?
+  evidence: Jacket Core Deco / Black / £28.48 | Jacket Oversize / Black / £39.12
+  response: Comparing Jacket Core Deco and Jacket Oversize: Jacket Core Deco costs £28.48, Jacket Oversize costs £39.12.
+
+case_0221 [catalog_search] user: I want a green blouse
+  evidence: Stardust / Green / £17.94 | Ruby / Green / £13.04
+  response: I found two options for you. Option 1: Stardust: Green Blouse, £17.94. Blouse in a viscose weave with a collar and buttons down the front. Yoke with a pleat at the back,. Option 2: Ruby: Green Blouse, £13.04.
+
+case_0230 [catalog_search] user: Can you show it in white instead?
+  evidence: LE Liz BA Blouse / White / £60.51 | LE Bellerose Blouse / White / £32.13
+  response: I found two options for you. Option 1: LE Liz BA Blouse: White Blouse, £60.51. LIMITED EDITION. Straight-cut blouse in airy cotton with beads and embroidery on the front. Double. Option 2: LE Bellerose Blouse: White Blouse, £32.13.

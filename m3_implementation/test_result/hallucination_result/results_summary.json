@@ -1,0 +1,280 @@
+{
+  "meta": {
+    "generated": "2026-07-09",
+    "test_set": "labeled_test_set.jsonl",
+    "n_cases": 238,
+    "n_clean": 33,
+    "n_hallucinated": 205,
+    "corruption_seed": 42,
+    "corruption_method": "FactCC-style synthetic field corruption (colour_swap, price_change, name_swap, cross_item_swap)",
+    "nli_model": "cross-encoder/nli-deberta-v3-base",
+    "embedding_model": "all-MiniLM-L6-v2",
+    "llm_judge_model": "llama-3.1-8b-instant (Groq)",
+    "positive_class": "hallucinated",
+    "notes": [
+      "Clean labels are presumed-correct pending manual audit (clean_audit.txt).",
+      "Threshold sweep values > 0.65 are partially an artifact: containment flags carry a synthetic contradiction score of 1.0, so only the <= 0.65 region reflects real NLI threshold behaviour.",
+      "8 checker-flagged originals from live runs are excluded from the test set and await human adjudication (flagged_for_review.jsonl)."
+    ]
+  },
+  "checker_versions": {
+    "v1": {
+      "description": "Original checker: one-sided verbatim containment for name/price (pass-only), NLI fallback for all fields",
+      "metrics": {
+        "tp": 117,
+        "fp": 0,
+        "fn": 88,
+        "tn": 33,
+        "precision": 1.0,
+        "recall": 0.5707,
+        "f1": 0.7267,
+        "specificity": 1.0,
+        "balanced_accuracy": 0.7854,
+        "accuracy": 0.6303
+      },
+      "recall_by_corruption": {
+        "colour_swap": {
+          "detected": 43,
+          "total": 48,
+          "recall": 0.8958
+        },
+        "cross_item_swap": {
+          "detected": 30,
+          "total": 43,
+          "recall": 0.6977
+        },
+        "name_swap": {
+          "detected": 22,
+          "total": 58,
+          "recall": 0.3793
+        },
+        "price_change": {
+          "detected": 22,
+          "total": 56,
+          "recall": 0.3929
+        }
+      }
+    },
+    "v2": {
+      "description": "Two-sided containment gates: wrong name/price value in the sentence flags directly; name/price never reach NLI; whitespace normalisation; price-regex trailing-dot fix",
+      "metrics": {
+        "tp": 167,
+        "fp": 1,
+        "fn": 38,
+        "tn": 32,
+        "precision": 0.994,
+        "recall": 0.8146,
+        "f1": 0.8954,
+        "specificity": 0.9697,
+        "balanced_accuracy": 0.8922,
+        "accuracy": 0.8361
+      },
+      "recall_by_corruption": {
+        "colour_swap": {
+          "detected": 43,
+          "total": 48,
+          "recall": 0.8958
+        },
+        "cross_item_swap": {
+          "detected": 42,
+          "total": 43,
+          "recall": 0.9767
+        },
+        "name_swap": {
+          "detected": 27,
+          "total": 58,
+          "recall": 0.4655
+        },
+        "price_change": {
+          "detected": 55,
+          "total": 56,
+          "recall": 0.9821
+        }
+      }
+    },
+    "v3": {
+      "description": "Final: exact-value facts bypass the MiniLM similarity gate; locked catalog sentences verified per-sentence; unlocked facts verified response-level (fixes renamed-item misses and the derived-arithmetic false positive)",
+      "metrics": {
+        "tp": 195,
+        "fp": 0,
+        "fn": 10,
+        "tn": 33,
+        "precision": 1.0,
+        "recall": 0.9512,
+        "f1": 0.975,
+        "specificity": 1.0,
+        "balanced_accuracy": 0.9756,
+        "accuracy": 0.958
+      },
+      "recall_by_corruption": {
+        "colour_swap": {
+          "detected": 43,
+          "total": 48,
+          "recall": 0.8958
+        },
+        "cross_item_swap": {
+          "detected": 42,
+          "total": 43,
+          "recall": 0.9767
+        },
+        "name_swap": {
+          "detected": 55,
+          "total": 58,
+          "recall": 0.9483
+        },
+        "price_change": {
+          "detected": 55,
+          "total": 56,
+          "recall": 0.9821
+        }
+      },
+      "false_positive_case_ids": [],
+      "missed_case_ids": [
+        "case_0017",
+        "case_0018",
+        "case_0019",
+        "case_0030",
+        "case_0031",
+        "case_0043",
+        "case_0055",
+        "case_0092",
+        "case_0108",
+        "case_0144"
+      ]
+    }
+  },
+  "baselines": {
+    "naive_nli": {
+      "description": "SummaC-style: DeBERTa on every (fact, sentence) pair, no lock map, no gates; flag if any pair has softmax P(contradiction) > 0.5 and > P(entailment)",
+      "metrics": {
+        "tp": 197,
+        "fp": 29,
+        "fn": 8,
+        "tn": 4,
+        "precision": 0.8717,
+        "recall": 0.961,
+        "f1": 0.9142,
+        "specificity": 0.1212,
+        "balanced_accuracy": 0.5411,
+        "accuracy": 0.8445
+      },
+      "recall_by_corruption": {
+        "colour_swap": {
+          "detected": 48,
+          "total": 48,
+          "recall": 1.0
+        },
+        "cross_item_swap": {
+          "detected": 43,
+          "total": 43,
+          "recall": 1.0
+        },
+        "name_swap": {
+          "detected": 52,
+          "total": 58,
+          "recall": 0.8966
+        },
+        "price_change": {
+          "detected": 54,
+          "total": 56,
+          "recall": 0.9643
+        }
+      }
+    },
+    "llm_judge": {
+      "description": "RAGAS-style LLM judge: Groq llama-3.1-8b-instant asked whether the response contradicts the evidence facts",
+      "metrics": {
+        "tp": 196,
+        "fp": 5,
+        "fn": 9,
+        "tn": 28,
+        "precision": 0.9751,
+        "recall": 0.9561,
+        "f1": 0.9655,
+        "specificity": 0.8485,
+        "balanced_accuracy": 0.9023,
+        "accuracy": 0.9412
+      },
+      "recall_by_corruption": {
+        "colour_swap": {
+          "detected": 48,
+          "total": 48,
+          "recall": 1.0
+        },
+        "cross_item_swap": {
+          "detected": 42,
+          "total": 43,
+          "recall": 0.9767
+        },
+        "name_swap": {
+          "detected": 53,
+          "total": 58,
+          "recall": 0.9138
+        },
+        "price_change": {
+          "detected": 53,
+          "total": 56,
+          "recall": 0.9464
+        }
+      }
+    }
+  },
+  "threshold_sweep_v3": [
+    {
+      "threshold": 0.25,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "balanced_accuracy": 0.9756
+    },
+    {
+      "threshold": 0.5,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "balanced_accuracy": 0.9756
+    },
+    {
+      "threshold": 0.65,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "balanced_accuracy": 0.9756
+    },
+    {
+      "threshold": 1.0,
+      "precision": 1.0,
+      "recall": 0.2878,
+      "f1": 0.447,
+      "balanced_accuracy": 0.6439
+    },
+    {
+      "threshold": 2.0,
+      "precision": 1.0,
+      "recall": 0.278,
+      "f1": 0.4351,
+      "balanced_accuracy": 0.639
+    },
+    {
+      "threshold": 3.0,
+      "precision": 1.0,
+      "recall": 0.2683,
+      "f1": 0.4231,
+      "balanced_accuracy": 0.6341
+    },
+    {
+      "threshold": 4.0,
+      "precision": 1.0,
+      "recall": 0.2537,
+      "f1": 0.4047,
+      "balanced_accuracy": 0.6268
+    },
+    {
+      "threshold": 5.0,
+      "precision": 1.0,
+      "recall": 0.1951,
+      "f1": 0.3265,
+      "balanced_accuracy": 0.5976
+    }
+  ]
+}

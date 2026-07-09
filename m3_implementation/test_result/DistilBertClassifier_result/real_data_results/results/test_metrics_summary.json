@@ -1,0 +1,18 @@
+{
+  "accuracy": 0.9748,
+  "macro_f1": 0.9726,
+  "weighted_f1": 0.9749,
+  "per_class_f1": {
+    "INITIAL_REQUEST": 0.9733,
+    "REFINEMENT": 0.9542,
+    "ATTRIBUTE_QUESTION": 0.9342,
+    "EXPLANATION_WHY": 1.0,
+    "COMPARISON": 0.9213,
+    "SELECTION_REFERENCE": 0.9987,
+    "FEEDBACK": 0.9993,
+    "CHITCHAT": 1.0
+  },
+  "test_file": "real_test_simmc.csv",
+  "train_file": "v5_train_mixed.csv",
+  "total_test_rows": 7309
+}

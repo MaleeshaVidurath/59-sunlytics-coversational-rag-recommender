@@ -255,7 +255,62 @@ Skips sentences that are conversational or garment-description type:
 **Exception:** any sentence containing `£` is never skipped — these are
 Option sentences that must always be checked.
 
-### Gate 5 — Similarity Threshold
+### Gates 6/7 — Two-Sided Exact-Value Verification (name & price)
+
+**These gates run BEFORE the similarity gate and their facts NEVER reach NLI.**
+Name and price are exact values: they are either present or they are not, so
+string logic decides *both* directions. DeBERTa is unreliable in both
+directions on exact values — it produces false contradictions on correct
+values in structured sentences AND scores wrong values ("priced at £11.08"
+vs "£13.58") as *neutral*, missing real hallucinations.
+
+They also deliberately bypass Gate 5: a swapped name destroys the very
+fact–sentence similarity that gate measures, so low similarity is itself a
+symptom of this hallucination type — filtering on it would hide exactly the
+cases that must be caught.
+
+**Decision tree (name):**
+
+```
+true name in sentence (whitespace-normalised, case-insensitive)?
+├── YES → PASS
+├── item is LOCKED (catalog lock map):
+│     the locked sentence is authoritative for this item —
+│     a DIFFERENT product name here → CONTRADICTION (cross-item swap)
+│     no name at all               → skip
+└── item is UNLOCKED (compare / explanation / detail):
+      true name elsewhere in the WHOLE response → skip (name correct,
+        MiniLM free search merely paired the fact with another sentence)
+      true name absent from the whole response AND a different name
+        present → CONTRADICTION (the LLM renamed the item)
+      no name anywhere → skip (nothing to contradict)
+```
+
+A "different product name" is found by `_find_wrong_name()`, in order:
+1. names of **other items in the same evidence** (catches cross-item swaps),
+2. the name slot of structured option sentences (`"Option N: <name>,"` —
+   only when the sentence carries a £, and generic openers are excluded),
+3. the full **catalog name list** from `sample_articles.csv` (case-sensitive,
+   ≥5 chars). Names in a substring relation with the true name
+   ("London dress" / "SS London dress") are treated as ambiguous
+   truncations and never flagged.
+
+**Decision tree (price):** identical shape — verbatim £value → PASS;
+locked sentence containing a different £value → CONTRADICTION; unlocked:
+true price anywhere in the response → skip, otherwise any other £value →
+CONTRADICTION; no £value → skip.
+
+Two implementation details that matter: all name comparisons are
+**whitespace-normalised** (catalog names may contain double spaces, e.g.
+`"Printed  tee 9.99"`, which used to defeat verbatim matching), and the
+price regex is `£[\d,]+(?:\.\d{1,2})?` — the earlier `£[\d,.]+` swallowed
+the sentence's trailing period (`"£11.08."`), so the verbatim pass rarely
+fired and prices silently fell through to NLI.
+
+Containment flags carry a synthetic score `contradiction = 1.0` and
+`"method": "containment"` in the result dict.
+
+### Gate 5 — Similarity Threshold (semantic fields only)
 
 ```python
 _MIN_SIMILARITY = 0.35
@@ -266,32 +321,7 @@ if similarity < 0.35:
 
 If the best MiniLM similarity between the fact and any sentence is below 0.35,
 the LLM did not mention this field at all. Nothing to contradict — skip.
-
-### Gate 6 — Name Containment Check
-
-```python
-if fact_field == "name":
-    extract name from: "The item is called X."  (works with "Option 1: The item..." prefix too)
-    if name found verbatim (case-insensitive) in sentence:
-        → PASS immediately, no NLI
-```
-
-If the product name appears verbatim in the sentence it is definitively correct.
-Bypasses DeBERTa which produces false contradictions when multiple items share
-a name or when sentences have long descriptive tails.
-
-### Gate 7 — Price Containment Check
-
-```python
-if fact_field == "price":
-    extract £value from fact_text using regex
-    if £value found verbatim in sentence:
-        → PASS immediately, no NLI
-```
-
-Same reasoning as name: a price value either appears in the sentence or it doesn't.
-DeBERTa was producing false contradictions on correct prices in structured list
-format responses.
+Name and price facts never reach this gate (see Gates 6/7 above).
 
 ### Gate 8 — Duplicate Pair Skip
 
@@ -387,11 +417,13 @@ response_text + evidence
               ├─ Gate 2: unlocked item skip
               ├─ Gate 3: _find_best_sentence() — locked or free MiniLM search
               ├─ Gate 4: _should_skip_sentence() — conversational / garment desc
-              ├─ Gate 5: similarity < 0.35 → skip (field not mentioned)
-              ├─ Gate 6: name verbatim containment → PASS
-              ├─ Gate 7: price verbatim containment → PASS
+              ├─ Gates 6/7: name & price — TWO-SIDED value logic
+              │             (bypass Gate 5, never reach NLI)
+              │             → PASS / CONTRADICTION / skip
+              ├─ Gate 5: similarity < 0.35 → skip (semantic fields only)
               ├─ Gate 8: duplicate pair skip
-              └─ Gate 9: DeBERTa NLI → PASS or HALLUCINATION
+              └─ Gate 9: DeBERTa NLI (colour & other semantic fields)
+                          → PASS or HALLUCINATION
                               │
                     ┌─────────┴──────────┐
                  all pass           any flagged
@@ -428,149 +460,57 @@ The genuine research contribution lies in the **system design applied to convers
 | Evidence-field-first loop | Most NLI hallucination work checks the full response against the full document. This system checks each evidence field (colour, price, name) individually against the specific sentence that mentions it |
 | Item→sentence lock map | Greedy MiniLM assignment before NLI prevents cross-item collisions in multi-item catalog responses. No prior work addresses this specific problem for CRS |
 | Contradiction-only, not entailment | Deliberate design decision to avoid false positives from descriptive extra information. Justified by the asymmetric cost of false positives in a recommender context |
-| 9-gate filtering pipeline | Name and price verified by string containment (exact values), NLI reserved for semantic fields like colour where verbatim match is not sufficient |
+| Gate filtering pipeline | Exact-value fields (name, price) verified by string logic, NLI reserved for semantic fields like colour where verbatim match is not sufficient |
+| Two-sided exact-value gates | Value logic decides BOTH directions for name/price (present → pass, different value → contradiction), bypassing NLI entirely for exact values and bypassing the similarity gate whose signal a swapped value destroys. Evaluation-driven: raised recall on name/price corruptions from ~0.39 to 0.95/0.98 at precision 1.0 |
 | Application domain | NLI hallucination checking evaluated within a fashion conversational recommender is not a prior existing system |
 
 The framing for dissertation write-up: *"We apply and adapt NLI-based contradiction detection to the specific challenges of multi-item conversational recommendation, introducing an item-sentence locking mechanism and field-level contradiction checking to address cross-item collision and false positive problems that arise in structured catalog response formats."*
 
 ---
 
-## Evaluation Plan
+## Evaluation (completed)
 
-### 1. Hallucination Detection Accuracy
+The full evaluation lives in `m3_implementation/test_result/hallucination_result/`
+(implementation: `HALLUCINATION_EVALUATION_PROCESS.md`, results: `RESULTS.md`,
+loop experiment: `loop_mitigation/LOOP_RESULTS.md`, figures 1-8 under
+`figures/`). Methodology: FactCC/HaluEval-style synthetic corruption of real
+pipeline outputs — 238 labeled cases (33 clean + 205 corrupted), evaluated
+against a naive all-pairs NLI baseline (SummaC-style) and an LLM-judge
+baseline (RAGAS-style).
 
-Requires ground-truth labels. Two collection methods:
+### Detection accuracy (positive class = hallucinated)
 
-**Method A — Synthetic injection (recommended):**
-1. Collect real system responses that the checker passed as correct
-2. Manually corrupt one field per response (e.g. change "Black" → "Red" in the LLM response while keeping evidence as Black)
-3. Run the checker on both the clean and the corrupted version
-4. Record whether the injection was detected
+| System | Precision | Recall | F1 | Balanced acc. | False alarms (33 clean) |
+|---|---|---|---|---|---|
+| **This checker (v3)** | **1.000** | 0.951 | **0.975** | **0.976** | **0** |
+| Naive NLI (no gates) | 0.872 | 0.961 | 0.914 | 0.541 | 29 |
+| LLM judge (Groq) | 0.975 | 0.956 | 0.966 | 0.902 | 5 |
 
-**Method B — Manual annotation:**
-1. Run 50–100 real conversations through the full system
-2. Manually compare each LLM response against its evidence bundle
-3. Label each checked fact as correct or hallucinated
-4. Compare labels with checker decisions
+The evaluation was itself used to refine the checker (v1 -> v3 on the same
+test set): the original one-sided containment gates scored recall 0.571
+because DeBERTa misses exact-value mismatches; the two-sided gates plus the
+similarity-gate bypass raised F1 from 0.727 to 0.975 at precision 1.000.
 
-**Metrics:**
+### Detect-reject-regenerate loop (induced-failure on/off experiment)
 
-```
-Precision = TP / (TP + FP)
-Recall    = TP / (TP + FN)
-F1        = 2 × (Precision × Recall) / (Precision + Recall)
-```
+| | Hallucinated responses reaching the user |
+|---|---|
+| Loop OFF | 205 / 205 (100%) |
+| **Loop ON** | **16 / 205 (7.8%)** |
 
-Where:
-- TP = checker flagged hallucination, fact was genuinely wrong
-- FP = checker flagged hallucination, fact was actually correct (false alarm)
-- FN = checker passed fact, fact was actually wrong (missed hallucination)
-- TN = checker passed fact, fact was genuinely correct
-
----
-
-### 2. Loop Behaviour Metrics
-
-Measurable directly from runtime logs — no labeling required.
-
-| Metric | Definition | How to measure |
-|---|---|---|
-| First-pass acceptance rate | % of responses that pass hallucination check on attempt 1 | Count attempt=1 passes / total responses |
-| Retry rate | % of responses that required at least one retry | Count responses with attempt >= 2 / total |
-| Convergence rate | % of responses that passed by attempt 3 | Count final passes / total (should be ~100% since attempt 3 is always accepted) |
-| Average attempts per response | Mean number of LLM calls needed | Sum of attempt numbers / total responses |
-| Field contradiction frequency | Which evidence fields are most often contradicted | Aggregate `contradicted_fields` across all flagged results |
-| Strictness escalation success rate | % of retried responses that pass on attempt 2 | Count attempt=2 passes / total retries |
-
-These metrics characterise the detect-reject-regenerate loop as a system, independent of whether individual flags are correct.
+P(correct final | detected) = 96.9%; 94.4% of detected hallucinations were
+fixed by a single regeneration; average loop cost 0.41 s per detected case.
+Final outputs were graded by an independent model-free referee, not the
+checker itself.
 
 ---
 
-### 3. False Positive Rate
+## Reference Papers
 
-A checker that flags everything achieves 100% recall but is not useful. False positive rate must be measured separately.
-
-**Procedure:**
-1. Collect 30–50 LLM responses that are manually verified as fully correct
-2. Run the checker on each
-3. Count how many are incorrectly flagged
-
-```
-False Positive Rate (FPR) = FP / (FP + TN)
-```
-
-The 9-gate design (Gates 4–7) is specifically engineered to suppress false positives from conversational text, garment descriptions, and exact-value fields. This evaluation validates that design decision.
-
----
-
-### 4. Strictness Escalation Effectiveness
-
-The retry loop escalates strictness across three attempts. This evaluation checks whether escalation actually causes the LLM to correct the detected contradiction.
-
-**Procedure:**
-1. Collect all cases where attempt 1 was rejected
-2. Compare attempt 2 response: did the contradicted field change to match evidence?
-3. Repeat for attempt 2 → attempt 3
-
-**Metric:**
-```
-P(correction | retry) = % of retried responses where the flagged field was corrected
-```
-
-A high value confirms that the strictness prompt works. A low value would indicate the retry prompt needs revision.
-
----
-
-### 5. NLI Threshold Sensitivity
-
-The checker uses `NLI_CONTRADICTION_THRESHOLD` (config value) to decide what contradiction score counts as a hallucination. This threshold is a hyperparameter and must be justified.
-
-**Procedure:**
-1. Run the checker over the labelled test set at multiple threshold values (e.g. 0.4, 0.5, 0.6, 0.7, 0.8)
-2. Compute Precision and Recall at each threshold
-3. Plot the Precision-Recall curve
-
-The operating threshold should be chosen at the point of best F1 or at the target Precision depending on acceptable false positive cost. This also shows the threshold choice is data-driven, not arbitrary.
-
----
-
-### 6. Ablation Study
-
-Remove one design component at a time and measure the change in false positive rate and detection accuracy. This validates the individual contribution of each gate.
-
-| Ablation | What is removed | Expected effect if component is effective |
-|---|---|---|
-| No item→sentence lock (Stage 3) | All facts use free MiniLM search | Increased FP from cross-item name collisions in catalog responses |
-| No Gate 6 — name containment | Name facts go to DeBERTa | Increased FP when items share name prefixes or sentences have long descriptive tails |
-| No Gate 7 — price containment | Price facts go to DeBERTa | Increased FP on correctly priced structured list responses |
-| No Gate 4 — sentence type skip | Conversational openers and garment descriptions are NLI-checked | Increased FP from description words misread as contradictions |
-| No contradiction-only filter | Low entailment also triggers hallucination flag | Very high FP from descriptive extra information in LLM sentences |
-| Full system | All gates active | Baseline |
-
-Each ablation is run on the same labelled test set. The difference in FP rate between the ablated version and the full system quantifies the contribution of that component.
-
----
-
-### Recommended Minimum Evaluation for Dissertation
-
-Given time constraints, prioritise in this order:
-
-| Priority | Evaluation | Why |
-|---|---|---|
-| 1 | Synthetic injection test (50 cases) | Directly measures Precision, Recall, F1 — core claim of the checker |
-| 2 | Loop metrics from 50 real conversations | Retry rate, convergence rate — characterises the detect-reject-regenerate loop |
-| 3 | False positive check on 30 clean responses | Validates the 9-gate false positive suppression design |
-| 4 | Ablation on item→sentence locking | Validates the most novel architectural component |
-| 5 | Threshold sensitivity curve | Justifies the NLI threshold hyperparameter choice |
-
-Items 1–3 together provide detection accuracy, loop behaviour, and false positive validation — sufficient for a complete evaluation chapter. Items 4 and 5 strengthen the research contribution claims.
-
----
-
-### Reference Papers for Evaluation Section
-
-- Ji et al. (2023) — "Survey of Hallucination in Natural Language Generation" — hallucination taxonomy and evaluation methods
-- Maynez et al. (2020) — "On Faithfulness and Factuality in Abstractive Summarization" — faithfulness evaluation
-- He et al. (2023) — "HaluEval: A Large-Scale Hallucination Evaluation Benchmark" — injection-based evaluation methodology
-- Es et al. (2023) — "RAGAS: Automated Evaluation of Retrieval Augmented Generation" — RAG-specific evaluation framework
-- Laurer et al. (2022) — "Less Annotating, More Classifying: Addressing the Data Scarcity Issue of Supervised Machine Learning with Deep Transfer of Pre-trained Language Models" — NLI cross-encoder benchmarks including DeBERTa variants
+- Kryscinski et al. (2020) — "Evaluating the Factual Consistency of Abstractive Text Summarization" (FactCC) — synthetic corruption methodology
+- Li et al. (2023) — "HaluEval: A Large-Scale Hallucination Evaluation Benchmark" — injection-based evaluation
+- Laban et al. (2022) — "SummaC: Re-Visiting NLI-based Models for Inconsistency Detection in Summarization" — NLI baseline design, balanced accuracy
+- Manakul et al. (2023) — "SelfCheckGPT" — hallucination detection evaluation framing
+- Es et al. (2023) — "RAGAS: Automated Evaluation of Retrieval Augmented Generation" — LLM-judge faithfulness baseline
+- Yan et al. (2024) — "Corrective Retrieval Augmented Generation" (CRAG) — system on/off mitigation evaluation
+- Ji et al. (2023) — "Survey of Hallucination in Natural Language Generation" — hallucination taxonomy
