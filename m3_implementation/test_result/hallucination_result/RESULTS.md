@@ -118,6 +118,16 @@ with induced failures): the loop reduced user-facing hallucinations from 100%
 to **7.8%** (16/205), with P(correction | detection) = 96.9%. Full method,
 failure analysis, and figures: `loop_mitigation/LOOP_RESULTS.md`.
 
+## 5c. Off-the-shelf external detectors (unmodified released tools)
+
+Three released, citable detectors were additionally run AS-IS on the same 238
+cases (evidence serialized to text): Vectara HHEM-2.1 (F1 0.509), SummaC-Conv
+(F1 0.643), LettuceDetect (F1 0.688) vs our checker (F1 0.975). Headline
+finding: cross-item swaps are nearly invisible to presence-checking tools
+(HHEM 9.3%, LettuceDetect 4.7% vs ours 97.7%) - direct evidence for the
+item-sentence lock map. Full method, tables, caveats and figures 9-10:
+`external_baselines/EXTERNAL_BASELINES.md`.
+
 ## 6. Threats to validity (state these in the dissertation)
 
 1. **Presumed-clean labels.** The 33 clean cases passed the v1 checker and
