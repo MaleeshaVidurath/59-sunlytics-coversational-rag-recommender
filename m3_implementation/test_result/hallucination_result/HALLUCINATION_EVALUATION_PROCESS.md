@@ -19,9 +19,15 @@ accurately, better than existing approaches") needs:
 2. **Baselines** — established alternative approaches run on the same data.
 3. **Standard metrics** — Precision, Recall, F1, Balanced Accuracy.
 
-No public benchmark exists for hallucination detection in multi-item
-conversational fashion recommendation, so the test set is built from this
-system's own outputs using **synthetic corruption** — the methodology of
+Existing hallucination benchmarks were surveyed and none fits this task
+(details in §1b, decision D1): dialogue benchmarks (HalluDial, FaithDial,
+BEGIN, FADE) are grounded in Wikipedia / knowledge graphs, not product
+catalogs; recommendation benchmarks measure item *existence* (SRBench) or
+serve reward-model evaluation (RecRM-Bench), not attribute-level
+contradiction detection in natural-language multi-item responses. No public
+benchmark provides labeled (structured catalog evidence, generated response)
+pairs of the kind this checker consumes — so the test set is built from this
+system's own outputs using **synthetic corruption**, the methodology of
 FactCC (Kryscinski et al., 2020: entity/number swap transformations) and
 HaluEval (Li et al., 2023: injected hallucinated samples).
 
@@ -54,11 +60,39 @@ The novelty makes two separable claims, each needing its own experiment:
 
 ### Design decisions and their rationale
 
-- **D1 — Build our own labeled test set.** No public benchmark exists for
-  hallucination detection in multi-item conversational fashion
-  recommendation. Consequence: published baseline numbers (WikiBio, CNN/DM)
-  are NOT comparable — baselines must be **re-implemented and re-run on our
-  test set**. This is standard practice when working in a new domain.
+- **D1 — Build our own labeled test set.** The closest existing benchmarks
+  were checked (survey 2026-07-10) and none fits:
+  - *HalluDial / FaithDial / BEGIN / FADE* — dialogue hallucination, but
+    grounded in Wikipedia or knowledge graphs: no product catalog, no
+    multi-item structured responses;
+  - *SRBench* — "item hallucination" in sequential recommendation = does
+    the predicted item ID exist in the item set, not whether stated
+    attributes contradict the catalog;
+  - *RecRM-Bench* — contains ~3k item-hallucination instances, but built to
+    evaluate reward models judging agentic recommender trajectories, not
+    standalone detectors on evidence–response pairs;
+  - *HalluDetect* — conversational hallucination benchmark, but legal
+    domain (its existence supports the "no benchmark for my domain →
+    build one" pattern);
+  - *ConvApparel* — apparel-domain CRS benchmark, but for user-simulator
+    validation, unrelated to hallucination;
+  - *RAGTruth / HaluBench / RAGBench* — RAG hallucination benchmarks with
+    labeled context–response pairs, but the contexts are free-text passages
+    (QA / summarization), not structured product catalogs, so the checker's
+    evidence-field gates have nothing to consume. RAGTruth's **data-to-text
+    subset** (structured JSON business info → generated text) is the closest
+    relative and is noted as a future generalization target. (Also: known
+    ground-truth annotation errors have been reported in RAGTruth and
+    HaluEval — a further argument for corruption-based labels, which are
+    correct by construction.)
+
+  The precise claim: **no public benchmark provides labeled (structured
+  catalog evidence, generated response) pairs for attribute-level
+  hallucination detection in multi-item, catalog-grounded conversational
+  recommendation** — the input format this checker consumes. Consequence:
+  published baseline numbers are NOT comparable — baselines must be
+  **re-implemented and re-run on our test set**. This is standard practice
+  when working in a new domain.
 - **D2 — Ground truth via synthetic corruption** (FactCC / HaluEval
   precedent). Corrupting one field of a correct response while keeping the
   evidence intact yields labels that are *certain by construction* for the
@@ -74,7 +108,10 @@ The novelty makes two separable claims, each needing its own experiment:
   quantifies what the architecture contributes). LLM judge = the strong,
   expensive alternative (upper bracket: what an API-call-per-check approach
   buys). Beating the first proves the design matters; matching/beating the
-  second proves the design is sufficient.
+  second proves the design is sufficient. Added 2026-07-10: a third tier of
+  **unmodified released tools** (HHEM-2.1, official SummaC-Conv,
+  LettuceDetect) run as-is on the same test set — selection criteria,
+  rationale and results in `external_baselines/EXTERNAL_BASELINES.md` §1b.
 - **D5 — Two metric families.** Detector → P/R/F1/balanced accuracy
   (classification standard, per SelfCheckGPT/SummaC). Loop → residual
   hallucination rate ON vs OFF plus P(correction | detection)
@@ -454,6 +491,7 @@ excluded as ambiguous truncations).
 | `hallucination_eval_colab.ipynb` | Colab notebook — reproduces Stages 2–4 with the same scripts |
 | `make_colab_bundle.py` / `colab_bundle.zip` | builds the minimal upload bundle for the notebook |
 | `loop_mitigation/` | loop-mitigation experiment: `run_loop_eval.py` (experiment), `referee.py` (independent grader), `regrade_shipped.py` (offline re-grade), `results_loop_eval.json` + `shipped_responses.jsonl` (outputs), `LOOP_RESULTS.md` (write-up), `make_loop_figures.py` + `figures/` (figs 6–8) |
+| `external_baselines/` | unmodified released detectors on the same test set: `run_external_baselines.py` (HHEM-2.1 / SummaC-Conv / LettuceDetect), `results_external_baselines.json`, `EXTERNAL_BASELINES.md` (write-up), `make_external_figures.py` + `figures/` (figs 9–10), `summac_conv_vitc_sent_perc_e.bin` (official SummaC conv weights) |
 
 ## 9. Reproduction (run from repo root, use the repo venv)
 
@@ -571,6 +609,8 @@ the checker never grades its own output. Files: `run_loop_eval.py`,
 | 2026-07-09 | Docs consolidated; evidence slimming; folder moved to `test_result/hallucination_result/`; Colab notebook + bundle |
 | 2026-07-09 | Loop-mitigation experiment: 100% → 12.2% first grading; referee refined (derived price diffs allowed, truncated names = minor) → final 100% → 7.8% |
 | 2026-07-09 | Checker doc updated to v3; everything committed as `a274364` |
+| 2026-07-10 | Benchmark claim corrected after fresh survey (§1b D1: HalluDial/SRBench/RecRM-Bench/RAGTruth etc. named with rejection reasons) |
+| 2026-07-10 | Off-the-shelf baselines run (subfolder `external_baselines/`): HHEM-2.1 F1 0.509, SummaC-Conv 0.643, LettuceDetect 0.688 vs ours 0.975; cross-item swaps nearly invisible to presence-checking tools (9.3% / 53.5% / 4.7% vs ours 97.7%) — direct evidence for the lock map |
 
 ### Open items checklist
 
@@ -592,6 +632,10 @@ the checker never grades its own output. Files: `run_loop_eval.py`,
       this test set (fresh capture run would give held-out confirmation);
       synthetic corruption does not cover free-form fabrication; loop
       regeneration numbers vary slightly between runs (LLM temperature).
+- [ ] **Optional generalization experiment**: adapt `_flatten_evidence()` to
+      RAGTruth's data-to-text subset (structured JSON contexts) and run the
+      checker there — would test whether the two-sided-gate design transfers
+      beyond the fashion catalog domain. Future work if time allows.
 
 ## 10. Methodology references
 
