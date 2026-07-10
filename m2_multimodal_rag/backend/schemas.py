@@ -21,7 +21,10 @@ class CatalogSearchPayload(BaseModel):
     penalties: Dict[str, List[str]] = Field(default_factory=dict)
     soft_constraints: Dict[str, Any] = Field(default_factory=dict)
     purchase_history_hints: Dict[str, Any] = Field(default_factory=dict)
-    num_items: int = Field(default=2, ge=1, le=6)
+    # None (not 2) so the handler can tell "not sent" from an explicit request
+    # and fall through to quantity / message parsing / its own default.
+    num_items: Optional[int] = Field(default=None, ge=1, le=6)
+    quantity: Optional[int] = None  # M3's LLM-extracted requested item count (clamped in handler)
 
 class AttributeLookupPayload(BaseModel):
     article_id: str

@@ -24,6 +24,34 @@ from m2_multimodal_rag.collaborative_filtering.cf_scorer import cf_scorer
 # Attempt to load CF model at import time (silent if files not present)
 cf_scorer.load()
 
+# =====================================================================
+# Article prices (M2-local, in-memory only — shared/ files untouched)
+# =====================================================================
+
+from shared.config import SAMPLE_DATA_DIR
+
+_PRICE_SCALE = 595.08  # normalised price → £ (same value M3 uses in text_rag/config.py)
+
+
+def _load_articles_priced():
+    """Returns articles_df with an avg £ `price` column merged in from
+    sample_transactions.csv. Merged once, in-memory only; articles never
+    purchased in the sample keep price=NaN."""
+    import pandas as pd
+    df = data_loader.load_articles()
+    if 'price' in df.columns:
+        return df
+    tx_path = SAMPLE_DATA_DIR / 'sample_transactions.csv'
+    if not tx_path.exists():
+        print("  [prices] sample_transactions.csv not found — price filters will be skipped.")
+        return df
+    tx = pd.read_csv(tx_path, usecols=['article_id', 'price'])
+    avg_price = (tx.groupby('article_id')['price'].mean() * _PRICE_SCALE).round(2)
+    df = df.merge(avg_price.rename('price'), on='article_id', how='left')
+    data_loader.articles_df = df   # cache in the loader so the merge runs only once
+    print(f"  [prices] Attached avg £ prices to {df['price'].notna().sum()}/{len(df)} articles.")
+    return df
+
 
 # =====================================================================
 # Accuracy Reporter (terminal diagnostic after every catalog_search)
@@ -127,7 +155,7 @@ def _print_accuracy(items: list, filters: dict):
 
 def _fetch_article(article_id: str) -> dict | None:
     """Fetches a single article's metadata from the articles CSV by article_id."""
-    articles_df = data_loader.load_articles()
+    articles_df = _load_articles_priced()
     try:
         match = articles_df[articles_df['article_id'] == int(article_id)]
     except (ValueError, TypeError):
@@ -235,18 +263,21 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
     purchase_hints   = payload.get("purchase_history_hints", {})
 
     # --- Resolve requested number of items ---
-    # Priority: payload.num_items > parsed from user_message > default 2
+    # Priority: payload.num_items > payload.quantity (M3 LLM entity extraction)
+    #           > parsed from user_message > default 1
     # Capped at 6 to keep latency reasonable (each item runs VLM + LLM)
     _MAX_ITEMS = 6
-    num_items = int(payload.get("num_items") or 2)
+    raw_qty = payload.get("num_items") or payload.get("quantity")
+    try:
+        num_items = int(raw_qty) if raw_qty else 0
+    except (TypeError, ValueError):
+        num_items = 0
     if num_items <= 0:
-        num_items = 2
-    # Parse user message for explicit quantity ("show me 4 dresses", "give 3 options")
-    import re as _re
-    _qty_match = _re.search(r'\b([2-6])\s*(items?|options?|dresses?|outfits?|products?|tops?|pairs?)\b', user_message.lower())
-    if _qty_match:
-        num_items = int(_qty_match.group(1))
-    num_items = min(num_items, _MAX_ITEMS)
+        # Parse user message for explicit quantity ("show me 4 dresses", "give 3 options")
+        import re as _re
+        _qty_match = _re.search(r'\b([2-6])\s*(items?|options?|dresses?|outfits?|products?|tops?|pairs?)\b', user_message.lower())
+        num_items = int(_qty_match.group(1)) if _qty_match else 1
+    num_items = max(1, min(num_items, _MAX_ITEMS))
     print(f"  [catalog_search] Requested items: {num_items}")
 
     print(f"  [catalog_search] Filters: {filters}")
@@ -307,7 +338,7 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
     # ---------------------------------------------------------------
     # PHASE 2 — Hard filter + boost / penalty / purchase history scoring
     # ---------------------------------------------------------------
-    articles_df     = data_loader.load_articles()
+    articles_df     = _load_articles_priced()
     filtered_results = []
 
     for article_id, faiss_score in candidates:
@@ -327,11 +358,13 @@ def handle_catalog_search(retrieval_input: dict) -> dict:
         # Hard filters — all must pass
         passes_filters = True
         for filter_key, filter_value in filters.items():
-            if filter_key == "price_max":
-                if metadata.get("price", float('inf')) > filter_value:
+            if filter_key in ("price_max", "price_min"):
+                item_price = metadata.get("price")
+                if item_price is None or item_price != item_price:  # NaN check
+                    continue  # unknown price — don't exclude the item
+                if filter_key == "price_max" and item_price > filter_value:
                     passes_filters = False; break
-            elif filter_key == "price_min":
-                if metadata.get("price", 0) < filter_value:
+                if filter_key == "price_min" and item_price < filter_value:
                     passes_filters = False; break
             else:
                 if str(metadata.get(filter_key, "")).strip().lower() != str(filter_value).strip().lower():
