@@ -41,10 +41,10 @@ from collections import Counter
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 _DIR         = os.path.dirname(os.path.abspath(__file__))
-CAPTURED     = os.path.join(_DIR, "captured_cases.jsonl")
-TEST_SET     = os.path.join(_DIR, "labeled_test_set.jsonl")
-FLAGGED_OUT  = os.path.join(_DIR, "flagged_for_review.jsonl")
-AUDIT_OUT    = os.path.join(_DIR, "clean_audit.txt")
+CAPTURED     = os.path.join(_DIR, "original_eval_238", "captured_cases.jsonl")
+TEST_SET     = os.path.join(_DIR, "original_eval_238", "labeled_test_set.jsonl")
+FLAGGED_OUT  = os.path.join(_DIR, "original_eval_238", "flagged_for_review.jsonl")
+AUDIT_OUT    = os.path.join(_DIR, "original_eval_238", "clean_audit.txt")
 
 SEED = 42
 

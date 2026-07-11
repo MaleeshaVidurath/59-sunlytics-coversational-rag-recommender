@@ -44,7 +44,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 _DIR     = os.path.dirname(os.path.abspath(__file__))
-TEST_SET = os.path.join(_DIR, "..", "labeled_test_set.jsonl")
+TEST_SET = os.path.join(_DIR, "..", "original_eval_238", "labeled_test_set.jsonl")
 RESULTS  = os.path.join(_DIR, "results_loop_eval.json")
 
 MAX_ATTEMPTS = 3   # mirrors MAX_REGENERATION_ATTEMPTS in text_rag/config.py
@@ -127,15 +127,26 @@ async def run_loop_on_case(case, checker, generator):
 
 
 async def main():
+    global RESULTS
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="first N cases (smoke test)")
+    ap.add_argument("--test-set", default=TEST_SET,
+                    help="path to a labeled test set jsonl")
+    ap.add_argument("--out", default=RESULTS, help="path for the results json")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="seeded random sample of N corrupted cases (seed 123)")
     args = ap.parse_args()
+    RESULTS = args.out
 
-    with open(TEST_SET, encoding="utf-8") as f:
+    with open(args.test_set, encoding="utf-8") as f:
         cases = [json.loads(l) for l in f if l.strip()]
     cases = [c for c in cases if c["label"] == "hallucinated"]
     if args.limit:
         cases = cases[:args.limit]
+    if args.sample and args.sample < len(cases):
+        import random as _random
+        cases = _random.Random(123).sample(cases, args.sample)
+        print(f"Seeded sample: {len(cases)} corrupted cases (seed 123)")
     print(f"Loop-mitigation experiment: {len(cases)} induced-hallucination cases")
 
     from text_rag.core.hallucination_checker import HallucinationChecker
@@ -205,7 +216,10 @@ async def main():
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     # shipped responses for error analysis, separate file (large)
-    with open(os.path.join(_DIR, "shipped_responses.jsonl"), "w", encoding="utf-8") as f:
+    shipped_path = RESULTS.replace(".json", "_shipped.jsonl") \
+        if RESULTS != os.path.join(_DIR, "results_loop_eval.json") \
+        else os.path.join(_DIR, "shipped_responses.jsonl")
+    with open(shipped_path, "w", encoding="utf-8") as f:
         for r in records:
             f.write(json.dumps({"case_id": r["case_id"],
                                 "shipped_correct": r["shipped_correct"],

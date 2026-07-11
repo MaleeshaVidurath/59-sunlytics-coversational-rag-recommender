@@ -1,0 +1,692 @@
+{
+  "meta": {
+    "generated": "2026-07-11",
+    "suite": "expanded evaluation — 4,000-row suite drawn from an 8,181-row pool (all 526 clean kept, corrupted sampled evenly per type, seed 42)",
+    "standard_set": "labeled_test_set_expanded.jsonl — 2,600 rows (526 clean + 2,074 corrupted)",
+    "hard_set": "hard_set/labeled_hard_set.jsonl — 1,400 corrupted-only rows (paraphrase_colour/price, fabricated_attribute)",
+    "bases": "526 clean bases: 36 original scripted + 166 new scripted (60 conversations) + 416 real MongoDB user chats, deduplicated by response text",
+    "checker_version": "v3, NLI_CONTRADICTION_THRESHOLD=0.70 (.env)",
+    "loop_experiment": "NOT re-run (user decision): mechanism results reused from the original 205-case experiment (P(correction|detection)=0.969); composed end-to-end estimate in EXPANDED_RESULTS.md",
+    "notes": [
+      "hard set has no clean rows: precision/balanced-accuracy are not meaningful there — report recall per corruption family",
+      "fabricated_attribute rows are unsupported claims, not contradictions — the checker ignores them BY DESIGN",
+      "clean labels presumed pending human audit (clean_audit_expanded.txt, 526 rows)"
+    ]
+  },
+  "results": {
+    "hard": {
+      "hhem": {
+        "provenance": "local CPU, FULL 1400",
+        "file": "results_external_hard_hhem.json",
+        "metrics": {
+          "tp": 1248,
+          "fp": 0,
+          "fn": 152,
+          "tn": 0,
+          "precision": 1.0,
+          "recall": 0.8914,
+          "f1": 0.9426,
+          "specificity": 0.0,
+          "balanced_accuracy": 0.4457,
+          "accuracy": 0.8914,
+          "precision_ci95": [
+            0.9969,
+            1.0
+          ],
+          "recall_ci95": [
+            0.874,
+            0.9067
+          ],
+          "specificity_ci95": [
+            0.0,
+            0.0
+          ],
+          "f1_ci95": [
+            0.9333,
+            0.9513
+          ],
+          "balanced_accuracy_ci95": [
+            0.4375,
+            0.4536
+          ]
+        },
+        "recall_by_corruption": {
+          "fabricated_attribute": {
+            "detected": 467,
+            "total": 467,
+            "recall": 1.0
+          },
+          "paraphrase_colour": {
+            "detected": 389,
+            "total": 467,
+            "recall": 0.833
+          },
+          "paraphrase_price": {
+            "detected": 392,
+            "total": 466,
+            "recall": 0.8412
+          }
+        }
+      },
+      "lettuce": {
+        "provenance": "Colab T4, FULL 1400",
+        "file": "colab_results_external_hard.json",
+        "metrics": {
+          "tp": 1369,
+          "fp": 0,
+          "fn": 31,
+          "tn": 0,
+          "precision": 1.0,
+          "recall": 0.9779,
+          "f1": 0.9888,
+          "specificity": 0.0,
+          "balanced_accuracy": 0.4889,
+          "accuracy": 0.9779,
+          "precision_ci95": [
+            0.9972,
+            1.0
+          ],
+          "recall_ci95": [
+            0.9687,
+            0.9844
+          ],
+          "specificity_ci95": [
+            0.0,
+            0.0
+          ],
+          "f1_ci95": [
+            0.9848,
+            0.9924
+          ],
+          "balanced_accuracy_ci95": [
+            0.485,
+            0.4925
+          ]
+        },
+        "recall_by_corruption": {
+          "fabricated_attribute": {
+            "detected": 464,
+            "total": 467,
+            "recall": 0.9936
+          },
+          "paraphrase_colour": {
+            "detected": 455,
+            "total": 467,
+            "recall": 0.9743
+          },
+          "paraphrase_price": {
+            "detected": 450,
+            "total": 466,
+            "recall": 0.9657
+          }
+        }
+      },
+      "llm_judge": {
+        "provenance": "local, sample 600 — CAVEAT: 392/600 calls unanswered (overnight Groq throttling); selection-bias risk, re-run advised",
+        "file": "results_hard_judge600.json",
+        "metrics": {
+          "tp": 160,
+          "fp": 0,
+          "fn": 48,
+          "tn": 0,
+          "precision": 1.0,
+          "recall": 0.7692,
+          "f1": 0.8696,
+          "specificity": 0.0,
+          "balanced_accuracy": 0.3846,
+          "accuracy": 0.7692,
+          "precision_ci95": [
+            0.9766,
+            1.0
+          ],
+          "recall_ci95": [
+            0.7074,
+            0.8213
+          ],
+          "specificity_ci95": [
+            0.0,
+            0.0
+          ],
+          "f1_ci95": [
+            0.8315,
+            0.9053
+          ],
+          "balanced_accuracy_ci95": [
+            0.3558,
+            0.4135
+          ]
+        },
+        "recall_by_corruption": {
+          "fabricated_attribute": {
+            "detected": 42,
+            "total": 73,
+            "recall": 0.5753
+          },
+          "paraphrase_colour": {
+            "detected": 67,
+            "total": 67,
+            "recall": 1.0
+          },
+          "paraphrase_price": {
+            "detected": 51,
+            "total": 68,
+            "recall": 0.75
+          }
+        },
+        "n_answered": 208,
+        "n_unanswered": 392
+      },
+      "naive_nli": {
+        "provenance": "Colab T4, FULL 1400",
+        "file": "colab_results_hard_ours_naive.json",
+        "metrics": {
+          "tp": 1322,
+          "fp": 0,
+          "fn": 78,
+          "tn": 0,
+          "precision": 1.0,
+          "recall": 0.9443,
+          "f1": 0.9713,
+          "specificity": 0.0,
+          "balanced_accuracy": 0.4721,
+          "accuracy": 0.9443,
+          "precision_ci95": [
+            0.9971,
+            1.0
+          ],
+          "recall_ci95": [
+            0.931,
+            0.9551
+          ],
+          "specificity_ci95": [
+            0.0,
+            0.0
+          ],
+          "f1_ci95": [
+            0.9645,
+            0.9774
+          ],
+          "balanced_accuracy_ci95": [
+            0.4657,
+            0.4779
+          ]
+        },
+        "recall_by_corruption": {
+          "fabricated_attribute": {
+            "detected": 421,
+            "total": 467,
+            "recall": 0.9015
+          },
+          "paraphrase_colour": {
+            "detected": 460,
+            "total": 467,
+            "recall": 0.985
+          },
+          "paraphrase_price": {
+            "detected": 441,
+            "total": 466,
+            "recall": 0.9464
+          }
+        }
+      },
+      "ours": {
+        "provenance": "local CPU, FULL 1400 (Colab replication bit-identical)",
+        "file": "results_hard_ours.json",
+        "metrics": {
+          "tp": 313,
+          "fp": 0,
+          "fn": 1087,
+          "tn": 0,
+          "precision": 1.0,
+          "recall": 0.2236,
+          "f1": 0.3654,
+          "specificity": 0.0,
+          "balanced_accuracy": 0.1118,
+          "accuracy": 0.2236,
+          "precision_ci95": [
+            0.9879,
+            1.0
+          ],
+          "recall_ci95": [
+            0.2025,
+            0.2461
+          ],
+          "specificity_ci95": [
+            0.0,
+            0.0
+          ],
+          "f1_ci95": [
+            0.3353,
+            0.3954
+          ],
+          "balanced_accuracy_ci95": [
+            0.1007,
+            0.1232
+          ]
+        },
+        "recall_by_corruption": {
+          "fabricated_attribute": {
+            "detected": 0,
+            "total": 467,
+            "recall": 0.0
+          },
+          "paraphrase_colour": {
+            "detected": 278,
+            "total": 467,
+            "recall": 0.5953
+          },
+          "paraphrase_price": {
+            "detected": 35,
+            "total": 466,
+            "recall": 0.0751
+          }
+        }
+      },
+      "summac": {
+        "provenance": "local CPU, stratified sample 250 (seed 123)",
+        "file": "results_external_hard_summac.json",
+        "metrics": {
+          "tp": 245,
+          "fp": 0,
+          "fn": 5,
+          "tn": 0,
+          "precision": 1.0,
+          "recall": 0.98,
+          "f1": 0.9899,
+          "specificity": 0.0,
+          "balanced_accuracy": 0.49,
+          "accuracy": 0.98,
+          "precision_ci95": [
+            0.9846,
+            1.0
+          ],
+          "recall_ci95": [
+            0.954,
+            0.9914
+          ],
+          "specificity_ci95": [
+            0.0,
+            0.0
+          ],
+          "f1_ci95": [
+            0.9796,
+            0.998
+          ],
+          "balanced_accuracy_ci95": [
+            0.48,
+            0.498
+          ]
+        },
+        "recall_by_corruption": {
+          "fabricated_attribute": {
+            "detected": 79,
+            "total": 82,
+            "recall": 0.9634
+          },
+          "paraphrase_colour": {
+            "detected": 84,
+            "total": 85,
+            "recall": 0.9882
+          },
+          "paraphrase_price": {
+            "detected": 82,
+            "total": 83,
+            "recall": 0.988
+          }
+        }
+      }
+    },
+    "standard": {
+      "hhem": {
+        "provenance": "local CPU, FULL 2600 (HHEM incompatible with Colab transformers)",
+        "file": "results_external_standard_hhem.json",
+        "metrics": {
+          "tp": 1641,
+          "fp": 388,
+          "fn": 433,
+          "tn": 138,
+          "precision": 0.8088,
+          "recall": 0.7912,
+          "f1": 0.7999,
+          "specificity": 0.2624,
+          "balanced_accuracy": 0.5268,
+          "accuracy": 0.6842,
+          "precision_ci95": [
+            0.7911,
+            0.8253
+          ],
+          "recall_ci95": [
+            0.7732,
+            0.8082
+          ],
+          "specificity_ci95": [
+            0.2266,
+            0.3016
+          ],
+          "f1_ci95": [
+            0.7866,
+            0.8131
+          ],
+          "balanced_accuracy_ci95": [
+            0.5073,
+            0.5481
+          ]
+        },
+        "recall_by_corruption": {
+          "colour_swap": {
+            "detected": 431,
+            "total": 519,
+            "recall": 0.8304
+          },
+          "cross_item_swap": {
+            "detected": 393,
+            "total": 519,
+            "recall": 0.7572
+          },
+          "name_swap": {
+            "detected": 426,
+            "total": 518,
+            "recall": 0.8224
+          },
+          "price_change": {
+            "detected": 391,
+            "total": 518,
+            "recall": 0.7548
+          }
+        }
+      },
+      "lettuce": {
+        "provenance": "Colab T4, FULL 2600",
+        "file": "colab_results_external_standard.json",
+        "metrics": {
+          "tp": 1746,
+          "fp": 356,
+          "fn": 328,
+          "tn": 170,
+          "precision": 0.8306,
+          "recall": 0.8419,
+          "f1": 0.8362,
+          "specificity": 0.3232,
+          "balanced_accuracy": 0.5825,
+          "accuracy": 0.7369,
+          "precision_ci95": [
+            0.814,
+            0.8461
+          ],
+          "recall_ci95": [
+            0.8255,
+            0.8569
+          ],
+          "specificity_ci95": [
+            0.2846,
+            0.3643
+          ],
+          "f1_ci95": [
+            0.8241,
+            0.8485
+          ],
+          "balanced_accuracy_ci95": [
+            0.5609,
+            0.6041
+          ]
+        },
+        "recall_by_corruption": {
+          "colour_swap": {
+            "detected": 421,
+            "total": 519,
+            "recall": 0.8112
+          },
+          "cross_item_swap": {
+            "detected": 388,
+            "total": 519,
+            "recall": 0.7476
+          },
+          "name_swap": {
+            "detected": 471,
+            "total": 518,
+            "recall": 0.9093
+          },
+          "price_change": {
+            "detected": 466,
+            "total": 518,
+            "recall": 0.8996
+          }
+        }
+      },
+      "llm_judge": {
+        "provenance": "local, stratified sample 800 (seed 123, Groq rate limits)",
+        "file": "results_standard_judge800.json",
+        "metrics": {
+          "tp": 595,
+          "fp": 80,
+          "fn": 12,
+          "tn": 82,
+          "precision": 0.8815,
+          "recall": 0.9802,
+          "f1": 0.9282,
+          "specificity": 0.5062,
+          "balanced_accuracy": 0.7432,
+          "accuracy": 0.8804,
+          "precision_ci95": [
+            0.8549,
+            0.9037
+          ],
+          "recall_ci95": [
+            0.9658,
+            0.9887
+          ],
+          "specificity_ci95": [
+            0.4299,
+            0.5821
+          ],
+          "f1_ci95": [
+            0.9135,
+            0.9431
+          ],
+          "balanced_accuracy_ci95": [
+            0.7033,
+            0.7824
+          ]
+        },
+        "recall_by_corruption": {
+          "colour_swap": {
+            "detected": 168,
+            "total": 168,
+            "recall": 1.0
+          },
+          "cross_item_swap": {
+            "detected": 157,
+            "total": 161,
+            "recall": 0.9752
+          },
+          "name_swap": {
+            "detected": 130,
+            "total": 137,
+            "recall": 0.9489
+          },
+          "price_change": {
+            "detected": 140,
+            "total": 141,
+            "recall": 0.9929
+          }
+        },
+        "n_answered": 769,
+        "n_unanswered": 31
+      },
+      "naive_nli": {
+        "provenance": "Colab T4, FULL 2600",
+        "file": "colab_results_standard_ours_naive.json",
+        "metrics": {
+          "tp": 2012,
+          "fp": 467,
+          "fn": 62,
+          "tn": 59,
+          "precision": 0.8116,
+          "recall": 0.9701,
+          "f1": 0.8838,
+          "specificity": 0.1122,
+          "balanced_accuracy": 0.5411,
+          "accuracy": 0.7965,
+          "precision_ci95": [
+            0.7957,
+            0.8265
+          ],
+          "recall_ci95": [
+            0.9619,
+            0.9766
+          ],
+          "specificity_ci95": [
+            0.088,
+            0.142
+          ],
+          "f1_ci95": [
+            0.8738,
+            0.893
+          ],
+          "balanced_accuracy_ci95": [
+            0.5275,
+            0.5551
+          ]
+        },
+        "recall_by_corruption": {
+          "colour_swap": {
+            "detected": 516,
+            "total": 519,
+            "recall": 0.9942
+          },
+          "cross_item_swap": {
+            "detected": 510,
+            "total": 519,
+            "recall": 0.9827
+          },
+          "name_swap": {
+            "detected": 490,
+            "total": 518,
+            "recall": 0.9459
+          },
+          "price_change": {
+            "detected": 496,
+            "total": 518,
+            "recall": 0.9575
+          }
+        }
+      },
+      "ours": {
+        "provenance": "local CPU, FULL 2600 (canonical; Colab GPU replication within CI)",
+        "file": "results_standard_ours.json",
+        "metrics": {
+          "tp": 4074,
+          "fp": 0,
+          "fn": 618,
+          "tn": 526,
+          "precision": 1.0,
+          "recall": 0.8683,
+          "f1": 0.9295,
+          "specificity": 1.0,
+          "balanced_accuracy": 0.9341,
+          "accuracy": 0.8816,
+          "precision_ci95": [
+            0.9991,
+            1.0
+          ],
+          "recall_ci95": [
+            0.8583,
+            0.8777
+          ],
+          "specificity_ci95": [
+            0.9927,
+            1.0
+          ],
+          "f1_ci95": [
+            0.9236,
+            0.9349
+          ],
+          "balanced_accuracy_ci95": [
+            0.929,
+            0.9389
+          ]
+        },
+        "recall_by_corruption": {
+          "colour_swap": {
+            "detected": 921,
+            "total": 1248,
+            "recall": 0.738
+          },
+          "cross_item_swap": {
+            "detected": 958,
+            "total": 1025,
+            "recall": 0.9346
+          },
+          "name_swap": {
+            "detected": 1024,
+            "total": 1230,
+            "recall": 0.8325
+          },
+          "price_change": {
+            "detected": 1171,
+            "total": 1189,
+            "recall": 0.9849
+          }
+        }
+      },
+      "summac": {
+        "provenance": "local CPU, stratified sample 250 (seed 123)",
+        "file": "results_external_standard_summac.json",
+        "metrics": {
+          "tp": 196,
+          "fp": 46,
+          "fn": 3,
+          "tn": 5,
+          "precision": 0.8099,
+          "recall": 0.9849,
+          "f1": 0.8889,
+          "specificity": 0.098,
+          "balanced_accuracy": 0.5415,
+          "accuracy": 0.804,
+          "precision_ci95": [
+            0.7558,
+            0.8544
+          ],
+          "recall_ci95": [
+            0.9566,
+            0.9949
+          ],
+          "specificity_ci95": [
+            0.0426,
+            0.2098
+          ],
+          "f1_ci95": [
+            0.8571,
+            0.918
+          ],
+          "balanced_accuracy_ci95": [
+            0.505,
+            0.5856
+          ]
+        },
+        "recall_by_corruption": {
+          "colour_swap": {
+            "detected": 46,
+            "total": 47,
+            "recall": 0.9787
+          },
+          "cross_item_swap": {
+            "detected": 39,
+            "total": 39,
+            "recall": 1.0
+          },
+          "name_swap": {
+            "detected": 52,
+            "total": 54,
+            "recall": 0.963
+          },
+          "price_change": {
+            "detected": 59,
+            "total": 59,
+            "recall": 1.0
+          }
+        }
+      }
+    }
+  }
+}

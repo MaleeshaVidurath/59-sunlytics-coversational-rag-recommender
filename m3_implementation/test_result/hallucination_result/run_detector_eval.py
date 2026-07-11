@@ -39,8 +39,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 _DIR      = os.path.dirname(os.path.abspath(__file__))
-TEST_SET  = os.path.join(_DIR, "labeled_test_set.jsonl")
-RESULTS   = os.path.join(_DIR, "results_detector_eval.json")
+TEST_SET  = os.path.join(_DIR, "original_eval_238", "labeled_test_set.jsonl")
+RESULTS   = os.path.join(_DIR, "original_eval_238", "results_detector_eval.json")
 
 NAIVE_CONTRA_PROB = 0.5   # softmax threshold for the naive baseline
 SWEEP_THRESHOLDS  = [0.25, 0.5, 0.65, 1.0, 2.0, 3.0, 4.0, 5.0]  # raw logits
@@ -48,8 +48,48 @@ SWEEP_THRESHOLDS  = [0.25, 0.5, 0.65, 1.0, 2.0, 3.0, 4.0, 5.0]  # raw logits
 
 # ── Metrics ──────────────────────────────────────────────────────────────────
 
+def _wilson_ci(k: int, n: int, z: float = 1.96) -> list[float]:
+    """95% Wilson score interval for a proportion k/n. [0,0] when n == 0."""
+    if n == 0:
+        return [0.0, 0.0]
+    p = k / n
+    denom  = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half   = (z / denom) * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)
+    return [round(max(0.0, centre - half), 4), round(min(1.0, centre + half), 4)]
+
+
+def _bootstrap_cis(y_true, y_pred, n_boot: int = 2000, seed: int = 0):
+    """Bootstrap 95% CIs for F1 and balanced accuracy (case resampling)."""
+    import numpy as np
+    yt = np.asarray(y_true, dtype=bool)
+    yp = np.asarray(y_pred, dtype=bool)
+    n = len(yt)
+    if n == 0:
+        return [0.0, 0.0], [0.0, 0.0]
+    rng = np.random.default_rng(seed)
+    f1s, bals = [], []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        t, p = yt[idx], yp[idx]
+        tp = int(np.sum(t & p));  fp = int(np.sum(~t & p))
+        fn = int(np.sum(t & ~p)); tn = int(np.sum(~t & ~p))
+        prec = tp / (tp + fp) if (tp + fp) else 0.0
+        rec  = tp / (tp + fn) if (tp + fn) else 0.0
+        spec = tn / (tn + fp) if (tn + fp) else 0.0
+        f1s.append(2 * prec * rec / (prec + rec) if (prec + rec) else 0.0)
+        bals.append((rec + spec) / 2)
+    lo, hi = np.percentile(f1s, [2.5, 97.5])
+    blo, bhi = np.percentile(bals, [2.5, 97.5])
+    return [round(float(lo), 4), round(float(hi), 4)], \
+           [round(float(blo), 4), round(float(bhi), 4)]
+
+
 def compute_metrics(y_true: list[bool], y_pred: list[bool]) -> dict:
-    """Positive class = hallucinated."""
+    """Positive class = hallucinated. Includes 95% CIs: Wilson intervals for
+    proportion metrics, bootstrap (2000 seeded resamples) for F1 and balanced
+    accuracy — so extreme values on small samples are always presented with
+    their statistical uncertainty."""
     tp = sum(1 for t, p in zip(y_true, y_pred) if t and p)
     fp = sum(1 for t, p in zip(y_true, y_pred) if not t and p)
     fn = sum(1 for t, p in zip(y_true, y_pred) if t and not p)
@@ -59,6 +99,7 @@ def compute_metrics(y_true: list[bool], y_pred: list[bool]) -> dict:
     f1        = (2 * precision * recall / (precision + recall)
                  if (precision + recall) else 0.0)
     specificity = tn / (tn + fp) if (tn + fp) else 0.0
+    f1_ci, bal_ci = _bootstrap_cis(y_true, y_pred)
     return {
         "tp": tp, "fp": fp, "fn": fn, "tn": tn,
         "precision":         round(precision, 4),
@@ -67,6 +108,11 @@ def compute_metrics(y_true: list[bool], y_pred: list[bool]) -> dict:
         "specificity":       round(specificity, 4),
         "balanced_accuracy": round((recall + specificity) / 2, 4),
         "accuracy":          round((tp + tn) / len(y_true), 4) if y_true else 0.0,
+        "precision_ci95":    _wilson_ci(tp, tp + fp),
+        "recall_ci95":       _wilson_ci(tp, tp + fn),
+        "specificity_ci95":  _wilson_ci(tn, tn + fp),
+        "f1_ci95":           f1_ci,
+        "balanced_accuracy_ci95": bal_ci,
     }
 
 
@@ -268,12 +314,29 @@ def main():
                     help="skip the naive NLI baseline (unchanged between checker versions)")
     ap.add_argument("--limit", type=int, default=0,
                     help="evaluate only the first N cases (smoke test)")
+    ap.add_argument("--test-set", default=TEST_SET,
+                    help="path to a labeled test set jsonl (default: standard set)")
+    ap.add_argument("--out", default=RESULTS,
+                    help="path for the results json (default: standard results file)")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="stratified random sample of N cases (seed 123) — for "
+                         "slow/API-limited detectors on large sets")
     args = ap.parse_args()
 
-    with open(TEST_SET, encoding="utf-8") as f:
+    with open(args.test_set, encoding="utf-8") as f:
         cases = [json.loads(line) for line in f if line.strip()]
     if args.limit:
         cases = cases[:args.limit]
+    if args.sample and args.sample < len(cases):
+        import random as _random
+        rng = _random.Random(123)
+        clean = [c for c in cases if c["label"] == "clean"]
+        hall  = [c for c in cases if c["label"] == "hallucinated"]
+        k_clean = max(1, round(args.sample * len(clean) / len(cases))) if clean else 0
+        k_hall  = args.sample - k_clean
+        cases = (rng.sample(clean, min(k_clean, len(clean)))
+                 + rng.sample(hall, min(k_hall, len(hall))))
+        print(f"Stratified sample: {len(cases)} cases (seed 123)")
 
     y_true = [c["label"] == "hallucinated" for c in cases]
     print(f"Loaded {len(cases)} cases "
@@ -351,9 +414,9 @@ def main():
               f"{row['recall']:>7.3f} {row['f1']:>7.3f} "
               f"{row['balanced_accuracy']:>7.3f}")
 
-    with open(RESULTS, "w", encoding="utf-8") as f:
+    with open(args.out, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
-    print(f"\nFull results written to {os.path.basename(RESULTS)}")
+    print(f"\nFull results written to {os.path.basename(args.out)}")
 
 
 if __name__ == "__main__":
