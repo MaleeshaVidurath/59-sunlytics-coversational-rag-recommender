@@ -20,15 +20,20 @@
 import os
 import zipfile
 
-_DIR      = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.normpath(os.path.join(_DIR, "..", "..", ".."))
+_DIR      = os.path.dirname(os.path.abspath(__file__))   # original_eval_238
+HR        = os.path.normpath(os.path.join(_DIR, ".."))     # hallucination_result
+REPO_ROOT = os.path.normpath(os.path.join(HR, "..", "..", ".."))
 OUT       = os.path.join(_DIR, "colab_bundle.zip")
 
+# (filename, source dir, archive subpath under hallucination_result/)
 INCLUDE_HERE = [
-    "capture.py", "corrupt_cases.py", "run_detector_eval.py",
-    "build_summary.py", "make_figures.py", "__init__.py",
-    "captured_cases.jsonl",
-    "results_detector_eval_v1.json", "results_detector_eval_v2.json",
+    ("capture.py", "HR", ""), ("corrupt_cases.py", "HR", ""),
+    ("run_detector_eval.py", "HR", ""), ("__init__.py", "HR", ""),
+    ("build_summary.py", "DIR", "original_eval_238/"),
+    ("make_figures.py", "DIR", "original_eval_238/"),
+    ("captured_cases.jsonl", "DIR", "original_eval_238/"),
+    ("results_detector_eval_v1.json", "DIR", "original_eval_238/"),
+    ("results_detector_eval_v2.json", "DIR", "original_eval_238/"),
 ]
 
 
@@ -46,10 +51,10 @@ def main():
                     n += 1
 
         # evaluation pipeline + raw cases + archived results
-        for fn in INCLUDE_HERE:
-            full = os.path.join(_DIR, fn)
+        for fn, src, sub in INCLUDE_HERE:
+            full = os.path.join(HR if src == "HR" else _DIR, fn)
             if os.path.exists(full):
-                arc = f"m3_implementation/test_result/hallucination_result/{fn}"
+                arc = f"m3_implementation/test_result/hallucination_result/{sub}{fn}"
                 z.write(full, arc)
                 n += 1
             else:

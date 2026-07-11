@@ -1,0 +1,8 @@
+{
+  "n_cases": 1400,
+  "context_serialization": "see serialize_evidence()",
+  "threshold_note": "conventional defaults (0.5); raw scores stored",
+  "summac": {
+    "error": "AlbertTokenizer has no attribute batch_encode_plus"
+  }
+}

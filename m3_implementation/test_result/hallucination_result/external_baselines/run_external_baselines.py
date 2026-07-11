@@ -36,7 +36,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
 _DIR     = os.path.dirname(os.path.abspath(__file__))
-TEST_SET = os.path.join(_DIR, "..", "labeled_test_set.jsonl")
+TEST_SET = os.path.join(_DIR, "..", "original_eval_238", "labeled_test_set.jsonl")
 RESULTS  = os.path.join(_DIR, "results_external_baselines.json")
 
 from test_result.hallucination_result.run_detector_eval import (
@@ -103,13 +103,15 @@ def run_hhem(cases, contexts):
 
 def run_summac(cases, contexts):
     from summac.model_summac import SummaCConv
-    print("[summac] loading SummaC-Conv (vitc) ...")
+    import torch
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[summac] loading SummaC-Conv (vitc) on {device} ...")
     # trained conv weights are not bundled in the pip package — use the copy
     # downloaded from the official repo (github.com/tingofurro/summac)
     start_file = os.path.join(_DIR, "summac_conv_vitc_sent_perc_e.bin")
     model = SummaCConv(models=["vitc"], bins="percentile",
                        granularity="sentence", nli_labels="e",
-                       device="cpu", start_file=start_file, agg="mean")
+                       device=device, start_file=start_file, agg="mean")
 
     # Compatibility shim: summac 0.0.4 passes the legacy kwarg
     # truncation_strategy alongside truncation=True, which modern
@@ -174,13 +176,30 @@ def main():
     ap.add_argument("--tools", default="hhem,summac,lettuce",
                     help="comma-separated subset of: hhem,summac,lettuce")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--test-set", default=TEST_SET,
+                    help="path to a labeled test set jsonl")
+    ap.add_argument("--out", default=RESULTS, help="path for the results json")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="stratified random sample of N cases (seeded) — for "
+                         "slow tools on large sets")
     args = ap.parse_args()
     wanted = [t.strip() for t in args.tools.split(",") if t.strip()]
 
-    with open(TEST_SET, encoding="utf-8") as f:
+    with open(args.test_set, encoding="utf-8") as f:
         cases = [json.loads(l) for l in f if l.strip()]
     if args.limit:
         cases = cases[:args.limit]
+    if args.sample and args.sample < len(cases):
+        # stratified by label: keep the clean/hallucinated ratio, seeded
+        import random as _random
+        rng = _random.Random(123)
+        clean = [c for c in cases if c["label"] == "clean"]
+        hall  = [c for c in cases if c["label"] == "hallucinated"]
+        k_clean = max(1, round(args.sample * len(clean) / len(cases))) if clean else 0
+        k_hall  = args.sample - k_clean
+        cases = (rng.sample(clean, min(k_clean, len(clean)))
+                 + rng.sample(hall, min(k_hall, len(hall))))
+        print(f"Stratified sample: {len(cases)} cases (seed 123)")
     y_true = [c["label"] == "hallucinated" for c in cases]
     contexts = [serialize_evidence(c["evidence"]) for c in cases]
     print(f"External baselines on {len(cases)} cases "
@@ -214,7 +233,7 @@ def main():
               f"BalAcc={m['balanced_accuracy']:.3f} "
               f"(TP={m['tp']} FP={m['fp']} FN={m['fn']} TN={m['tn']})")
 
-    with open(RESULTS, "w", encoding="utf-8") as f:
+    with open(args.out, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     print("\n" + "=" * 62)
@@ -230,7 +249,7 @@ def main():
             m = r["metrics"]
             print(f"{r['name']:<28} {m['precision']:>7.3f} {m['recall']:>7.3f} "
                   f"{m['f1']:>7.3f} {m['balanced_accuracy']:>7.3f}")
-    print(f"\nResults written to {os.path.basename(RESULTS)}")
+    print(f"\nResults written to {os.path.basename(args.out)}")
 
 
 if __name__ == "__main__":
