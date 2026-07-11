@@ -45,6 +45,11 @@ from test_result.hallucination_result.capture import capture_path
 # Same customer as test_full_pipeline.py — known-good profile
 EVAL_CUSTOMER_ID = "be1981ab818cf4ef6765b2ecaea7a2cbf14ccd6e8a7ee985513d9e8e53c6d91b"
 
+# Pause between turns so the run stays under Groq's free-tier 6000
+# tokens/minute limit (each turn spends several Groq calls: guard judge,
+# generation, retries). Override with EVAL_TURN_DELAY.
+TURN_DELAY_SECONDS = float(os.getenv("EVAL_TURN_DELAY", "25"))
+
 # ── Scripted conversations ──────────────────────────────────────────────────
 # Each inner list is one session, run in order on a fresh session_id.
 # Comments show the action each turn is expected to trigger.
@@ -116,6 +121,60 @@ CONVERSATIONS = [
     # catalog_search + refinement
     ["I want a green blouse",                       # catalog_search
      "Can you show it in white instead?"],          # catalog_search (refinement)
+
+    # ── Extension batch (2026-07-10): 44 further conversations for the
+    # expanded dataset (target: 1000+ test rows). Same coverage goals,
+    # wider product / colour / price / occasion variety.
+    ["Show me black vest tops", "What fabric is the first one?"],
+    ["I need beige sandals for the beach", "Which one is cheaper?",
+     "Why did you choose the first one?"],
+    ["Looking for a brown handbag", "Tell me more about the first one"],
+    ["I want a warm scarf for winter", "Why did you recommend the first one?"],
+    ["Show me grey cardigans under £30", "Do they have buttons?"],
+    ["I need a dark blue blazer for a job interview", "Compare the two options"],
+    ["Black leggings for yoga please", "What material are they made of?"],
+    ["Show me white socks", "Something cheaper instead"],
+    ["I'm looking for brown boots", "Tell me more about the second one"],
+    ["I need blue jeans under £25", "Which one is better for casual wear?",
+     "Show me black ones instead"],
+    ["Show me a yellow summer skirt", "Why is this a good choice for me?"],
+    ["I want a red hoodie", "What pattern does the first one have?"],
+    ["Grey sweaters for men please", "Compare option 1 and option 2",
+     "What material is the first one?"],
+    ["I need an orange t-shirt", "Show me something in purple instead"],
+    ["Show me black formal trousers", "What is the price of the second one?"],
+    ["I'm looking for a pink party dress", "Which of these is more elegant?"],
+    ["White shirts for the office", "What fabric is the second one?"],
+    ["I want a long winter coat under £60", "Tell me more about the first one",
+     "Which one is more affordable?"],
+    ["Show me dark blue shorts", "Why did you pick the second one?"],
+    ["I need a light blue blouse", "What pattern does it have?"],
+    ["Beige trousers for a smart casual look", "Which one is better quality?"],
+    ["Show me green t-shirts under £15", "Something in dark green instead"],
+    ["I need black tights", "What material is the first one?"],
+    ["Show me red dresses for a wedding", "Compare the two",
+     "Tell me more about the second one"],
+    ["I'm looking for a white bra", "Which one is more comfortable?"],
+    ["Grey hoodies under £20", "Tell me more about the first one"],
+    ["I need brown trousers", "What is the price difference between them?"],
+    ["Show me purple tops", "Why would the first one suit me?"],
+    ["I want black sneakers for running", "What are they made of?"],
+    ["Light pink cardigan please", "Show me a darker colour instead"],
+    ["I need a denim skirt", "Tell me more about the second one"],
+    ["Show me men's black jackets", "Which one is warmer?",
+     "Show me something cheaper"],
+    ["I want a yellow jacket for rainy days", "Is the first one waterproof?"],
+    ["I'm looking for a patterned blouse", "What colour is the second one?"],
+    ["Show me children's t-shirts", "Something cheaper please"],
+    ["I need white trainers under £30", "Compare option 1 and option 2"],
+    ["Show me a black leather bag", "Tell me more about the first one"],
+    ["I want a soft sweater to wear at home", "What fabric is it made of?"],
+    ["Show me winter hats", "Which one is cheaper?"],
+    ["I need blue shorts for the beach", "Why the first one?"],
+    ["I'm looking for an elegant black blazer", "Compare the two options"],
+    ["Show me striped t-shirts", "What colour is the first one?"],
+    ["I need warm leggings for winter", "Which one is warmer?"],
+    ["Show me dark red cardigans", "Something under £25 instead"],
 ]
 
 
@@ -206,6 +265,10 @@ async def run():
             except Exception as e:
                 turns_failed += 1
                 print(f"[{conv_idx}.{turn_idx}] TURN FAILED (continuing): {e}")
+
+            # Rate-limit pacing (see TURN_DELAY_SECONDS)
+            if TURN_DELAY_SECONDS > 0:
+                await asyncio.sleep(TURN_DELAY_SECONDS)
 
         # Reset session context between conversations so the next one starts clean
         await redis.delete(f"session:{session_id}:turns")

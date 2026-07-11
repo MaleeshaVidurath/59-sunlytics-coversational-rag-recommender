@@ -59,7 +59,7 @@ m3_implementation/test_result/**/__pycache__/
 m3_implementation/test_result/**/*.log
 m3_implementation/test_result/**/*.log.err
 m3_implementation/test_result/**/*.zip
-m3_implementation/test_result/hallucination_result/captured_cases_full_backup.jsonl
+m3_implementation/test_result/hallucination_result/original_eval_238/captured_cases_full_backup.jsonl
 latency_log.csv
 
 # Empty __init__.py placeholders added for M2 package imports
