@@ -470,6 +470,15 @@ excluded as ambiguous truncations).
 
 ## 8. File inventory
 
+> **Layout note (2026-07-11):** original-evaluation *artifacts* (data,
+> results, figures, RESULTS.md, Colab notebook, logs, build_summary /
+> make_figures) now live in the **`original_eval_238/`** subfolder, so each
+> evaluation has its own folder. **Shared pipeline tools stay at the root**
+> (`capture.py`, `collect_cases.py`, `corrupt_cases.py`,
+> `run_detector_eval.py`, `merge_captures.py`) because every later
+> evaluation imports them. Script default paths point into
+> `original_eval_238/`; all runners accept `--test-set`/`--out` overrides.
+
 | File | Role |
 |---|---|
 | `capture.py` | capture hook (EVAL_CAPTURE=1) + evidence slimming |

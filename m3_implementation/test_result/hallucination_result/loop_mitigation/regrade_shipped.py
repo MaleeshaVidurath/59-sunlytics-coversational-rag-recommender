@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 from test_result.hallucination_result.loop_mitigation.referee import grade
 
 _DIR     = os.path.dirname(os.path.abspath(__file__))
-TEST_SET = os.path.join(_DIR, "..", "labeled_test_set.jsonl")
+TEST_SET = os.path.join(_DIR, "..", "original_eval_238", "labeled_test_set.jsonl")
 RESULTS  = os.path.join(_DIR, "results_loop_eval.json")
 SHIPPED  = os.path.join(_DIR, "shipped_responses.jsonl")
 
