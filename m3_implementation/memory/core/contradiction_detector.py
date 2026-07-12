@@ -52,6 +52,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
 from memory.db.mongo import get_db, get_collection_name
 
+# Evaluation capture hook — no-op unless CONTRA_EVAL_CAPTURE=1
+# (see test_result/contradiction_result)
+try:
+    from test_result.contradiction_result.capture import capture_case as _capture_contra_case
+except Exception:
+    def _capture_contra_case(**_kwargs):
+        pass
+
 # ── NLI model (shared singleton with hallucination checker) ───────────────────
 _nli_model = None
 
@@ -566,6 +574,14 @@ class ContradictionDetector:
         graph = await _load_graph(session_id, collection_prefix)
         print(f"[GRAPH] nodes={graph.number_of_nodes()} edges={graph.number_of_edges()}")
 
+        # Snapshot of product nodes BEFORE this turn's update — used by the
+        # evaluation capture hook to compute cross-turn distance. dict() copies
+        # the attr mapping, so the later in-place update cannot mutate it.
+        graph_before = {
+            n: dict(graph.nodes[n]) for n in graph.nodes
+            if graph.nodes[n].get("type") != "contradiction_event"
+        }
+
         _update_graph_nodes(graph, product_refs, turn_id, session_id)
         print(f"[GRAPH] after update: nodes={graph.number_of_nodes()}")
 
@@ -575,6 +591,13 @@ class ContradictionDetector:
         if not extracted:
             print(f"[CONTRA] Groq returned no claims — saving graph, skipping check")
             await _save_graph(session_id, graph, collection_prefix)
+            _capture_contra_case(
+                session_id=session_id, turn_id=turn_id, action=action,
+                product_refs=product_refs, graph_before=graph_before,
+                extracted_claims={}, response_in=response_text,
+                response_out=response_text, contradictions=[],
+                collection_prefix=collection_prefix,
+            )
             return self._build_result(
                 response_text, [], len(product_refs), article_ids, product_names,
             )
@@ -679,6 +702,14 @@ class ContradictionDetector:
         if contradiction_found:
             print(f"[CONTRA] corrected response: {repr(corrected_text[:200])}")
             print(f"[ContradictionDetector] {len(contradictions)} contradiction(s) resolved.")
+
+        _capture_contra_case(
+            session_id=session_id, turn_id=turn_id, action=action,
+            product_refs=product_refs, graph_before=graph_before,
+            extracted_claims=extracted, response_in=response_text,
+            response_out=corrected_text, contradictions=contradictions,
+            collection_prefix=collection_prefix,
+        )
 
         return self._build_result(
             corrected_text, contradictions, len(product_refs),

@@ -1,0 +1,45 @@
+{
+  "n_contradiction": 450,
+  "n_negative": 149,
+  "off": {
+    "user_facing_contradiction_rate": 1.0,
+    "user_facing_contradictions": 450
+  },
+  "on": {
+    "user_facing_contradiction_rate": 0.3222,
+    "user_facing_contradictions": 145,
+    "detection_rate": 0.7733,
+    "n_detected": 348,
+    "p_fix_given_detect": 0.8764,
+    "n_fixed": 305
+  },
+  "collateral_damage_rate": 0.0403,
+  "n_collateral": 6,
+  "residual_by_corruption": {
+    "colour_drift": {
+      "residual": 4,
+      "total": 96,
+      "residual_rate": 0.0417
+    },
+    "cross_item_swap": {
+      "residual": 62,
+      "total": 62,
+      "residual_rate": 1.0
+    },
+    "name_drift": {
+      "residual": 51,
+      "total": 106,
+      "residual_rate": 0.4811
+    },
+    "price_drift": {
+      "residual": 3,
+      "total": 101,
+      "residual_rate": 0.0297
+    },
+    "type_drift": {
+      "residual": 25,
+      "total": 85,
+      "residual_rate": 0.2941
+    }
+  }
+}
