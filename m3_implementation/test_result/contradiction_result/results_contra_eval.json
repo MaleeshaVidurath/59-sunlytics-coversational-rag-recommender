@@ -1,0 +1,470 @@
+{
+  "n_cases": 599,
+  "n_contradiction": 450,
+  "ours": {
+    "metrics": {
+      "tp": 348,
+      "fp": 6,
+      "fn": 102,
+      "tn": 143,
+      "precision": 0.9831,
+      "recall": 0.7733,
+      "f1": 0.8657,
+      "specificity": 0.9597,
+      "balanced_accuracy": 0.8665,
+      "accuracy": 0.8197,
+      "precision_ci95": [
+        0.9635,
+        0.9922
+      ],
+      "recall_ci95": [
+        0.7324,
+        0.8096
+      ],
+      "specificity_ci95": [
+        0.9149,
+        0.9814
+      ],
+      "f1_ci95": [
+        0.8399,
+        0.8889
+      ],
+      "balanced_accuracy_ci95": [
+        0.8401,
+        0.8907
+      ]
+    },
+    "recall_by_corruption": {
+      "colour_drift": {
+        "detected": 93,
+        "total": 96,
+        "recall": 0.9688
+      },
+      "cross_item_swap": {
+        "detected": 38,
+        "total": 62,
+        "recall": 0.6129
+      },
+      "name_drift": {
+        "detected": 56,
+        "total": 106,
+        "recall": 0.5283
+      },
+      "price_drift": {
+        "detected": 98,
+        "total": 101,
+        "recall": 0.9703
+      },
+      "type_drift": {
+        "detected": 63,
+        "total": 85,
+        "recall": 0.7412
+      }
+    },
+    "recall_by_distance": {
+      "0": {
+        "detected": 180,
+        "total": 203,
+        "recall": 0.8867
+      },
+      "1": {
+        "detected": 47,
+        "total": 76,
+        "recall": 0.6184
+      },
+      "2": {
+        "detected": 42,
+        "total": 50,
+        "recall": 0.84
+      },
+      "3+": {
+        "detected": 79,
+        "total": 121,
+        "recall": 0.6529
+      }
+    },
+    "false_alarms": {
+      "clean": {
+        "fp": 0,
+        "total": 84
+      },
+      "hard_negative": {
+        "fp": 6,
+        "total": 65
+      }
+    }
+  },
+  "string_only": {
+    "metrics": {
+      "tp": 385,
+      "fp": 71,
+      "fn": 65,
+      "tn": 78,
+      "precision": 0.8443,
+      "recall": 0.8556,
+      "f1": 0.8499,
+      "specificity": 0.5235,
+      "balanced_accuracy": 0.6895,
+      "accuracy": 0.773,
+      "precision_ci95": [
+        0.8082,
+        0.8747
+      ],
+      "recall_ci95": [
+        0.8201,
+        0.885
+      ],
+      "specificity_ci95": [
+        0.4437,
+        0.6021
+      ],
+      "f1_ci95": [
+        0.8254,
+        0.8736
+      ],
+      "balanced_accuracy_ci95": [
+        0.6465,
+        0.7313
+      ]
+    },
+    "recall_by_corruption": {
+      "colour_drift": {
+        "detected": 93,
+        "total": 96,
+        "recall": 0.9688
+      },
+      "cross_item_swap": {
+        "detected": 47,
+        "total": 62,
+        "recall": 0.7581
+      },
+      "name_drift": {
+        "detected": 73,
+        "total": 106,
+        "recall": 0.6887
+      },
+      "price_drift": {
+        "detected": 100,
+        "total": 101,
+        "recall": 0.9901
+      },
+      "type_drift": {
+        "detected": 72,
+        "total": 85,
+        "recall": 0.8471
+      }
+    },
+    "recall_by_distance": {
+      "0": {
+        "detected": 195,
+        "total": 203,
+        "recall": 0.9606
+      },
+      "1": {
+        "detected": 51,
+        "total": 76,
+        "recall": 0.6711
+      },
+      "2": {
+        "detected": 45,
+        "total": 50,
+        "recall": 0.9
+      },
+      "3+": {
+        "detected": 94,
+        "total": 121,
+        "recall": 0.7769
+      }
+    },
+    "false_alarms": {
+      "clean": {
+        "fp": 22,
+        "total": 84
+      },
+      "hard_negative": {
+        "fp": 49,
+        "total": 65
+      }
+    }
+  },
+  "history_nli": {
+    "metrics": {
+      "tp": 431,
+      "fp": 133,
+      "fn": 19,
+      "tn": 16,
+      "precision": 0.7642,
+      "recall": 0.9578,
+      "f1": 0.8501,
+      "specificity": 0.1074,
+      "balanced_accuracy": 0.5326,
+      "accuracy": 0.7462,
+      "precision_ci95": [
+        0.7274,
+        0.7974
+      ],
+      "recall_ci95": [
+        0.935,
+        0.9728
+      ],
+      "specificity_ci95": [
+        0.0672,
+        0.1673
+      ],
+      "f1_ci95": [
+        0.826,
+        0.875
+      ],
+      "balanced_accuracy_ci95": [
+        0.5075,
+        0.561
+      ]
+    },
+    "recall_by_corruption": {
+      "colour_drift": {
+        "detected": 93,
+        "total": 96,
+        "recall": 0.9688
+      },
+      "cross_item_swap": {
+        "detected": 60,
+        "total": 62,
+        "recall": 0.9677
+      },
+      "name_drift": {
+        "detected": 97,
+        "total": 106,
+        "recall": 0.9151
+      },
+      "price_drift": {
+        "detected": 99,
+        "total": 101,
+        "recall": 0.9802
+      },
+      "type_drift": {
+        "detected": 82,
+        "total": 85,
+        "recall": 0.9647
+      }
+    },
+    "recall_by_distance": {
+      "0": {
+        "detected": 202,
+        "total": 203,
+        "recall": 0.9951
+      },
+      "1": {
+        "detected": 66,
+        "total": 76,
+        "recall": 0.8684
+      },
+      "2": {
+        "detected": 49,
+        "total": 50,
+        "recall": 0.98
+      },
+      "3+": {
+        "detected": 114,
+        "total": 121,
+        "recall": 0.9421
+      }
+    },
+    "false_alarms": {
+      "clean": {
+        "fp": 74,
+        "total": 84
+      },
+      "hard_negative": {
+        "fp": 59,
+        "total": 65
+      }
+    }
+  },
+  "uttr_pair_nli": {
+    "metrics": {
+      "tp": 409,
+      "fp": 121,
+      "fn": 41,
+      "tn": 28,
+      "precision": 0.7717,
+      "recall": 0.9089,
+      "f1": 0.8347,
+      "specificity": 0.1879,
+      "balanced_accuracy": 0.5484,
+      "accuracy": 0.7295,
+      "precision_ci95": [
+        0.7341,
+        0.8054
+      ],
+      "recall_ci95": [
+        0.8787,
+        0.9321
+      ],
+      "specificity_ci95": [
+        0.1333,
+        0.2582
+      ],
+      "f1_ci95": [
+        0.8084,
+        0.8608
+      ],
+      "balanced_accuracy_ci95": [
+        0.5171,
+        0.5825
+      ]
+    },
+    "recall_by_corruption": {
+      "colour_drift": {
+        "detected": 93,
+        "total": 96,
+        "recall": 0.9688
+      },
+      "cross_item_swap": {
+        "detected": 58,
+        "total": 62,
+        "recall": 0.9355
+      },
+      "name_drift": {
+        "detected": 90,
+        "total": 106,
+        "recall": 0.8491
+      },
+      "price_drift": {
+        "detected": 93,
+        "total": 101,
+        "recall": 0.9208
+      },
+      "type_drift": {
+        "detected": 75,
+        "total": 85,
+        "recall": 0.8824
+      }
+    },
+    "recall_by_distance": {
+      "0": {
+        "detected": 193,
+        "total": 203,
+        "recall": 0.9507
+      },
+      "1": {
+        "detected": 66,
+        "total": 76,
+        "recall": 0.8684
+      },
+      "2": {
+        "detected": 45,
+        "total": 50,
+        "recall": 0.9
+      },
+      "3+": {
+        "detected": 105,
+        "total": 121,
+        "recall": 0.8678
+      }
+    },
+    "false_alarms": {
+      "clean": {
+        "fp": 66,
+        "total": 84
+      },
+      "hard_negative": {
+        "fp": 55,
+        "total": 65
+      }
+    }
+  },
+  "llm_judge": {
+    "metrics": {
+      "tp": 335,
+      "fp": 15,
+      "fn": 59,
+      "tn": 114,
+      "precision": 0.9571,
+      "recall": 0.8503,
+      "f1": 0.9005,
+      "specificity": 0.8837,
+      "balanced_accuracy": 0.867,
+      "accuracy": 0.8585,
+      "precision_ci95": [
+        0.9305,
+        0.9739
+      ],
+      "recall_ci95": [
+        0.8116,
+        0.8821
+      ],
+      "specificity_ci95": [
+        0.817,
+        0.9283
+      ],
+      "f1_ci95": [
+        0.8773,
+        0.9229
+      ],
+      "balanced_accuracy_ci95": [
+        0.8343,
+        0.8983
+      ]
+    },
+    "n_answered": 523,
+    "recall_by_corruption": {
+      "colour_drift": {
+        "detected": 81,
+        "total": 82,
+        "recall": 0.9878
+      },
+      "cross_item_swap": {
+        "detected": 47,
+        "total": 54,
+        "recall": 0.8704
+      },
+      "name_drift": {
+        "detected": 62,
+        "total": 96,
+        "recall": 0.6458
+      },
+      "price_drift": {
+        "detected": 75,
+        "total": 84,
+        "recall": 0.8929
+      },
+      "type_drift": {
+        "detected": 70,
+        "total": 78,
+        "recall": 0.8974
+      }
+    },
+    "recall_by_distance": {
+      "0": {
+        "detected": 152,
+        "total": 176,
+        "recall": 0.8636
+      },
+      "1": {
+        "detected": 53,
+        "total": 69,
+        "recall": 0.7681
+      },
+      "2": {
+        "detected": 38,
+        "total": 44,
+        "recall": 0.8636
+      },
+      "3+": {
+        "detected": 92,
+        "total": 105,
+        "recall": 0.8762
+      }
+    },
+    "false_alarms": {
+      "clean": {
+        "fp": 5,
+        "total": 72
+      },
+      "hard_negative": {
+        "fp": 10,
+        "total": 57
+      }
+    }
+  }
+}
