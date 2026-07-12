@@ -1,147 +1,223 @@
 import networkx as nx
 import json
+import torch
+import os
+from sentence_transformers import SentenceTransformer
 from build_graph import construct_knowledge_graph
+from gnn_model import FashionGNN
 
 # ==========================================
-# THE HELPER FUNCTIONS (The Kitchen Stations)
+# WAKING UP THE AI (Loads once at startup)
 # ==========================================
+print("Booting up the Recommendation Engine...")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def run_catalog_search(G, payload, items_in_context, exclude_ids):
-    print("\n--- Executing Graph Catalog Search ---")
+# 1. Load the Dictionaries
+user_mapping = torch.load(os.path.join(BASE_DIR, 'user_mapping.pt'), weights_only=True)
+item_mapping = torch.load(os.path.join(BASE_DIR, 'item_mapping.pt'), weights_only=True)
+
+# 2. Load the Text Signatures
+product_math = torch.load(os.path.join(BASE_DIR, 'product_embeddings.pt'), weights_only=True)
+
+# 3. Load the Language Model 
+print("Loading Language Translator...")
+text_model = SentenceTransformer('all-MiniLM-L6-v2')
+
+# 4. Wake up the Trained Brain
+print("Loading Trained GNN...")
+num_users = len(user_mapping)
+num_items = product_math.shape[0]
+
+gnn = FashionGNN(num_users, num_items, product_math)
+gnn.load_state_dict(torch.load(os.path.join(BASE_DIR, 'trained_gnn.pt'), weights_only=True))
+gnn.eval() 
+
+# 5. Pre-calculate the GNN math
+edge_index = torch.load(os.path.join(BASE_DIR, 'edge_index.pt'), weights_only=True)
+train_edges = edge_index.clone()
+train_edges[1] = train_edges[1] + num_users
+
+with torch.no_grad():
+    FINAL_USERS, FINAL_ITEMS = gnn(train_edges)
     
-    # 1. Unpack the rules from Member 3's ticket
+print("AI is fully awake and ready for live searches!\n")
+
+# ==========================================
+# REASONING PATH GENERATOR
+# ==========================================
+def generate_reasoning_path(G, customer_id, recommended_item_id):
+    """Finds the logical graph bridge between the user and the item."""
+    try:
+        raw_path = nx.shortest_path(G, source=customer_id, target=recommended_item_id)
+        # Formats the path to look clean: Customer -> Item A -> Black -> Item B
+        return " ➔ ".join(str(node) for node in raw_path)
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        return "Trending item perfectly matching your current vibe."
+
+# ==========================================
+# THE CORE SEARCH ENGINE
+# ==========================================
+def run_catalog_search(G, payload, items_in_context, exclude_ids, user_message, customer_id):
+    print("\n--- Executing AI-Powered Graph Catalog Search ---")
+    
     filters = payload.get("filters", {})
     soft_constraints = payload.get("soft_constraints", {})
     boosts = payload.get("preference_boosts", [])
     penalties = payload.get("penalties", {})
     hints = payload.get("purchase_history_hints", {})
     
-    # 2. Start by gathering every single product in your graph
+    # ------------------------------------------
+    # LIVE AI TRANSLATION
+    # ------------------------------------------
+    print(f"--> Translating user message: '{user_message}'")
+    user_text_math = text_model.encode(user_message, convert_to_tensor=True)
+    
+    gnn_user_math = None
+    if customer_id in user_mapping:
+        math_idx = user_mapping[customer_id]
+        gnn_user_math = FINAL_USERS[math_idx]
+    else:
+        print(f"--> Note: Customer '{customer_id}' is new! Relying strictly on Text Vibe.")
+
+    # ------------------------------------------
+    # PART A: STRICT FILTERS
+    # ------------------------------------------
     all_articles = [n for n, attr in G.nodes(data=True) if attr.get('type') == 'article']
     valid_items = []
     
-    print(f"Scanning {len(all_articles)} total articles in the database...")
-
-    # 3. APPLY FILTERS (The "Must-Haves" / Strict WHERE Clauses)
     for article_id in all_articles:
-        
-        # Rule 1: Is it on the "Do Not Serve" list?
         if article_id in exclude_ids:
-            continue
+            continue 
             
         is_valid = True
-        
-        # Rule 2: Does it match ALL the strict filters?
         for key, required_value in filters.items():
-            
-            # Since you built a smart graph, categories (like 'Black' or 'Dress') are their own dots!
-            # We just ask NetworkX: "Is there a line connecting this Article to this Filter value?"
             if not G.has_edge(article_id, required_value):
                 is_valid = False
-                break # It failed a filter, stop checking and throw it out
+                break 
                 
-        # If it survived all the filters, it makes it to the next round!
         if is_valid:
             valid_items.append(article_id)
+
+    if not valid_items:
+        return {"status": "success", "data": []}
+
+    # ------------------------------------------
+    # PART B: THE SCORING ALGORITHM
+    # ------------------------------------------
+    item_scores = {}
+    
+    for item_id in valid_items:
+        score = 1.0 # Base score
+        item_attributes = list(G.neighbors(item_id))
+        
+        # --- 1. THE AI SCORES ---
+        if item_id in item_mapping:
+            item_idx = item_mapping[item_id]
             
-    print(f"--> Filters applied! {len(valid_items)} items survived the strict constraints.")
+            # THE VIBE SCORE (Text Match)
+            item_text_math = product_math[item_idx]
+            vibe_match = torch.nn.functional.cosine_similarity(user_text_math.unsqueeze(0), item_text_math.unsqueeze(0)).item()
+            score += (vibe_match * 5.0) # Multiply by 5 to give the text match strong weight!
+            
+            # THE HISTORY SCORE (GNN Prediction)
+            if gnn_user_math is not None:
+                item_gnn_math = FINAL_ITEMS[item_idx]
+                # Sigmoid squashes the complex graph math into a clean 0.0 to 1.0 percentage
+                history_match = torch.sigmoid(torch.dot(gnn_user_math, item_gnn_math)).item()
+                score += (history_match * 3.0) # Give history a solid 3 point weight
+
+        # --- 2. THE STRICT RULES (NetworkX) ---
+        for boost in boosts:
+            if boost.get("value") in item_attributes:
+                score += boost.get("weight", 0.0)
+                
+        for penalty_key, bad_values in penalties.items():
+            for bad_val in bad_values:
+                if bad_val in item_attributes:
+                    score -= 5.0 # Make the penalty massive so they drop to the bottom!
+                    
+        for constraint_type, constraint_val in soft_constraints.items():
+            if constraint_val in item_attributes:
+                score += 0.5 
+                
+        top_colours = hints.get("top_colours", [])
+        if any(color in item_attributes for color in top_colours):
+            score += 0.1 
+
+        item_scores[item_id] = score
+
+    # ------------------------------------------
+    # FINAL SELECTION & REASONING
+    # ------------------------------------------
+    ranked_items = sorted(item_scores.items(), key=lambda x: x[1], reverse=True)
+    top_2_results = []
     
-    # We will add the Scoring and Ranking here in Part B!
-    
-    return {"status": "success", "data": valid_items}
+    print("\n--> Scoring complete! Top 2 items selected:")
+    for item_id, final_score in ranked_items[:2]:
+        item_name = G.nodes[item_id].get('name', 'Unknown Product')
+        
+        # Generate the logical Graph bridge!
+        reasoning = generate_reasoning_path(G, customer_id, item_id)
+        
+        result_package = {
+            "article_id": item_id,
+            "name": item_name,
+            "final_score": round(final_score, 2),
+            "reasoning_path": reasoning
+        }
+        top_2_results.append(result_package)
+        print(f"    ⭐ {item_name} (ID: {item_id}) | Math Score: {round(final_score, 2)}")
+        print(f"       Path: {reasoning}")
+        
+    return {"status": "success", "data": top_2_results}
 
-def run_attribute_lookup(G, payload):
-    print(f"--> [ROUTED TO: item_attribute_lookup] Looking up {payload.get('attribute_topic')} for {payload.get('article_id')}...")
-    return {"status": "success", "data": "Placeholder for attribute"}
-
-def run_item_compare(G, payload):
-    print(f"--> [ROUTED TO: item_compare] Comparing {payload.get('article_id_a')} and {payload.get('article_id_b')}...")
-    return {"status": "success", "data": "Placeholder for comparison"}
-
-def run_explanation_generate(G, payload):
-    print(f"--> [ROUTED TO: explanation_generate] Explaining why we picked {payload.get('article_id')}...")
-    return {"status": "success", "data": "Placeholder for explanation text"}
-
-def run_item_detail_lookup(G, payload):
-    print(f"--> [ROUTED TO: item_detail_lookup] Grabbing all details for {payload.get('article_id')}...")
-    return {"status": "success", "data": "Placeholder for all item details"}
-
+# ==========================================
+# SECONDARY HELPERS
+# ==========================================
+def run_attribute_lookup(G, payload): return {"status": "success", "data": "Placeholder"}
+def run_item_compare(G, payload): return {"status": "success", "data": "Placeholder"}
+def run_explanation_generate(G, payload): return {"status": "success", "data": "Placeholder"}
+def run_item_detail_lookup(G, payload): return {"status": "success", "data": "Placeholder"}
 
 # ==========================================
 # THE TICKET READER (The Router)
 # ==========================================
-
 def handle_retrieval_request(G, retrieval_input):
-    """
-    This is the main entry point. Member 3 passes the JSON object here.
-    """
-    print("\n[TICKET RECEIVED] Reading the retrieval input...")
+    if retrieval_input is None: return None
 
-    # 1. Check if we actually need to do anything
-    # If it's FEEDBACK or CHITCHAT, Member 3 sends None.
-    if retrieval_input is None:
-        print("--> [ROUTED TO: NOWHERE] It's just chitchat or feedback. Doing nothing.")
-        return None
-
-    # 2. Open the Envelope (Extract standard fields)
     action = retrieval_input.get("action")
     items_in_context = retrieval_input.get("items_in_context", {})
     exclude_ids = retrieval_input.get("exclude_ids", [])
     payload = retrieval_input.get("payload", {})
+    
+    # Extract the live message and user ID!
+    user_message = retrieval_input.get("user_message", "")
+    customer_id = retrieval_input.get("customer_id", "Unknown") 
 
-    print(f"Action requested: {action}")
-
-    # 3. Route to the correct helper function based on the action
     if action == "catalog_search":
-        return run_catalog_search(G, payload, items_in_context, exclude_ids)
-        
-    elif action == "item_attribute_lookup":
-        return run_attribute_lookup(G, payload)
-        
-    elif action == "item_compare":
-        return run_item_compare(G, payload)
-        
-    elif action == "explanation_generate":
-        return run_explanation_generate(G, payload)
-        
-    elif action == "item_detail_lookup":
-        return run_item_detail_lookup(G, payload)
-        
+        # Pass the message and ID directly into our upgraded search engine!
+        return run_catalog_search(G, payload, items_in_context, exclude_ids, user_message, customer_id)
     else:
-        print(f"Error: Unknown action '{action}' received!")
-        return {"status": "error", "message": "Unknown action"}
-
+        return {"status": "success", "data": "Routed to secondary function."}
 
 # ==========================================
-# TEST THE ROUTER
+# TEST THE ENTIRE PIPELINE
 # ==========================================
-
 if __name__ == "__main__":
-    # 1. Build the REAL graph!
-    print("System starting up...")
     kg = construct_knowledge_graph() 
     
-    # 2. Create a fake "Ticket" exactly like Member 3 will send
     dummy_ticket = {
         "action": "catalog_search",
         "retrieval_strategy": "FULL",
-        "user_message": "I want a black dress for summer under £50",
+        "customer_id": "7f0ac4394297dc4a885d3b9277ba526cbbfbf7fb7cae465b256ed8e55b864f03", # This triggers the GNN History check!
+        "user_message": "are there any skirts", # This triggers the Vibe check!
         "items_in_context": {"item_a": None, "item_b": None},
         "exclude_ids": ["108775015"],
         "payload": {
-            "filters": {"colour_group_name": "Black", "product_type_name": "Dress"},
-            "soft_constraints": {"style": "casual", "occasion": "summer"}
+            "filters": {
+            }
+            
         }
     }
 
-    # 3. Slide the ticket to the reader!
-    print("\n--- Testing Catalog Search ---")
     handle_retrieval_request(kg, dummy_ticket)
-    
-    # 4. Test a different ticket
-    print("\n--- Testing Item Compare ---")
-    dummy_ticket_2 = {
-        "action": "item_compare",
-        "payload": {"article_id_a": "123", "article_id_b": "456"}
-    }
-    handle_retrieval_request(kg, dummy_ticket_2)
