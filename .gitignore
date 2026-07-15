@@ -8,6 +8,9 @@ venv/
 .env
 outputs/
 
+# Large ML model weight files
+*.safetensors
+
 # Data
 data/
 data_old/
@@ -21,6 +24,23 @@ m3_implementation/adaptive_rag/distilbert_training/*.csv
 # AI Model Cache (BLIP + CLIP weights for M2)
 huggingface_cache/
 m2_multimodal_rag/models/
+
+# Trained sentiment classifier model weights and archives
+m3_implementation/memory/models/sentiment_classifier/
+m3_implementation/memory/models/sentiment_classifier.zip
+m3_implementation/notebooks/sentiment/sentiment_preprocessed_data_set/sentiment_classifier_roberta/model.safetensors
+m3_implementation/notebooks/sentiment/sentiment_preprocessed_data_set/sentiment_classifier_roberta/training_args.bin
+m3_implementation/notebooks/sentiment/sentiment_preprocessed_data_set/sentiment_classifier_roberta.zip
+
+# Sentiment dataset CSVs (raw — reproducible via download_sentiment_data_colab.ipynb)
+m3_implementation/notebooks/sentiment/sentiment_data_set/*.csv
+
+# Sentiment dataset CSVs (preprocessed — reproducible via preprocess.py)
+m3_implementation/notebooks/sentiment/sentiment_preprocessed_data_set/tweet_eval_*.csv
+
+# Eval results ZIP archives (extracted contents are kept)
+m3_implementation/notebooks/sentiment/sentiment_preprocessed_data_set/eval_results-*.zip
+m3_implementation/notebooks/sentiment/sentiment_preprocessed_data_set/eval_results-*/
 # OS
 .DS_Store
 Thumbs.db
@@ -29,6 +49,18 @@ node_modules/
 
 #temporary files
 Accuracy/
+
+# Safety files
+m3_implementation/safety_files/
+
+# Test results: code, docs and small result files are versioned.
+# Only caches, logs and big/regenerable artifacts are ignored.
+m3_implementation/test_result/**/__pycache__/
+m3_implementation/test_result/**/*.log
+m3_implementation/test_result/**/*.log.err
+m3_implementation/test_result/**/*.zip
+m3_implementation/test_result/hallucination_result/original_eval_238/captured_cases_full_backup.jsonl
+latency_log.csv
 
 # Empty __init__.py placeholders added for M2 package imports
 m2_multimodal_rag/__init__.py

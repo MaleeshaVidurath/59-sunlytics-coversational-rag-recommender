@@ -1,0 +1,10 @@
+{
+  "model": "twitter-roberta-base-sentiment-latest (fine-tuned)",
+  "dataset": "cardiffnlp/tweet_eval sentiment (SemEval 2017) \u2014 preprocessed",
+  "test_samples": 12241,
+  "accuracy": 0.711,
+  "f1_macro": 0.7131,
+  "f1_negative": 0.7478,
+  "f1_neutral": 0.6799,
+  "f1_positive": 0.7116
+}

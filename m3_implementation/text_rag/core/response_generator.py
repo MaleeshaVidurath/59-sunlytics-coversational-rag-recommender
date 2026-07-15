@@ -52,6 +52,10 @@ FASHION_CONTEXT = (
     "'top', 'jacket' etc. so it is clear you are discussing clothing.\n\n"
 )
 
+_HISTORICAL_ITEM_NOTE = (
+    "Note: This item is from a previous recommendation round, not the current discussion.\n"
+)
+
 
 # ── Prompt templates ───────────────────────────────────────────────────────────
 
@@ -130,14 +134,15 @@ Write a recommendation response:
 
 def _build_attribute_prompt(evidence: dict, strictness: int = 0) -> str:
     """Prompt for answering attribute questions."""
-    article = evidence.get("article") or {}
-    facts   = evidence.get("extracted_facts", {})
-    topic   = evidence.get("attribute_topic", "general_details")
-    user_msg= evidence.get("user_message", "")
+    article        = evidence.get("article") or {}
+    facts          = evidence.get("extracted_facts", {})
+    topic          = evidence.get("attribute_topic", "general_details")
+    user_msg       = evidence.get("user_message", "")
+    use_historical = evidence.get("use_historical_items", False)
 
     facts_text = "\n".join(f"  {k}: {v}" for k, v in facts.items() if v)
     if not facts_text:
-        facts_text = f"  Description: {article.get('material_description','No description available')[:300]}"
+        facts_text = f"  Description: {(article.get('material_description') or 'No description available')[:300]}"
 
     strictness_instruction = {
         0: "Answer naturally and helpfully.",
@@ -145,11 +150,16 @@ def _build_attribute_prompt(evidence: dict, strictness: int = 0) -> str:
         2: "STRICTEST MODE: Quote the relevant fact directly and add nothing else.",
     }[strictness]
 
+    historical_note = (
+        _HISTORICAL_ITEM_NOTE
+        if use_historical else ""
+    )
+
     return FASHION_CONTEXT + f"""You are a fashion shopping assistant.
 {strictness_instruction}
 
 User asked: "{user_msg}"
-About item: {article.get('name','')} ({article.get('colour','')} {article.get('type','')})
+{historical_note}About item: {article.get('name','')} ({article.get('colour','')} {article.get('type','')})
 
 EVIDENCE — use ONLY these facts:
 {facts_text}
@@ -159,12 +169,14 @@ Answer the question in 1-2 sentences. Do not invent information not in the facts
 
 def _build_comparison_prompt(evidence: dict, strictness: int = 0) -> str:
     """Prompt for comparing two or more items."""
-    item_a    = evidence.get("item_a") or {}
-    item_b    = evidence.get("item_b") or {}
-    facts     = evidence.get("comparison_facts", {})
-    dim       = evidence.get("comparison_dimension", "overall")
-    user_msg  = evidence.get("user_message", "")
-    items_all = evidence.get("items_all")
+    item_a         = evidence.get("item_a") or {}
+    item_b         = evidence.get("item_b") or {}
+    facts          = evidence.get("comparison_facts", {})
+    dim            = evidence.get("comparison_dimension", "overall")
+    user_msg       = evidence.get("user_message", "")
+    items_all      = evidence.get("items_all")
+    use_historical = evidence.get("use_historical_items", False)
+    historical_note = _HISTORICAL_ITEM_NOTE if use_historical else ""
 
     strictness_instruction = {
         0: "Compare them helpfully and clearly.",
@@ -188,7 +200,8 @@ def _build_comparison_prompt(evidence: dict, strictness: int = 0) -> str:
         items_text = "\n".join(item_lines)
         return (
             FASHION_CONTEXT
-            + f'\nUser asked: "{user_msg}"\n\n'
+            + f'\nUser asked: "{user_msg}"\n'
+            + (f"{historical_note}\n" if historical_note else "\n")
             + f"Compare all {len(items_all)} recommended items ({dim}):\n"
             + items_text
             + f"\n\n{strictness_instruction}\n"
@@ -206,7 +219,8 @@ def _build_comparison_prompt(evidence: dict, strictness: int = 0) -> str:
             cheapest = ranked[0]
             return (
                 FASHION_CONTEXT
-                + f'\nUser asked: "{user_msg}"\n\n'
+                + f'\nUser asked: "{user_msg}"\n'
+                + (f"{historical_note}\n" if historical_note else "\n")
                 + f"All {len(ranked)} recommended items from cheapest to most expensive:\n"
                 + price_lines
                 + f"\n\n{strictness_instruction}\n"
@@ -220,6 +234,7 @@ def _build_comparison_prompt(evidence: dict, strictness: int = 0) -> str:
 {strictness_instruction}
 
 User asked: "{user_msg}"
+{historical_note}
 Comparing two clothing items: {item_a.get('name','')} (Option 1) vs {item_b.get('name','')} (Option 2)
 Dimension to compare: {dim}
 
@@ -286,11 +301,17 @@ def _build_explanation_prompt(evidence: dict, strictness: int = 0) -> str:
     if evidence.get("articles"):
         return _build_explanation_all_prompt(evidence, strictness)
 
-    article       = evidence.get("article") or {}
-    matches       = evidence.get("confirmed_matches", [])
-    all_prefs     = evidence.get("matched_prefs", [])
-    prior         = evidence.get("prior_claims", [])
-    user_msg      = evidence.get("user_message", "")
+    article        = evidence.get("article") or {}
+    matches        = evidence.get("confirmed_matches", [])
+    all_prefs      = evidence.get("matched_prefs", [])
+    prior          = evidence.get("prior_claims", [])
+    user_msg       = evidence.get("user_message", "")
+    use_historical = evidence.get("use_historical_items", False)
+
+    historical_note = (
+        _HISTORICAL_ITEM_NOTE
+        if use_historical else ""
+    )
 
     item_name   = article.get("name", "this item")
     item_colour = article.get("colour", "")
@@ -367,7 +388,7 @@ def _build_explanation_prompt(evidence: dict, strictness: int = 0) -> str:
     return FASHION_CONTEXT + f"""You are a knowledgeable fashion shopping assistant.
 
 USER QUESTION: "{user_msg}"
-
+{historical_note}
 ITEM BEING EXPLAINED:
   Name:        {item_name}
   Type:        {item_type}
@@ -398,14 +419,19 @@ STRICT RULES:
 
 def _build_detail_prompt(evidence: dict, strictness: int = 0) -> str:
     """Prompt for presenting full item details."""
-    article = evidence.get("article") or {}
-    user_msg= evidence.get("user_message", "")
+    article        = evidence.get("article") or {}
+    user_msg       = evidence.get("user_message", "")
+    use_historical = evidence.get("use_historical_items", False)
+    historical_note = (
+        _HISTORICAL_ITEM_NOTE
+        if use_historical else ""
+    )
 
     desc = article.get("material_description", "")[:300]
 
     return FASHION_CONTEXT + f"""You are a fashion shopping assistant.
 User asked: "{user_msg}"
-
+{historical_note}
 Clothing item details (use ONLY these facts):
   Name:    {article.get('name','')}
   Type:    {article.get('type','')}
