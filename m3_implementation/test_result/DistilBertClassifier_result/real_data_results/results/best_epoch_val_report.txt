@@ -1,0 +1,16 @@
+Best epoch: 3
+
+                     precision    recall  f1-score   support
+
+    INITIAL_REQUEST     0.9838    0.9722    0.9779      1185
+         REFINEMENT     0.9484    0.9681    0.9582       627
+ ATTRIBUTE_QUESTION     0.9468    0.9105    0.9283       313
+    EXPLANATION_WHY     1.0000    1.0000    1.0000       498
+         COMPARISON     0.8949    0.9465    0.9200       243
+SELECTION_REFERENCE     0.9910    1.0000    0.9955       220
+           FEEDBACK     1.0000    0.9925    0.9962       401
+           CHITCHAT     1.0000    1.0000    1.0000       498
+
+           accuracy                         0.9757      3985
+          macro avg     0.9706    0.9737    0.9720      3985
+       weighted avg     0.9760    0.9757    0.9757      3985

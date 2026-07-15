@@ -683,19 +683,26 @@ def is_fashion_relevant(message: str) -> tuple:
 # Maps user language to exact values from sample_articles.csv
 
 _COLOUR_MAP = {
-    # Multi-word first
-    "dark blue": "Dark Blue", "light blue": "Light Blue",
-    "light pink": "Light Pink", "dark pink": "Dark Pink",
-    "dark green": "Dark Green", "dark grey": "Dark Grey",
-    "dark gray": "Dark Grey", "light grey": "Light Grey",
+    # Multi-word first (checked before single-word to avoid partial matches)
+    "dark blue": "Dark Blue",     "light blue": "Light Blue",
+    "light pink": "Light Pink",   "dark pink": "Dark Pink",
+    "dark green": "Dark Green",   "dark grey": "Dark Grey",
+    "dark gray": "Dark Grey",     "light grey": "Light Grey",
     "light green": "Light Green", "light purple": "Light Purple",
-    "off white": "Off White", "off-white": "Off White",
+    "dark red": "Dark Red",       "dark orange": "Dark Orange",
+    "dark yellow": "Dark Yellow", "dark purple": "Dark Purple",
+    "dark turquoise": "Dark Turquoise",
+    "light beige": "Light Beige", "light orange": "Light Orange",
+    "light yellow": "Light Yellow","light red": "Light Red",
+    "light turquoise": "Light Turquoise",
+    "off white": "Off White",     "off-white": "Off White",
     "greyish beige": "Greyish Beige", "yellowish brown": "Yellowish Brown",
     # Single word
     "black": "Black", "white": "White", "red": "Red", "blue": "Blue",
     "pink": "Pink", "green": "Green", "yellow": "Yellow", "beige": "Beige",
     "grey": "Grey", "gray": "Grey", "brown": "Yellowish Brown",
     "orange": "Orange", "purple": "Purple", "turquoise": "Turquoise",
+    "bronze": "Bronze/Copper", "copper": "Bronze/Copper",
     "navy": "Dark Blue", "cream": "Off White", "ivory": "Off White",
     "teal": "Dark Green", "coral": "Dark Pink", "khaki": "Greenish Khaki",
     "camel": "Beige", "burgundy": "Dark Red", "lilac": "Light Purple",
@@ -769,6 +776,30 @@ _INDEX_GROUP_MAP = {
     "divided": "Divided", "teen": "Divided", "young": "Divided",
 }
 
+_GARMENT_GROUP_MAP = {
+    # Multi-word first (checked longest match first)
+    "denim jeans":    "Trousers Denim",
+    "denim trousers": "Trousers Denim",
+    "outdoor wear":   "Outdoor",
+    "night wear":     "Under-, Nightwear",
+    "night gown":     "Under-, Nightwear",
+    "socks and tights": "Socks and Tights",
+    # Single word — values verified against articles.csv garment_group_name column
+    "knitwear":    "Knitwear",
+    "knitted":     "Knitwear",
+    "swimwear":    "Swimwear",
+    "nightwear":   "Under-, Nightwear",
+    "sleepwear":   "Under-, Nightwear",
+    "lingerie":    "Under-, Nightwear",
+    "underwear":   "Under-, Nightwear",
+    "outerwear":   "Outdoor",
+    "accessories": "Accessories",
+    "footwear":    "Shoes",
+    "hosiery":     "Socks and Tights",
+    "tights":      "Socks and Tights",
+    "stockings":   "Socks and Tights",
+}
+
 _OCCASION_MAP = {
     "job interview": "work", "casual day": "casual day out",
     "date night": "date night", "girls night": "party",
@@ -802,6 +833,21 @@ _STYLE_MAP = {
     "bohemian": "relaxed", "boho": "relaxed",
     "streetwear": "casual", "street style": "casual",
 }
+
+_QUANTITY_DIGIT_PATTERN = re.compile(
+    r'\b([2-9])\s+(?:different\s+)?'
+    r'(?:dress|skirt|trouser|shirt|t-shirt|top|jacket|sweater|short|coat|'
+    r'blouse|boot|shoe|sandal|bag|scarf|jean|hoodie|cardigan|blazer|'
+    r'legging|sock|bra|item|piece|option|style)s?\b'
+)
+_QUANTITY_WORDS = {
+    "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9,
+}
+_QUANTITY_PRODUCT_HINTS = frozenset([
+    "dress", "skirt", "shirt", "top", "jacket", "sweater",
+    "shoe", "boot", "trouser", "blouse", "short", "coat",
+])
 
 _NUMBER_WORDS = {
     "five": 5, "ten": 10, "fifteen": 15, "twenty": 20,
@@ -882,6 +928,19 @@ def extract_entities_keyword(message: str) -> dict:
         if kw in msg:
             entities["index_group_name"] = val
             break
+    for kw, val in _GARMENT_GROUP_MAP.items():
+        if kw in msg:
+            entities["garment_group_name"] = val
+            break
+    # Quantity: digit pattern ("3 skirts") takes priority over word form ("three skirts")
+    qty_m = _QUANTITY_DIGIT_PATTERN.search(msg)
+    if qty_m:
+        entities["quantity"] = int(qty_m.group(1))
+    else:
+        for word, num in _QUANTITY_WORDS.items():
+            if re.search(rf'\b{word}\b', msg) and any(h in msg for h in _QUANTITY_PRODUCT_HINTS):
+                entities["quantity"] = num
+                break
     return entities
 
 
@@ -992,8 +1051,8 @@ EXTRACTION_PROMPT = """Extract fashion shopping attributes from this message.
 Return ONLY a JSON object. No explanation. No extra text.
 
 STRICT RULES:
-1. colour_group_name must be EXACTLY one of: Black, White, Red, Dark Red, Blue, Dark Blue, Light Blue, Pink, Light Pink, Dark Pink, Green, Dark Green, Light Green, Yellow, Dark Yellow, Beige, Grey, Dark Grey, Light Grey, Orange, Dark Orange, Purple, Light Purple, Turquoise, Gold, Silver, Off White, Yellowish Brown.
-   - pastel → Light Pink. Navy/midnight → Dark Blue. Earthy/warm toned → Yellowish Brown.
+1. colour_group_name must be EXACTLY one of: Black, White, Red, Dark Red, Light Red, Blue, Dark Blue, Light Blue, Pink, Light Pink, Dark Pink, Green, Dark Green, Light Green, Yellow, Dark Yellow, Light Yellow, Beige, Light Beige, Grey, Dark Grey, Light Grey, Orange, Dark Orange, Light Orange, Purple, Dark Purple, Light Purple, Turquoise, Dark Turquoise, Light Turquoise, Gold, Silver, Bronze/Copper, Off White, Yellowish Brown.
+   - pastel → Light Pink. Navy/midnight → Dark Blue. Earthy/warm toned → Yellowish Brown. Burgundy/wine/maroon → Dark Red. Mustard → Dark Yellow. Rust → Dark Orange. Bronze/copper → Bronze/Copper.
    - NEVER put pattern words (Floral, Stripe) in colour_group_name.
 2. product_type_name must be EXACTLY one of: Dress, Skirt, Trousers, Blouse, Shirt, Top, T-shirt, Vest top, Sweater, Hoodie, Jacket, Blazer, Cardigan, Shorts, Leggings/Tights, Sneakers, Boots, Sandals, Bag, Tote bag, Backpack, Scarf, Hat/beanie, Swimsuit, Bra, Heels, Flat shoes.
    - midi/maxi/mini skirt → Skirt. Midi/wrap/maxi dress → Dress. Activewear → Leggings/Tights.
@@ -1003,8 +1062,12 @@ STRICT RULES:
 5. occasion must be one of: casual, formal, work, gym, beach, party, wedding, date night, summer, winter.
    - graduation/prom/gala → formal. office/meeting/interview → work. workout/yoga → gym. holiday/resort → beach.
 6. style must be one of: casual, formal, smart casual, sporty, elegant, minimalist, classic, relaxed, trendy.
-7. Return {{}} for: greetings (hi, hello, thanks, ok, yes, no), questions about item properties (what material, what size), comparisons (which is better), feedback reactions (I love it, I hate it).
-8. Only include fields clearly stated. Do not invent or guess.
+7. garment_group_name must be EXACTLY one of: Knitwear, Swimwear, Accessories, Outdoor, Under-, Nightwear, Trousers Denim, Jersey Basic, Jersey Fancy, Skirts, Blouses, Shirts, Shorts, Trousers, Dresses Ladies, Shoes, Socks and Tights.
+   - knitwear/knitted items → Knitwear. denim jeans/denim trousers → Trousers Denim. swimwear/swimming → Swimwear. underwear/lingerie/sleepwear/nightwear → Under-, Nightwear. accessories/jewellery/belts/bags → Accessories. outerwear/outdoor jackets → Outdoor. footwear/shoes/boots/heels → Shoes. socks/tights/hosiery/stockings → Socks and Tights.
+   - Only include if the user clearly implies a garment group category. Do not guess.
+8. quantity must be an integer 2-9. Only include if user explicitly states a number of items.
+9. Return {{}} for: greetings (hi, hello, thanks, ok, yes, no), questions about item properties (what material, what size), comparisons (which is better), feedback reactions (I love it, I hate it).
+10. Only include fields clearly stated. Do not invent or guess.
 
 Examples:
 "Something floral in a pastel shade" → {{"graphical_appearance_name":"Front print","colour_group_name":"Light Pink"}}
@@ -1012,6 +1075,9 @@ Examples:
 "Under thirty pounds" → {{"price_max":30}}
 "For my sister graduation" → {{"occasion":"formal","style":"elegant"}}
 "Warm toned and earthy" → {{"colour_group_name":"Yellowish Brown"}}
+"Show me some knitwear" → {{"garment_group_name":"Knitwear"}}
+"I need 3 dark red dresses" → {{"colour_group_name":"Dark Red","product_type_name":"Dress","quantity":3}}
+"Something in bronze or copper tones" → {{"colour_group_name":"Bronze/Copper"}}
 "Thanks!" → {{}}
 "What material is it?" → {{}}
 "I love it" → {{}}

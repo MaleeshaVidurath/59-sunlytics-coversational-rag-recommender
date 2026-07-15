@@ -49,6 +49,9 @@ from memory.models.schemas import (
     RecommendationDocument, now_utc
 )
 from memory.db.mongo import get_db, get_collection_name
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from adaptive_rag.distilbert_training.predict import Predictor
 
 
 def _load_distilbert_predictor():
@@ -120,6 +123,7 @@ class MemoryPipeline:
         self.user_mgr    = UserManager()
         self.enricher    = EnrichmentLayer()
 
+        self.predictor: "Predictor | None" = None
         if distilbert_predictor is not None:
             self.predictor = distilbert_predictor
             print("[MemoryPipeline] Using provided DistilBERT predictor.")
@@ -465,14 +469,14 @@ class MemoryPipeline:
             history=history,
             session_id=active_session_id,
             confidence=confidence,
+            user_id=user_id,
         )
 
         # Override retrieval strategy with CSE result
         _prior_strategy = retrieval_strategy
         retrieval_strategy = _cse_result.tier
 
-        print(f"[CSE] score={_cse_result.score:.4f} "
-              f"tier={_cse_result.tier} override={_cse_result.override} "
+        print(f"[CSE] tier={_cse_result.tier} override={_cse_result.override} "
               f"full_sub={_cse_result.full_subtype} partial_sub={_cse_result.partial_subtype}")
         if _cse_result.override:
             print(f"[CSE] *** STRATEGY OVERRIDE: "
@@ -493,7 +497,9 @@ class MemoryPipeline:
             label=label,
             retrieval_strategy=retrieval_strategy,
             confidence=confidence,
-            used_rules=used_rules
+            used_rules=used_rules,
+            full_subtype=_cse_result.full_subtype,
+            partial_subtype=_cse_result.partial_subtype,
         )
         user_turn = await self.turn_mgr.add_user_turn(
             session_id=active_session_id,
@@ -504,28 +510,50 @@ class MemoryPipeline:
         )
 
         # ── Step 7: Enrich with memory context ────────────────────────────
-        print(f"[DBG-3] ENRICHMENT: calling for label={label}")
-        print(f"[PIPELINE-6] calling enricher...")
-        enriched = await self.enricher.enrich(
-            label=label,
-            retrieval_strategy=retrieval_strategy,
-            session_id=active_session_id,
-            user_id=user_id,
-            current_message=message,
-            entities=entities
-        )
-
-        # ── Merge CSE excluded_ids into retrieval_input ────────────────────
-        # For INITIAL_REQUEST FULL_WITH_EXCLUSIONS: article_ids from similar
-        # prior questions in this session are added to exclude_ids so the
-        # retrieval engine does not repeat already-seen products.
-        if _cse_result.excluded_ids and enriched.get("retrieval_input"):
-            _existing_excl = enriched["retrieval_input"].get("exclude_ids") or []
-            enriched["retrieval_input"]["exclude_ids"] = list(
-                set(_existing_excl + _cse_result.excluded_ids)
+        # For ATTRIBUTE_QUESTION, CSE already called enrichment internally.
+        # Reuse its result to avoid a duplicate round-trip.
+        if label in ("ATTRIBUTE_QUESTION", "COMPARISON", "EXPLANATION_WHY", "SELECTION_REFERENCE") and _cse_result.enriched_retrieval_input is not None:
+            print(f"[PIPELINE] {label}: using CSE-cached enrichment (skipping duplicate call)")
+            enriched = {
+                "label":              label,
+                "retrieval_strategy": retrieval_strategy,
+                "retrieval_input":    _cse_result.enriched_retrieval_input,
+                "memory_context":     _cse_result.enriched_memory_context or {},
+                "side_effects":       _cse_result.enriched_side_effects or [],
+            }
+            _mc = enriched["memory_context"]
+            if _mc.get("use_historical_items"):
+                _hist = _mc.get("historical_items", [])
+                _names = [it.get("prod_name", "?") for it in _hist]
+                print(f"[PIPELINE] historical_items={_names}  use_historical_items=True")
+            else:
+                print("[PIPELINE] use_historical_items=False (item from currently_discussing)")
+        else:
+            print(f"[DBG-3] ENRICHMENT: calling for label={label}")
+            print("[PIPELINE-6] calling enricher...")
+            enriched = await self.enricher.enrich(
+                label=label,
+                retrieval_strategy=retrieval_strategy,
+                session_id=active_session_id,
+                user_id=user_id,
+                current_message=message,
+                entities=entities
             )
-            print(f"[PIPELINE] Merged {len(_cse_result.excluded_ids)} "
-                  f"CSE excluded_ids into retrieval_input")
+
+        # ── Patch CSE subtypes and excluded_ids into retrieval_input ─────────
+        if enriched.get("retrieval_input"):
+            _ri = enriched["retrieval_input"]
+            # Subtypes give the RAG/assembler finer-grained routing info beyond
+            # the broad FULL/PARTIAL/NO tier — e.g. FULL_WITH_EXCLUSIONS vs
+            # FULL_STANDARD, or CACHED_RESULT vs PARTIAL_CONTEXT_LOOKUP.
+            _ri["full_subtype"]    = _cse_result.full_subtype
+            _ri["partial_subtype"] = _cse_result.partial_subtype
+
+            if _cse_result.excluded_ids:
+                _existing_excl = _ri.get("exclude_ids") or []
+                _ri["exclude_ids"] = list(set(_existing_excl + _cse_result.excluded_ids))
+                print(f"[PIPELINE] Merged {len(_cse_result.excluded_ids)} "
+                      f"CSE excluded_ids into retrieval_input")
 
         # ── Cached recommendation injection (similar INITIAL_REQUEST) ──────
         # When CSE detects a similar prior question and returns PARTIAL,
@@ -583,21 +611,15 @@ class MemoryPipeline:
             # Always present, may be empty list
             "side_effects": enriched.get("side_effects", []),
 
-            # Context Sufficiency Evaluation result — scientific tier justification
-            # Dimensions: D_self D_items D_recency D_completeness
+            # Context Sufficiency Evaluation result — tier routing decision
             "cse": {
-                "score":               _cse_result.score,
-                "tier":                _cse_result.tier,
-                "prior_strategy":      _cse_result.prior_strategy,
-                "override":            _cse_result.override,
-                "full_subtype":        _cse_result.full_subtype,
-                "partial_subtype":     _cse_result.partial_subtype,
-                "excluded_ids":        _cse_result.excluded_ids,
-                "d_self_sufficient":   _cse_result.d_self_sufficient,
-                "d_items_available":   _cse_result.d_items_available,
-                "d_info_recency":      _cse_result.d_info_recency,
-                "d_info_completeness": _cse_result.d_info_completeness,
-                "rationale":           _cse_result.rationale,
+                "tier":           _cse_result.tier,
+                "prior_strategy": _cse_result.prior_strategy,
+                "override":       _cse_result.override,
+                "full_subtype":   _cse_result.full_subtype,
+                "partial_subtype":_cse_result.partial_subtype,
+                "excluded_ids":   _cse_result.excluded_ids,
+                "rationale":      _cse_result.rationale,
             },
             "_debug_enriched": enriched,  # temp debug key
 
@@ -662,12 +684,12 @@ class MemoryPipeline:
                   f"{len(items)} passed ItemInContext validation")
             if len(items) >= 1:
                 import string as _string
-                _discussing = {
-                    f"item_{_string.ascii_lowercase[i]}": item.model_dump()
-                    for i, item in enumerate(items)
-                }
-                if len(items) == 1:
-                    _discussing["item_b"] = None
+                _SLOTS = [f"item_{c}" for c in _string.ascii_lowercase[:8]]
+                # Initialise all 8 slots to None so stale items from a previous
+                # turn (e.g. old item_c/item_d) are always cleared on every update.
+                _discussing = {k: None for k in _SLOTS}
+                for i, item in enumerate(items[:8]):
+                    _discussing[_SLOTS[i]] = item.model_dump()
                 print(f"[store_response] saving currently_discussing keys={list(_discussing.keys())}")
                 await self.session_mgr.update_dialogue_state(
                     session_id,
@@ -973,11 +995,9 @@ class MemoryPipeline:
                 "side_effects":     ["User kept existing recommendations"],
                 "classifier_input": classifier_input,
                 "cse": {
-                    "score": 0.95, "tier": "NO", "override": False,
+                    "tier": "NO", "override": False,
                     "full_subtype": None, "partial_subtype": None,
-                    "excluded_ids": [], "d_self_sufficient": 1.0,
-                    "d_items_available": 1.0, "d_info_recency": 1.0,
-                    "d_info_completeness": 1.0, "rationale": "User declined new recommendations.",
+                    "excluded_ids": [], "rationale": "User declined new recommendations.",
                 },
             }
 
@@ -1029,11 +1049,9 @@ class MemoryPipeline:
             "side_effects":     enriched.get("side_effects", []) + ["New recommendations requested by user"],
             "classifier_input": classifier_input,
             "cse": {
-                "score": 0.10, "tier": "FULL", "override": False,
+                "tier": "FULL", "override": False,
                 "full_subtype": "FULL_WITH_EXCLUSIONS", "partial_subtype": None,
                 "excluded_ids": pending_excluded_ids,
-                "d_self_sufficient": 0.0, "d_items_available": 0.0,
-                "d_info_recency": 0.0, "d_info_completeness": 0.0,
                 "rationale": "User explicitly requested new recommendations — FULL retrieval with prior exclusions.",
             },
         }
@@ -1087,8 +1105,12 @@ class MemoryPipeline:
             return True, None
 
         all_turns = await self.turn_mgr.get_all_session_turns(session_id)
+        _ITEM_INTRODUCING = {
+            "INITIAL_REQUEST", "REFINEMENT",
+            "SELECTION_REFERENCE", "ATTRIBUTE_QUESTION",
+        }
         has_prior_ir = any(
-            (t.get("classification") or {}).get("label") == "INITIAL_REQUEST"
+            (t.get("classification") or {}).get("label") in _ITEM_INTRODUCING
             for t in all_turns
         )
         if has_prior_ir:

@@ -193,6 +193,95 @@ def _should_skip_sentence(sentence: str) -> bool:
     return bool(_SKIP_RE.search(sentence))
 
 
+# ── Exact-value verification helpers (two-sided Gates 6/7) ────────────────────
+# Name and price are exact values: they are either present in the item's
+# sentence or they are not. String logic decides both directions — these
+# fields NEVER go to NLI (DeBERTa is unreliable on numbers and proper names:
+# "priced at £11.08" vs "£13.58" usually scores neutral, not contradiction).
+
+def _norm_ws(text: str) -> str:
+    """Collapses whitespace runs — catalog names may contain double spaces."""
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+_catalog_names = None
+
+def _get_catalog_names() -> frozenset:
+    """All prod_name values from the articles CSV (original casing).
+    Used to recognise a hallucinated product name that belongs to a real
+    catalog item outside the current evidence."""
+    global _catalog_names
+    if _catalog_names is None:
+        names = set()
+        try:
+            import csv
+            from text_rag.config import ARTICLES_CSV
+            with open(ARTICLES_CSV, newline='', encoding='utf-8') as f:
+                for row in csv.DictReader(f):
+                    n = _norm_ws(row.get('prod_name') or '')
+                    if len(n) >= 5:
+                        names.add(n)
+            print(f"[HallucinationChecker] {len(names)} catalog names loaded for name gate")
+        except Exception as e:
+            print(f"[HallucinationChecker] catalog names unavailable: {e}")
+        _catalog_names = frozenset(names)
+    return _catalog_names
+
+
+_SLOT_GENERIC_STARTS = ("this ", "that ", "these ", "those ", "it ", "the ",
+                        "here ", "there ", "i ", "we ", "you ")
+
+def _find_wrong_name(sentence: str, true_name: str, evidence: dict) -> str | None:
+    """Two-sided name check: returns a DIFFERENT product name found in the
+    sentence, or None if no other name is present. Only called after the true
+    name failed verbatim containment."""
+    sent_norm = _norm_ws(sentence).lower()
+    true_norm = _norm_ws(true_name).lower()
+
+    def is_diff(candidate: str) -> bool:
+        c = _norm_ws(candidate).lower()
+        # substring relations (London dress / SS London dress) are ambiguous
+        # truncations, not clear contradictions — never flag those
+        return bool(c) and c != true_norm and c not in true_norm and true_norm not in c
+
+    # 1. Names of other items in the SAME evidence — catches cross-item swaps
+    other_names = []
+    for it in (evidence.get("items") or []):
+        other_names.append(it.get("name", ""))
+    for key in ("article", "item_a", "item_b"):
+        if evidence.get(key):
+            other_names.append(evidence[key].get("name", ""))
+    for n in other_names:
+        if n and is_diff(n) and _norm_ws(n).lower() in sent_norm:
+            return n
+
+    # 2. Structured option sentences ("Option 1: <name>, ..." / "<name>: ...")
+    #    always carry a £ price — parse the name slot and compare.
+    if "£" in sentence:
+        m = re.match(r"\s*(?:option\s+\d+\s*:\s*)?([^,:£]{3,60})[,:]",
+                     _norm_ws(sentence), re.IGNORECASE)
+        if m:
+            slot = m.group(1).strip()
+            if (slot and is_diff(slot)
+                    and not slot.lower().startswith(_SLOT_GENERIC_STARTS)):
+                return slot
+
+    # 3. Known catalog names (case-sensitive match to avoid common-word hits)
+    for n in _get_catalog_names():
+        if is_diff(n) and n in sentence:
+            return n
+    return None
+
+
+def _find_wrong_price(sentence: str, true_price: str) -> str | None:
+    """Two-sided price check: returns a differing £value found in the
+    sentence, or None if no £value is present. Only called after the true
+    price failed verbatim containment."""
+    sent_prices = re.findall(r"£[\d,]+(?:\.\d{1,2})?", sentence)
+    wrong = [p for p in sent_prices if p != true_price]
+    return wrong[0] if wrong else None
+
+
 # ── Evidence flattening ────────────────────────────────────────────────────────
 
 def _flatten_evidence(evidence: dict) -> list[dict]:
@@ -424,6 +513,111 @@ class HallucinationChecker:
                 print(f"[HALL-CHECK] SKIP [{fact_field}] sentence type: '{best_sentence[:60]}'")
                 continue
 
+            # Name/price: exact values — string logic decides BOTH directions
+            # (two-sided gates). These fields never reach NLI: DeBERTa produces
+            # false contradictions on correct values in structured sentences AND
+            # misses wrong values (it scores "£11.08" vs "£13.58" as neutral).
+            # They also deliberately BYPASS the MiniLM similarity gate below:
+            # a swapped name destroys the very similarity the gate measures,
+            # so low similarity is itself a symptom of this hallucination type.
+            #
+            # Locked items (catalog lock map): the locked sentence is
+            #   authoritative for this item — verify against it directly.
+            # Unlocked facts (compare/explanation/detail): verify at response
+            #   level — only flag when the true value is absent from the WHOLE
+            #   response and a different value of the same kind is present.
+            #   (Response-level check avoids false flags when MiniLM's free
+            #   search pairs item A's fact with item B's sentence, and avoids
+            #   flagging derived values like "£4.04 more expensive".)
+            is_locked = bool(option_sentence_map) and fact_item is not None \
+                and fact_item in option_sentence_map
+
+            def _record_pass():
+                results.append({
+                    "fact_field": fact_field, "fact_text": fact_text,
+                    "sentence": best_sentence, "sentence_number": sent_num,
+                    "similarity": similarity,
+                    "nli_scores": {"contradiction": 0.0, "neutral": 0.0, "entailment": 1.0},
+                    "passed": True, "is_contradiction": False,
+                })
+
+            def _record_flag(found_value):
+                result = {
+                    "fact_field": fact_field, "fact_text": fact_text,
+                    "sentence": best_sentence, "sentence_number": sent_num,
+                    "similarity": similarity,
+                    "nli_scores": {"contradiction": 1.0, "neutral": 0.0, "entailment": 0.0},
+                    "passed": False, "is_contradiction": True,
+                    "method": "containment", "found_value": found_value,
+                }
+                results.append(result)
+                flagged.append(result)
+                contradicted_fields.add(fact_field)
+
+            if fact_field == "name":
+                name_m = re.search(r"The item is called (.+?)\.", fact_text)
+                if name_m:
+                    true_name = name_m.group(1)
+                    if _norm_ws(true_name).lower() in _norm_ws(best_sentence).lower():
+                        print(f"[HALL-CHECK] PASS [name] verbatim: '{true_name[:50]}'")
+                        _record_pass()
+                    elif is_locked:
+                        # Locked sentence is this item's sentence — a different
+                        # name here is a contradiction even if the true name
+                        # appears elsewhere (cross-item swap).
+                        wrong_name = _find_wrong_name(best_sentence, true_name, evidence)
+                        if wrong_name is not None:
+                            print(f"[HALL-CHECK] FLAG [name] locked-sentence: "
+                                  f"expected '{true_name[:40]}' found '{wrong_name[:40]}'")
+                            total_score += 1.0
+                            _record_flag(wrong_name)
+                        else:
+                            print("[HALL-CHECK] SKIP [name] not stated in locked sentence")
+                    elif _norm_ws(true_name).lower() in _norm_ws(response_text).lower():
+                        print("[HALL-CHECK] SKIP [name] correct elsewhere in response")
+                    else:
+                        # True name absent from the ENTIRE response — if another
+                        # product name is present, the LLM renamed the item.
+                        wrong_name = (_find_wrong_name(best_sentence, true_name, evidence)
+                                      or _find_wrong_name(response_text, true_name, evidence))
+                        if wrong_name is not None:
+                            print(f"[HALL-CHECK] FLAG [name] response-level: "
+                                  f"expected '{true_name[:40]}' found '{wrong_name[:40]}'")
+                            total_score += 1.0
+                            _record_flag(wrong_name)
+                        else:
+                            print("[HALL-CHECK] SKIP [name] not stated in response")
+                    continue
+
+            if fact_field == "price":
+                price_m = re.search(r"£[\d,]+(?:\.\d{1,2})?", fact_text)
+                if price_m:
+                    true_price = price_m.group(0)
+                    if true_price in best_sentence:
+                        print(f"[HALL-CHECK] PASS [price] verbatim: '{true_price}'")
+                        _record_pass()
+                    elif is_locked:
+                        wrong_price = _find_wrong_price(best_sentence, true_price)
+                        if wrong_price is not None:
+                            print(f"[HALL-CHECK] FLAG [price] locked-sentence: "
+                                  f"expected '{true_price}' found '{wrong_price}'")
+                            total_score += 1.0
+                            _record_flag(wrong_price)
+                        else:
+                            print("[HALL-CHECK] SKIP [price] not stated in locked sentence")
+                    elif true_price in response_text:
+                        print("[HALL-CHECK] SKIP [price] correct elsewhere in response")
+                    else:
+                        wrong_price = _find_wrong_price(response_text, true_price)
+                        if wrong_price is not None:
+                            print(f"[HALL-CHECK] FLAG [price] response-level: "
+                                  f"expected '{true_price}' found '{wrong_price}'")
+                            total_score += 1.0
+                            _record_flag(wrong_price)
+                        else:
+                            print("[HALL-CHECK] SKIP [price] not stated in response")
+                    continue
+
             # Skip if LLM similarity is too low — field not mentioned in response
             if similarity < _MIN_SIMILARITY:
                 print(
@@ -431,36 +625,6 @@ class HallucinationChecker:
                     f"(sim={similarity:.3f}): '{best_sentence[:50]}'"
                 )
                 continue
-
-            # Name/price: string containment is more reliable than NLI for exact values.
-            # DeBERTa produces false contradictions when items share a name or when the
-            # sentence has long descriptive tails after the structured "Name, Colour, £price" part.
-            # If the exact value is present verbatim in the sentence it cannot be a hallucination.
-            if fact_field == "name":
-                name_m = re.search(r"The item is called (.+?)\.", fact_text)
-                if name_m and name_m.group(1).lower() in best_sentence.lower():
-                    print(f"[HALL-CHECK] PASS [name] verbatim: '{name_m.group(1)[:50]}'")
-                    results.append({
-                        "fact_field": fact_field, "fact_text": fact_text,
-                        "sentence": best_sentence, "sentence_number": sent_num,
-                        "similarity": similarity,
-                        "nli_scores": {"contradiction": 0.0, "neutral": 0.0, "entailment": 1.0},
-                        "passed": True, "is_contradiction": False,
-                    })
-                    continue
-
-            if fact_field == "price":
-                price_m = re.search(r"£[\d,.]+", fact_text)
-                if price_m and price_m.group(0) in best_sentence:
-                    print(f"[HALL-CHECK] PASS [price] verbatim: '{price_m.group(0)}'")
-                    results.append({
-                        "fact_field": fact_field, "fact_text": fact_text,
-                        "sentence": best_sentence, "sentence_number": sent_num,
-                        "similarity": similarity,
-                        "nli_scores": {"contradiction": 0.0, "neutral": 0.0, "entailment": 1.0},
-                        "passed": True, "is_contradiction": False,
-                    })
-                    continue
 
             # Avoid duplicate (fact, sentence) pair checks
             pair_key = (fact_text, best_sentence)

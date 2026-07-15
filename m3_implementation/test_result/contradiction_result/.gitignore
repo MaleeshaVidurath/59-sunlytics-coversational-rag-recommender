@@ -1,0 +1,7 @@
+# Diagnostic logs and transient/derived artifacts — not part of the deliverable
+__pycache__/
+*.log
+*.log.err
+smoke_results.json
+results_ours_fixed.json
+captured_sessions_*.jsonl
