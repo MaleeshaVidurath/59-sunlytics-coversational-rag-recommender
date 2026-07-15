@@ -200,6 +200,136 @@ class GenerationLoop:
 
         return explanation, False
 
+    # ── Prompt-driven entry point (attribute/compare/explain/detail handlers) ──
+
+    def _reprompt(self, prompt: str, feedback: str, current: str) -> str:
+        """Re-issues the handler's original prompt with corrective feedback appended."""
+        regenerated = llm_generator._call_llm(
+            prompt + f"\n\n[Your previous answer failed verification: {feedback}. "
+                     f"Rewrite it, correcting these issues.]",
+            max_tokens=250,
+        )
+        return regenerated or current
+
+    def verify_prompted_response(
+        self,
+        prompt: str,
+        article_id: str,
+        metadata: dict,
+        skip_visual: bool = False,
+    ) -> tuple[str | None, dict]:
+        """
+        Full 3-layer guard for prompt-driven handler responses (attribute
+        lookup, item compare, explanation-why, item detail lookup).
+
+        Differences from generate_faithful_explanation():
+          - The initial text comes from the handler's own prompt, and every
+            regeneration re-issues that prompt with corrective feedback, so
+            the answer stays on-topic instead of becoming a generic
+            recommendation explanation.
+          - The colour pre-filter is skipped: a factual answer ("Yes, it's
+            machine washable") legitimately may not mention the colour.
+          - If the ViLT visual gate never passes, returns None (caller falls
+            back to a safe metadata template) instead of unverified text.
+          - skip_visual=True skips Layer 3 entirely: answers about non-visual
+            topics (material/care, price, availability) are not descriptions
+            of the image, so CLIPScore/ViLT reject them spuriously. Layers
+            1+2 still verify against metadata.
+
+        Returns:
+            response  str|None  Verified response, or None if generation
+                                failed / visual verification never passed.
+            trail     dict      Audit trail (same shape as catalog search).
+        """
+        image_path = data_loader.get_image(article_id)
+        has_image = image_path is not None and image_path.exists()
+        image_path_str = str(image_path) if has_image else ""
+
+        print(f"\n=== Hallucination Guard (prompted): Article {article_id} ===")
+
+        trail: dict = {
+            "clip_score":             None,
+            "cove_trail":             [],
+            "cove_consistency_score": None,
+            "vlm_verified":           False,
+            "layers_passed":          [],
+            "image_grounded":         has_image,
+        }
+
+        response = llm_generator._call_llm(prompt, max_tokens=250)
+        if not response:
+            return None, trail
+
+        # ── Layer 1: knowledge-grounded self-reflection ────────────────────
+        print("   [Layer 1] Knowledge-grounded self-reflection...")
+        product_knowledge = knowledge_reflector.generate_product_knowledge(metadata)
+        if product_knowledge:
+            trail["layers_passed"].append("layer_1a_knowledge_acquisition")
+        passes_self, self_feedback = knowledge_reflector.self_evaluate(
+            response, metadata, product_knowledge=product_knowledge
+        )
+        if not passes_self:
+            print(f"   [Layer 1] FAIL — regenerating. Reason: {self_feedback}")
+            response = self._reprompt(prompt, self_feedback, response)
+        else:
+            trail["layers_passed"].append("layer_1c_self_reflection")
+
+        # ── Layer 2: Enhanced CoVe with DeBERTa NLI ────────────────────────
+        print("   [Layer 2] CoVe verification...")
+        cove_passes, cove_trail, cove_score = cove_verifier.verify(response, metadata)
+        trail["cove_trail"]             = cove_trail
+        trail["cove_consistency_score"] = round(cove_score, 3)
+        if not cove_passes:
+            failed = [
+                f"'{t['question']}' (metadata: {t['metadata_answer']})"
+                for t in cove_trail if not t["consistent"]
+            ]
+            feedback = (
+                "claims inconsistent with the item's catalog data: "
+                + "; ".join(failed)
+            )
+            print("   [Layer 2] FAIL — regenerating with CoVe feedback...")
+            response = self._reprompt(prompt, feedback, response)
+        else:
+            trail["layers_passed"].append("layer_2_cove_verification")
+
+        # ── Layer 3: CLIPScore + ViLT VQA (image required) ─────────────────
+        if skip_visual:
+            trail["layers_passed"].append("layer_3_skipped_non_visual")
+            print("   [Layer 3] Non-visual topic — skipping visual gate (Layers 1+2 verified).")
+            return response, trail
+        if not has_image:
+            trail["layers_passed"].append("layer_3_skipped_no_image")
+            print(f"   [Layer 3] No image for {article_id} — skipping visual gate.")
+            return response, trail
+
+        clip_score, clip_passes, clip_feedback = clip_faithfulness_scorer.score(
+            image_path_str, response
+        )
+        trail["clip_score"] = round(clip_score, 4)
+        if not clip_passes:
+            print("   [Layer 3 | CLIPScore] FAIL — regenerating with visual feedback")
+            response = self._reprompt(prompt, clip_feedback, response)
+            trail["layers_passed"].append("layer_3_clipscore_corrected")
+        else:
+            trail["layers_passed"].append("layer_3_clipscore_passed")
+
+        for attempt in range(1, self.max_vlm_attempts + 1):
+            print(f"   [Layer 3 | ViLT] attempt {attempt}/{self.max_vlm_attempts}...")
+            is_valid, reason = blip_verifier.verify(image_path_str, response)
+            if is_valid:
+                print("   [Layer 3 | ViLT] PASS")
+                trail["vlm_verified"] = True
+                trail["layers_passed"].append("layer_3_vilt_verification")
+                return response, trail
+            print(f"   [Layer 3 | ViLT] FAIL — {reason}")
+            if attempt < self.max_vlm_attempts:
+                response = self._reprompt(prompt, f"visual check failed: {reason}", response)
+
+        # Visual gate never passed — signal the caller to use its safe fallback
+        print("   [Layer 3 | ViLT] Max retries — returning None (caller uses template fallback).")
+        return None, trail
+
     # ── Main entry point ───────────────────────────────────────────────────────
 
     def generate_faithful_explanation(

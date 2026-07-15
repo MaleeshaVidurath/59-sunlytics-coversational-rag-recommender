@@ -216,6 +216,30 @@ class CoVeVerifier:
 
         return passes, trail, consistency_score
 
+    # ------------------------------------------------------------------ #
+    # Prior-claim consistency check (used by explanation_generate)
+    # ------------------------------------------------------------------ #
+    def check_claim_consistency(self, text: str, claim_text: str) -> tuple[bool, float]:
+        """
+        NLI check: does `text` contradict a claim made in an earlier turn?
+
+        Premise    = the prior claim (already told to the customer)
+        Hypothesis = the newly generated text
+
+        Returns (is_consistent, contradiction_score).
+        Falls back to True (pass) if the NLI model is unavailable.
+        """
+        nli = _get_nli()
+        if nli is None:
+            return True, 0.0
+        try:
+            scores = nli.predict([(claim_text, text[:300])])
+            contra_score = float(scores[0][_NLI_CONTRADICTION_IDX])
+            return contra_score < _NLI_CONTRADICTION_THRESHOLD, contra_score
+        except Exception as e:
+            print(f"   [Claim | NLI] Prediction failed: {e} — defaulting to PASS")
+            return True, 0.0
+
 
 # Singleton
 cove_verifier = CoVeVerifier()
