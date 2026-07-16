@@ -21,10 +21,17 @@ class CatalogSearchPayload(BaseModel):
     penalties: Dict[str, List[str]] = Field(default_factory=dict)
     soft_constraints: Dict[str, Any] = Field(default_factory=dict)
     purchase_history_hints: Dict[str, Any] = Field(default_factory=dict)
+    # None (not 2) so the handler can tell "not sent" from an explicit request
+    # and fall through to quantity / message parsing / its own default.
+    num_items: Optional[int] = Field(default=None, ge=1, le=6)
+    quantity: Optional[int] = None  # M3's LLM-extracted requested item count (clamped in handler)
 
 class AttributeLookupPayload(BaseModel):
     article_id: str
     attribute_topic: str
+    # Full item data captured by M3's session memory at recommendation time.
+    # Lets M2 answer follow-ups even when the article is missing locally.
+    context_article: Optional[Dict[str, Any]] = None
 
 ComparisonDimension = Literal[
     "price", "quality", "style_and_occasion", "material", "colour", "fit", "overall"
@@ -35,6 +42,8 @@ class ItemComparePayload(BaseModel):
     article_id_b: str
     comparison_dimension: ComparisonDimension
     preference_weights: Dict[str, float] = Field(default_factory=dict)
+    context_article_a: Optional[Dict[str, Any]] = None
+    context_article_b: Optional[Dict[str, Any]] = None
 
 class ClaimTemplate(BaseModel):
     claim_id: str
@@ -51,9 +60,11 @@ class ExplanationGeneratePayload(BaseModel):
     article_id: str
     prior_claims: List[ClaimTemplate] = Field(default_factory=list)
     matched_prefs: List[MatchedPrefTemplate] = Field(default_factory=list)
+    context_article: Optional[Dict[str, Any]] = None
 
 class ItemDetailLookupPayload(BaseModel):
     article_id: str
+    context_article: Optional[Dict[str, Any]] = None
 
 # Maps each action string to its expected payload class.
 # Used by the validator below to coerce and validate the payload
@@ -118,10 +129,6 @@ class RetrievalInputModel(BaseModel):
 # --- 3. Pipeline Request ---
 
 class PipelineRequest(BaseModel):
-    """
-    Model for the structured input from the m3 Memory Pipeline.
-    Strictly validates against the templates defined in retrieval_input_reference.pdf.
-    """
     retrieval_input: Optional[RetrievalInputModel] = None   # None indicates FEEDBACK or CHITCHAT actions
     memory_context: Optional[Dict[str, Any]] = Field(default_factory=dict)
 

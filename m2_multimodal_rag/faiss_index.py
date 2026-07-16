@@ -78,6 +78,28 @@ class FAISSDatabase:
 
         return results
 
+    def search_multi(self, query_vectors: list, top_k: int = 50) -> list:
+        """
+        Multi-Query FAISS search with Reciprocal Rank Fusion (RRF).
+        Runs a separate FAISS search for each query vector, then merges
+        the ranked lists using RRF (Cormack et al., 2009).
+        RRF score = Σ 1 / (k + rank)  where k=60 is the standard constant.
+        This preserves per-variant retrieval signals that mean-averaging loses.
+        """
+        K = 60  # standard RRF constant
+        rrf_scores: dict = {}
+
+        for vec in query_vectors:
+            if vec is None:
+                continue
+            results = self.search(vec, top_k=top_k)
+            for rank, (article_id, _) in enumerate(results):
+                rrf_scores[article_id] = rrf_scores.get(article_id, 0.0) + 1.0 / (K + rank + 1)
+
+        fused = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+        print(f"   [RRF] Fused {len(query_vectors)} query lists → {len(fused)} unique candidates")
+        return [(aid, score) for aid, score in fused[:top_k]]
+
     def get_item_vector(self, article_id: str) -> np.ndarray:
         """
         NOVELTY 3 (MMR helper): Reconstructs the stored 512-D CLIP vector for a

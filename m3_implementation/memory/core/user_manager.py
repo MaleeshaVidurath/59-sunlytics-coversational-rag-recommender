@@ -141,6 +141,21 @@ class UserManager:
             return None
         return UserDocument.model_validate(_strip_mongo_id(doc))
 
+    async def get_or_create_user_by_user_id(self, user_id: str) -> UserDocument:
+        """
+        Gets or creates a user record using a known user_id.
+        Used when the frontend generates a user_id directly (anonymous users)
+        rather than looking up a customer from sample_customers.csv.
+        """
+        db = get_db()
+        doc = await db.users.find_one({"user_id": user_id})
+        if doc:
+            return UserDocument.model_validate(_strip_mongo_id(doc))
+        user = UserDocument(user_id=user_id, customer_id=user_id)
+        await db.users.insert_one(user.model_dump(mode="json"))
+        print(f"[UserManager] Auto-created anonymous profile for user_id={user_id}")
+        return user
+
     async def get_user_by_customer_id(
         self,
         customer_id: str
@@ -279,7 +294,19 @@ class UserManager:
             top_product_types: Most purchased product types
             top_colours:       Most purchased colours
         """
-        user = await self.get_preferences(user_id)
+        try:
+            user = await self.get_preferences(user_id)
+        except ValueError:
+            # New user — no profile yet, return empty defaults
+            return {
+                "liked_attributes": [],
+                "disliked_values": {},
+                "hard_constraints": {},
+                "style_profile": {},
+                "purchase_summary": {},
+                "top_product_types": [],
+                "top_colours": [],
+            }
 
         # Build liked attributes list with computed weight
         # Weight = sentiment × confidence × decay_weight
