@@ -38,9 +38,11 @@ async def _fire_and_forget(url: str, pipeline_output: dict, module_name: str):
     if not url:
         return  # Not configured — skip silently
 
+    _mem_ctx = dict(pipeline_output.get("memory_context") or {})
+    _mem_ctx["session_id"] = pipeline_output.get("session_id")
     body = _make_json_safe({
         "retrieval_input": pipeline_output.get("retrieval_input"),
-        "memory_context":  pipeline_output.get("memory_context") or {},
+        "memory_context":  _mem_ctx,
     })
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
@@ -51,16 +53,21 @@ async def _fire_and_forget(url: str, pipeline_output: dict, module_name: str):
         print(f"[CHAT] Could not reach {module_name} at {url}: {type(e).__name__}")
 
 
-async def _call_m2_sync(pipeline_output: dict, timeout: float = 30.0):
+async def _call_m2_sync(pipeline_output: dict, timeout: float = 300.0):
     """Calls M2 synchronously.
     Returns the response dict on both success=True and success=False (M2 is reachable).
     Returns None only when M2 cannot be reached at all (timeout, connection error).
     """
     if not _M2_URL:
         return None
+    # session_id lets M2 resolve follow-ups from its per-session candidate
+    # cache instead of a full re-retrieval (M2 schema takes memory_context
+    # as a free-form dict, so no schema change is needed).
+    _mem_ctx = dict(pipeline_output.get("memory_context") or {})
+    _mem_ctx["session_id"] = pipeline_output.get("session_id")
     body = _make_json_safe({
         "retrieval_input": pipeline_output.get("retrieval_input"),
-        "memory_context":  pipeline_output.get("memory_context") or {},
+        "memory_context":  _mem_ctx,
     })
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -77,7 +84,7 @@ async def _call_m2_sync(pipeline_output: dict, timeout: float = 30.0):
         return None
 
 
-async def _call_m1_sync(pipeline_output: dict, timeout: float = 30.0):
+async def _call_m1_sync(pipeline_output: dict, timeout: float = 300.0):
     """Calls M1 synchronously.
     Returns the response dict on both success=True and success=False (M1 is reachable).
     Returns None only when M1 cannot be reached at all (timeout, connection error).
@@ -360,7 +367,7 @@ async def chat(req: ChatRequest):
         _ri = pipeline_output.get("retrieval_input") or {}
         _mc = pipeline_output.get("memory_context") or {}
         _payload = _ri.get("payload") or {}
-        print(f"[SPEC] user_id              = {pipeline_output.get('user_id','MISSING')[:30]}")
+        print(f"[SPEC] user_id              = {pipeline_output.get('user_id','MISSING')[:300]}")
         print(f"[SPEC] session_id           = {pipeline_output.get('session_id','MISSING')}")
         print(f"[SPEC] label                = {pipeline_output.get('label','MISSING')}")
         print(f"[SPEC] confidence           = {pipeline_output.get('confidence','MISSING')}")
@@ -475,14 +482,14 @@ async def chat(req: ChatRequest):
         print(f"[CHAT] routing to selected_model={effective_model}")
         _member_rag_result = None
         if effective_model == "m2":
-            print(f"[CHAT] M2 selected — calling M2 sync (timeout=30s)")
+            print(f"[CHAT] M2 selected — calling M2 sync (timeout=300s)")
             _m2_resp = await _call_m2_sync(pipeline_output)
             if _m2_resp is None:
                 print(f"[CHAT] M2 unavailable — returning error to user")
                 return _member_unavailable_response("M2 · Multimodal RAG", pipeline_output)
             _member_rag_result = _normalize_member_response(_m2_resp)
         elif effective_model == "m1":
-            print(f"[CHAT] M1 selected — calling M1 sync (timeout=30s)")
+            print(f"[CHAT] M1 selected — calling M1 sync (timeout=300s)")
             _m1_resp = await _call_m1_sync(pipeline_output)
             if _m1_resp is None:
                 print(f"[CHAT] M1 unavailable — returning error to user")
@@ -572,7 +579,7 @@ async def chat(req: ChatRequest):
         print(f"[CHAT] response_text: '{rag_result.get('response_text','')[:100]}'")
         print(f"[CHAT] action={rag_result.get('action')} items={len(rag_result.get('items_recommended',[]))} hall={rag_result.get('hallucination_flag')} contra={rag_result.get('contradiction_found')}")
         for _itm in rag_result.get("items_recommended",[]):
-            print(f"[CHAT] ITEM: {_itm.get('article_id','?')} | {str(_itm.get('name','?'))[:30]} | {_itm.get('colour','?')} | {_itm.get('price','?')}")
+            print(f"[CHAT] ITEM: {_itm.get('article_id','?')} | {str(_itm.get('name','?'))[:300]} | {_itm.get('colour','?')} | {_itm.get('price','?')}")
 
         # ── Retrieve recommendation_id and patch user_turn_id ─────────────
         # store_response() saves recommendation linked to the BOT turn.
