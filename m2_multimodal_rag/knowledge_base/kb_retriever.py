@@ -305,6 +305,17 @@ class FashionKBRetriever:
         return 0.0
 
     # ------------------------------------------------------------------
+    # PUBLIC METHOD 5b — harmony_partners()  (outfit completion)
+    # Returns the colours that pair well with a given colour, ordered
+    # complementary-first, plus the KB's harmony note for explanations.
+    # ------------------------------------------------------------------
+    def harmony_partners(self, colour: str) -> tuple[list, str]:
+        """Returns (partner_colours, harmony_note) for outfit pairing."""
+        entry = COLOR_HARMONY.get(str(colour).strip(), {})
+        partners = list(entry.get("complementary", [])) + list(entry.get("analogous", []))
+        return partners, entry.get("harmony_note", "")
+
+    # ------------------------------------------------------------------
     # PUBLIC METHOD 6 — get_clip_terms()  (NOVELTY 5 — Improvement 5)
     # Returns CLIP-optimised visual search vocabulary for Phase 1.
     # Combines occasion clip_visual_terms with Kansei preferred colours/types
