@@ -93,7 +93,7 @@ class M2ActionRouter:
         print(f"    User message: \"{user_message}\"")
 
         try:
-            return HANDLER_MAP[action](retrieval_input)
+            return HANDLER_MAP[action](retrieval_input, memory_context)
 
         except Exception as e:
             print(f"M2 Router: [ERROR] Handler for '{action}' failed: {e}")
