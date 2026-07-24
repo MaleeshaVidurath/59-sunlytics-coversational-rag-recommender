@@ -62,7 +62,10 @@ class CFScorer:
         self.item_embeddings = np.load(embed_path, allow_pickle=True)
         article_ids          = np.load(article_id_path, allow_pickle=True)
         self.popularity      = np.load(popularity_path, allow_pickle=True)
-        self.article_id_map  = {str(aid): idx for idx, aid in enumerate(article_ids)}
+        # Normalise keys to zero-padded 10-char ids — the artifacts store raw
+        # ints ('108775015') while all runtime callers pass zfilled ids
+        # ('0108775015'); without this every lookup missed and CF scored 0.0.
+        self.article_id_map  = {str(aid).zfill(10): idx for idx, aid in enumerate(article_ids)}
         self._loaded         = True
 
         print(f"[CF] Ready. "
