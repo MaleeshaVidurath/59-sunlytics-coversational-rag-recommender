@@ -28,6 +28,23 @@ from m2_multimodal_rag.vlm_kansei import visual_psychology_fact
 cf_scorer.load()
 
 # =====================================================================
+# Ablation switches (evaluation only — all default OFF)
+# =====================================================================
+# Environment variables that disable one novelty at a time so evaluation
+# scripts (m2_multimodal_rag/evaluation/) can measure ON-vs-OFF baselines:
+#   M2_ABLATE_ENSEMBLE=1        → single query vector (no LLM expansion)
+#   M2_ABLATE_CF=1              → rule-based purchase score instead of NCF
+#   M2_ABLATE_KB=1              → Kansei KB off (score, CLIP terms, facts)
+#   M2_ABLATE_BANDIT=<λ>       → fixed MMR λ (read in diversity_bandit.py)
+#   M2_ABLATE_GUARD=none|l1|l12 → guard stage gating (read in regeneration_loop.py)
+_ABLATE_ENSEMBLE = os.getenv("M2_ABLATE_ENSEMBLE") == "1"
+_ABLATE_CF       = os.getenv("M2_ABLATE_CF") == "1"
+_ABLATE_KB       = os.getenv("M2_ABLATE_KB") == "1"
+if _ABLATE_ENSEMBLE or _ABLATE_CF or _ABLATE_KB:
+    print(f"M2 ABLATION ACTIVE: ensemble_off={_ABLATE_ENSEMBLE} "
+          f"cf_off={_ABLATE_CF} kb_off={_ABLATE_KB}")
+
+# =====================================================================
 # Article prices (M2-local, in-memory only — shared/ files untouched)
 # =====================================================================
 
@@ -577,6 +594,8 @@ def _kb_fact(metadata: dict, user_message: str) -> str:
     tables (colour psychology / occasion fit / Kansei).
     Empty string when neither source applies.
     """
+    if _ABLATE_KB:
+        return ""
     kansei = kb_retriever.detect_kansei_from_message(user_message or "")
     style  = kansei[0] if kansei else None
     aid    = str(metadata.get("article_id", "")).zfill(10)
@@ -686,14 +705,18 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
     soft_terms   = " ".join(str(v) for v in soft_constraints.values() if v)
 
     # NOVELTY 5: inject psychology KB context into CLIP search text
-    kb_query_context = kb_retriever.get_context(
-        occasion=soft_constraints.get("occasion"),
-        style_word=inferred_style,
-    )
-    clip_terms = kb_retriever.get_clip_terms(
-        occasion=soft_constraints.get("occasion"),
-        style_word=inferred_style,
-    )
+    if _ABLATE_KB:
+        kb_query_context = ""
+        clip_terms = ""
+    else:
+        kb_query_context = kb_retriever.get_context(
+            occasion=soft_constraints.get("occasion"),
+            style_word=inferred_style,
+        )
+        clip_terms = kb_retriever.get_clip_terms(
+            occasion=soft_constraints.get("occasion"),
+            style_word=inferred_style,
+        )
     if kb_query_context:
         print(f"  [KB] Query context injected: {kb_query_context[:80]}...")
     if clip_terms:
@@ -736,7 +759,10 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         _vec = clip_encoder.encode_text(base_search_text)
         query_vectors = [_vec] if _vec is not None else []
     else:
-        expanded_queries = llm_generator.expand_query(base_search_text)
+        if _ABLATE_ENSEMBLE:
+            expanded_queries = [base_search_text]   # ablation: single-vector baseline
+        else:
+            expanded_queries = llm_generator.expand_query(base_search_text)
         query_vectors    = [clip_encoder.encode_text(q) for q in expanded_queries if q]
 
         if not query_vectors:
@@ -826,7 +852,7 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         # Purchase history collaborative score
         # CF model (trained on 185,037 transactions) scores at item level.
         # Falls back to rule-based scoring if model files are not yet loaded.
-        if cf_scorer._loaded:
+        if cf_scorer._loaded and not _ABLATE_CF:
             history_score = cf_scorer.score(article_id, purchase_hints, articles_df)
         else:
             history_score = 0.0
@@ -847,7 +873,7 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
                     history_score += 0.08
 
         # Psychology KB score (NOVELTY 5)
-        kb_score = kb_retriever.score(
+        kb_score = 0.0 if _ABLATE_KB else kb_retriever.score(
             item_colour=metadata.get("colour_group_name", ""),
             item_type=metadata.get("product_type_name", ""),
             item_appearance=metadata.get("graphical_appearance_name", ""),
@@ -1019,7 +1045,7 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         # NOVELTY 5 evolution: VLM-first explanation fact — the vision model
         # captures the item's visual psychology from the (just-prefetched)
         # image; the manual Kansei KB remains the fallback.
-        kb_explanation_fact = visual_psychology_fact(
+        kb_explanation_fact = "" if _ABLATE_KB else visual_psychology_fact(
             str(aid).zfill(10), _cached_image_path(aid), meta,
             style_word=inferred_style,
         ) or kb_retriever.get_explanation(

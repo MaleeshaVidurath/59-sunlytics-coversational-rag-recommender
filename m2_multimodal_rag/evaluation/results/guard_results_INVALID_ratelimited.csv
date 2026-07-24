@@ -1,0 +1,4 @@
+config,precision,recall,f1,false_alarms,visual_recall,n
+l1,1.0,0.359,0.529,0,0.28,168
+l12,0.94,0.367,0.528,3,0.32,168
+full,0.873,0.539,0.667,10,0.4,168
