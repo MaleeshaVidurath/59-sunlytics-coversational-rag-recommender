@@ -11,12 +11,27 @@ Pipeline (in execution order):
 Return value: (explanation: str, verification_trail: dict)
 """
 
+import os
+
 from shared.data_loader import data_loader
 from m2_multimodal_rag.llm_generator import llm_generator
 from m2_multimodal_rag.hallucination_guard.layer_1_knowledge_self_reflection import knowledge_reflector
 from m2_multimodal_rag.hallucination_guard.layer_3_vlm_visual_verification    import blip_verifier
 from m2_multimodal_rag.hallucination_guard.layer_2_cove_verification           import cove_verifier
 from m2_multimodal_rag.hallucination_guard.clip_faithfulness_scorer            import clip_faithfulness_scorer
+
+
+def _guard_mode() -> str:
+    """
+    Ablation (evaluation only): M2_ABLATE_GUARD gates the guard stages so
+    evaluation scripts can measure per-layer contribution.
+        none → raw LLM output, no verification
+        l1   → pre-filter + Layer 1 self-reflection only
+        l12  → Layers 1+2 (no visual Layer 3)
+        full → everything (default)
+    """
+    mode = os.getenv("M2_ABLATE_GUARD", "full").lower()
+    return mode if mode in ("none", "l1", "l12", "full") else "full"
 
 
 class GenerationLoop:
@@ -260,6 +275,12 @@ class GenerationLoop:
         if not response:
             return None, trail
 
+        mode = _guard_mode()
+        if mode == "none":
+            trail["layers_passed"].append("guard_ablated_none")
+            print("   [Guard] ABLATED (none) — returning raw LLM output.")
+            return response, trail
+
         # ── Layer 1: knowledge-grounded self-reflection ────────────────────
         print("   [Layer 1] Knowledge-grounded self-reflection...")
         product_knowledge = knowledge_reflector.generate_product_knowledge(metadata)
@@ -273,6 +294,10 @@ class GenerationLoop:
             response = self._reprompt(prompt, self_feedback, response)
         else:
             trail["layers_passed"].append("layer_1c_self_reflection")
+
+        if mode == "l1":
+            trail["layers_passed"].append("guard_ablated_l1")
+            return response, trail
 
         # ── Layer 2: Enhanced CoVe with DeBERTa NLI ────────────────────────
         print("   [Layer 2] CoVe verification...")
@@ -294,6 +319,9 @@ class GenerationLoop:
             trail["layers_passed"].append("layer_2_cove_verification")
 
         # ── Layer 3: CLIPScore + ViLT VQA (image required) ─────────────────
+        if mode == "l12":
+            trail["layers_passed"].append("guard_ablated_l12")
+            return response, trail
         if skip_visual:
             trail["layers_passed"].append("layer_3_skipped_non_visual")
             print("   [Layer 3] Non-visual topic — skipping visual gate (Layers 1+2 verified).")
@@ -373,12 +401,32 @@ class GenerationLoop:
             "image_grounded":         has_image,
         }
 
+        mode = _guard_mode()
+        if mode == "none":
+            # Ablation baseline: raw LLM output, no verification of any kind
+            explanation = llm_generator.generate(
+                article_id, metadata,
+                force_hallucination=force_hallucination_test,
+                product_knowledge="",
+                image_path=image_path_str,
+            )
+            trail["layers_passed"].append("guard_ablated_none")
+            print("   [Guard] ABLATED (none) — returning raw LLM output.")
+            return explanation, trail
+
         preflight   = self._stage_prefilter(article_id, metadata, force_hallucination_test, trail, image_path_str)
         explanation = self._stage_layer1(article_id, metadata, preflight, force_hallucination_test, trail, image_path_str)
+
+        if mode == "l1":
+            trail["layers_passed"].append("guard_ablated_l1")
+            return explanation, trail
+
         explanation = self._stage_layer2(article_id, metadata, explanation, trail, image_path_str)
 
-        # Layer 2 requires a valid image — skip it gracefully when unavailable
-        if has_image:
+        # Layer 3 requires a valid image — skip it gracefully when unavailable
+        if mode == "l12":
+            trail["layers_passed"].append("guard_ablated_l12")
+        elif has_image:
             explanation, _ = self._stage_layer3(article_id, image_path, metadata, explanation, trail)
         else:
             trail["layers_passed"].append("layer_3_skipped_no_image")

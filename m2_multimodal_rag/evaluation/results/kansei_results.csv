@@ -1,0 +1,8 @@
+metric,value
+n_queries,30
+kb_on_wins,23
+kb_off_wins,7
+ties,0
+kb_on_win_rate_decided,0.7667
+ci_low,0.5907
+ci_high,0.8821
