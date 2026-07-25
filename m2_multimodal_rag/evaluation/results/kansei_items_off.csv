@@ -1,0 +1,89 @@
+style,query,rank,article_id,prod_name,colour,type,appearance
+elegant,an elegant dress for a formal evening,1,0796646001,PARTY Love dress,Dark Pink,Dress,Solid
+elegant,an elegant dress for a formal evening,2,0609355013,Charlotte Kimono,White,Blouse,Placement print
+elegant,an elegant dress for a formal evening,3,0759003001,POW Carly plissé,Dark Blue,Dress,Solid
+elegant,something elegant for a gala,1,0586795002,BYN Vishnu dress,Light Blue,Dress,Solid
+elegant,something elegant for a gala,2,0417951005,Support 20 den 1p tights,Black,Underwear Tights,Solid
+elegant,something elegant for a gala,3,0881933001,COCO grey hot maxi,Black,Dress,Solid
+elegant,an elegant blouse for a dinner party,1,0584449002,Grease,Black,Blouse,Solid
+elegant,an elegant blouse for a dinner party,2,0810362001,Catelyn sequin top XMAS,Light Beige,Top,Glittering/Metallic
+elegant,an elegant blouse for a dinner party,3,0808229002,Cello,Light Purple,Blouse,Solid
+elegant,elegant trousers for an event,1,0692653004,Pecan trousers,Off White,Trousers,Solid
+elegant,elegant trousers for an event,2,0576222001,Jessa,Black,Trousers,Solid
+elegant,elegant trousers for an event,3,0638702001,Johanna Satin Slim,Black,Trousers,Solid
+elegant,an elegant outfit top for the opera,1,0669710003,SPARKLING TANK,Black,Vest top,Glittering/Metallic
+elegant,an elegant outfit top for the opera,2,0786197004,Coco skirt,Off White,Skirt,Other structure
+casual,a casual top for the weekend,1,0464363016,Camille tee (1),White,T-shirt,Stripe
+casual,a casual top for the weekend,2,0824497002,Olga LL PJ (J) BF,Grey,Pyjama set,All over pattern
+casual,a casual top for the weekend,3,0772421001,Amelia popover,White,Blouse,Solid
+casual,something casual for everyday wear,1,0621914001,BO 2-p hood BB,Grey,Hoodie,Solid
+casual,something casual for everyday wear,2,0725792001,DIV Livia top,Pink,T-shirt,Solid
+casual,something casual for everyday wear,3,0704042001,Photoshoot graphic tee,White,T-shirt,Front print
+casual,casual trousers for relaxing,1,0690936001,Iris Linen Jogger R.W TVP,Greenish Khaki,Trousers,Solid
+casual,casual trousers for relaxing,2,0551273001,Queen,Black,Trousers,Solid
+casual,casual trousers for relaxing,3,0554477035,Victoria RW Pull- On TRS,Black,Trousers,Stripe
+casual,a casual sweater for home,1,0557798002,Broadchurch jacquard,Dark Blue,Sweater,Jacquard
+casual,a casual sweater for home,2,0617037002,MALIN poloneck LATE,Grey,Scarf,Melange
+casual,a casual sweater for home,3,0549914007,Pia Party,Light Grey,Sweater,Glittering/Metallic
+casual,a casual t-shirt for errands,1,0449263044,Zero Tee,Dark Red,T-shirt,Solid
+casual,a casual t-shirt for errands,2,0779852006,Jaffa t-shirt,White,T-shirt,Front print
+casual,a casual t-shirt for errands,3,0567418016,MAXENCE,Grey,T-shirt,Placement print
+sporty,a sporty top for the gym,1,0678695001,BLUSH TANK,Dark Blue,Vest top,Colour blocking
+sporty,a sporty top for the gym,2,0653275008,Correy tee.,Grey,T-shirt,Melange
+sporty,a sporty top for the gym,3,0561101001,LILY TEE,Black,T-shirt,Colour blocking
+sporty,something sporty for running,1,0630116004,SUPREME TIGHTS,Black,Leggings/Tights,Colour blocking
+sporty,something sporty for running,2,0567424015,ZORROW,Black,Sweater,Front print
+sporty,something sporty for running,3,0724271001,BB Diego sl less hood,Grey,Top,Colour blocking
+sporty,sporty shorts for training,1,0573650001,HOTSHOT one piece,Black,Top,Solid
+sporty,sporty shorts for training,2,0754176004,Alex Shorts,Grey,Shorts,Melange
+sporty,sporty shorts for training,3,0558407005,FARIN tights,Black,Leggings/Tights,Colour blocking
+sporty,a sporty jacket for outdoor exercise,1,0794321001,SULIMA  jkt,Black,Jacket,Solid
+sporty,a sporty jacket for outdoor exercise,2,0600941001,ORLA swimsuit,Black,Swimsuit,Solid
+sporty,a sporty jacket for outdoor exercise,3,0807001003,DROGO,Beige,Jacket,Colour blocking
+sporty,sporty leggings for a workout,1,0189616006,Heavy jsy long leg,Black,Leggings/Tights,Contrast
+sporty,sporty leggings for a workout,2,0638899001,PLOPP tights,Black,Leggings/Tights,Solid
+sporty,sporty leggings for a workout,3,0498738015,SUPREME FANCY TIGHTS,Other Pink,Trousers,Colour blocking
+romantic,a romantic dress for a date night,1,0714896001,Minnie Jo Dress,Black,Dress,Lace
+romantic,a romantic dress for a date night,2,0771977002,Raunchy Dress,Dark Pink,Dress,Solid
+romantic,a romantic dress for a date night,3,0726228002,Hannele occasion dress,Light Pink,Dress,All over pattern
+romantic,something romantic for valentine's dinner,1,0712180001,Lana dress,Red,Dress,Solid
+romantic,something romantic for valentine's dinner,2,0647907003,ELSIE TOP / DRAPY TOP,White,T-shirt,Front print
+romantic,something romantic for valentine's dinner,3,0693694001,SC - VELVET earring plastic,Black,Earring,Colour blocking
+romantic,a romantic blouse for an anniversary,1,0870293001,Julien,Beige,Blouse,All over pattern
+romantic,a romantic blouse for an anniversary,2,0595386003,Bouqet,White,Blouse,Solid
+romantic,a romantic blouse for an anniversary,3,0888609001,ANDY BLOUSE,White,Blouse,Solid
+romantic,a romantic skirt for a picnic date,1,0854736001,ED Clementine (W),Green,Skirt,All over pattern
+romantic,a romantic skirt for a picnic date,2,0799997001,Verity dress,Off White,Dress,Lace
+romantic,a romantic skirt for a picnic date,3,0706896001,Bluebell,Off White,Dress,Lace
+romantic,a romantic top for a candlelit dinner,1,0613459001,Gavino,Black,Top,Solid
+romantic,a romantic top for a candlelit dinner,2,0764345003,GIGI BLOUSE,Black,Shirt,All over pattern
+romantic,a romantic top for a candlelit dinner,3,0527601001,Shrub LS,Black,Sweater,Solid
+professional,a professional blazer for the office,1,0675319009,Bristol jersey blz,Yellowish Brown,Blazer,Check
+professional,a professional blazer for the office,2,0588245006,MC Dayzy blazer,Dark Blue,Blazer,Other structure
+professional,a professional blazer for the office,3,0553092001,Nick super skinny,Black,Blazer,Melange
+professional,something professional for a job interview,1,0568601006,Mariette Blazer,Black,Blazer,Solid
+professional,something professional for a job interview,2,0567424015,ZORROW,Black,Sweater,Front print
+professional,something professional for a job interview,3,0501722012,FREDRIK stretch shirt,Blue,Shirt,Stripe
+professional,professional trousers for work,1,0922037002,Skye NW flared trs,Yellowish Brown,Trousers,Other structure
+professional,professional trousers for work,2,0568597012,Hayes,Light Blue,Trousers,Solid
+professional,professional trousers for work,3,0752814015,Milk RW slack,Grey,Trousers,Melange
+professional,a professional shirt for a client meeting,1,0618319002,Mister Muscle LS,White,Shirt,Solid
+professional,a professional shirt for a client meeting,2,0567418039,MAXENCE TEE,Dark Grey,T-shirt,Placement print
+professional,a professional shirt for a client meeting,3,0789407002,Sagat Slim Blazer,Black,Blazer,Check
+professional,a professional dress for a conference,1,0882454002,Hazel dress,Black,Dress,Solid
+professional,a professional dress for a conference,2,0578430004,Beetle dress,Grey,Dress,Melange
+professional,a professional dress for a conference,3,0694182001,Han sleeve,Black,Dress,Solid
+bold,a bold statement top for a party,1,0594618001,Bruce Lee PRICE,Red,Blouse,Solid
+bold,a bold statement top for a party,2,0683573001,Mrs West Top,Black,Vest top,Application/3D
+bold,a bold statement top for a party,3,0797608002,SC VOODOO blouse,Black,Shirt,All over pattern
+bold,something bold for a night out,1,0796240001,FF Kate dress PI,Yellowish Brown,Dress,All over pattern
+bold,something bold for a night out,2,0775085001,Cool Jacobs Earring pack,Gold,Earring,Solid
+bold,something bold for a night out,3,0577675001,Willa,Black,Vest top,Solid
+bold,a bold dress that stands out,1,0891629001,Fuego dress,Orange,Dress,All over pattern
+bold,a bold dress that stands out,2,0467302079,Panda dress J,Dark Blue,Dress,Solid
+bold,a bold dress that stands out,3,0637283010,Teddy (1),Dark Green,Dress,Stripe
+bold,a bold jacket to draw attention,1,0719608001,DIV Lauren velvet blazer,Black,Blazer,Solid
+bold,a bold jacket to draw attention,2,0763544001,DIV Loris Denim Jacket,Red,Jacket,Solid
+bold,a bold jacket to draw attention,3,0740791001,Raven blazer,Light Grey,Blazer,Check
+bold,a bold outfit piece for a festival,1,0761140001,FESTIVAL Tee,White,T-shirt,All over pattern
+bold,a bold outfit piece for a festival,2,0630116010,SUPREME TIGHTS,Dark Blue,Leggings/Tights,Colour blocking

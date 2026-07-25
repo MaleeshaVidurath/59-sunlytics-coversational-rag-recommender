@@ -39,6 +39,11 @@ class ExplanationGenerator:
         self.vision_model_name = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
         self.is_available      = False
         self.client            = None
+        # Real API failure counter (evaluation harnesses use this to detect
+        # quota exhaustion directly, instead of inferring it from guard
+        # layers' built-in "pass on failure" fallbacks — which look
+        # identical to a genuine pass in their output).
+        self.fail_count        = 0
         self._init_client()
 
     def _init_client(self) -> None:
@@ -74,6 +79,7 @@ class ExplanationGenerator:
     def _call_llm(self, prompt: str, max_tokens: int = 150,
                   temperature: float = 0.7) -> str | None:
         if not self.is_available:
+            self.fail_count += 1
             return None
         try:
             resp   = self.client.chat.completions.create(
@@ -83,9 +89,12 @@ class ExplanationGenerator:
                 temperature=temperature,
             )
             result = resp.choices[0].message.content.strip()
+            if not result:
+                self.fail_count += 1
             return result or None
         except Exception as exc:
             print(f"   [LLM API Error] {exc}")
+            self.fail_count += 1
             return None
 
     def _call_vision_llm(self, prompt: str, image_path: str,

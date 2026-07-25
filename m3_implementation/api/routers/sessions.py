@@ -1,6 +1,6 @@
 # m3_implementation/api/routers/sessions.py
 from fastapi import APIRouter, HTTPException, Query
-from memory.db.mongo import get_db
+from memory.db.mongo import get_db, get_collection_name
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -113,6 +113,40 @@ async def get_session_history(session_id: str, user_id: str = Query(...)):
         ).sort("created_at", 1).to_list(length=200)
         turns = turn_docs
 
+    # ── Attach recommended items to assistant turns ────────────────────
+    # Bot turns store only a recommendation_id; the item data (name,
+    # colour, price, article_id) lives in the model-prefixed
+    # recommendations collection. Without this join, product cards
+    # disappear when a session is reloaded after a browser refresh.
+    rec_ids = [t.get("recommendation_id") for t in turns if t.get("recommendation_id")]
+    rec_items_map: dict = {}
+    if rec_ids:
+        try:
+            lock = await db.session_model_locks.find_one(
+                {"session_id": session_id}, {"selected_model": 1}
+            )
+            model = (lock or {}).get("selected_model", "m3")
+            recs_coll = get_collection_name("recommendations", model)
+            rec_docs = await db[recs_coll].find(
+                {"recommendation_id": {"$in": rec_ids}},
+                {"recommendation_id": 1, "items": 1},
+            ).to_list(length=len(rec_ids))
+            for rec in rec_docs:
+                rec_items_map[rec["recommendation_id"]] = [
+                    {
+                        "article_id": str(it.get("article_id", "")),
+                        "name":       it.get("prod_name", ""),
+                        "colour":     it.get("colour_group_name", ""),
+                        "type":       it.get("product_type_name", ""),
+                        "price":      (f"£{it.get('price')}" if it.get("price") else ""),
+                        "description":(it.get("detail_desc") or "")[:120],
+                        "pattern":    it.get("graphical_appearance_name", ""),
+                    }
+                    for it in (rec.get("items") or [])
+                ]
+        except Exception as e:
+            print(f"[Sessions] recommendation items join warning (non-fatal): {e}")
+
     messages = []
     for t in turns:
         classification = t.get("classification") or {}
@@ -123,6 +157,7 @@ async def get_session_history(session_id: str, user_id: str = Query(...)):
             "timestamp":         str(t.get("timestamp", t.get("created_at", ""))),
             "label":             classification.get("label", "") if classification else "",
             "recommendation_id": t.get("recommendation_id", None),
+            "items":             rec_items_map.get(t.get("recommendation_id"), []),
         })
 
     return {
