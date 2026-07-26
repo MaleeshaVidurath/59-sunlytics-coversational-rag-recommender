@@ -1,0 +1,5 @@
+ci_high,ci_low,cold_hit10,config,hit10,hit5,n,n_cold,ndcg10
+,,0.0,popularity,0.244,0.144,250,46,0.1224
+,,0.0435,rule_based,0.176,0.092,250,46,0.0803
+,,0.1957,ncf,0.044,0.028,250,46,0.0206
+-0.08,-0.1841,,delta_ncf_vs_rule,-0.132,,250,,
