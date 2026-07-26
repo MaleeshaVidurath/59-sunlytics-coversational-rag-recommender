@@ -77,17 +77,27 @@ async def _call_m2_sync(pipeline_output: dict, timeout: float = 30.0):
         return None
 
 
-async def _call_m1_sync(pipeline_output: dict, timeout: float = 30.0):
+async def _call_m1_sync(pipeline_output: dict, customer_id: str, timeout: float = 30.0):
     """Calls M1 synchronously.
     Returns the response dict on both success=True and success=False (M1 is reachable).
     Returns None only when M1 cannot be reached at all (timeout, connection error).
     """
     if not _M1_URL:
         return None
+        
+    ret_input = pipeline_output.get("retrieval_input") or {}
+    ret_input["customer_id"] = customer_id
+    
     body = _make_json_safe({
-        "retrieval_input": pipeline_output.get("retrieval_input"),
+        "retrieval_input": ret_input,
         "memory_context":  pipeline_output.get("memory_context") or {},
     })
+
+    print("\n" + "═"*60)
+    print(f"[DEBUG] ━━━ FULL JSON PAYLOAD SENT TO M1 ━━━")
+    print(_json.dumps(body, indent=2))
+    print("═"*60 + "\n")
+    
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(f"{_M1_URL}/api/process", json=body)
@@ -470,8 +480,8 @@ async def chat(req: ChatRequest):
         # ── Route pipeline_output to the selected member module only ──────
         # M3: processed locally by rag.process() below — no external call.
         # M2/M1: call synchronously and use their response exclusively.
-        #         If the module is unreachable, return an error to the user
-        #         immediately — NO fallback to M3.
+        #        If the module is unreachable, return an error to the user
+        #        immediately — NO fallback to M3.
         print(f"[CHAT] routing to selected_model={effective_model}")
         _member_rag_result = None
         if effective_model == "m2":
@@ -483,7 +493,7 @@ async def chat(req: ChatRequest):
             _member_rag_result = _normalize_member_response(_m2_resp)
         elif effective_model == "m1":
             print(f"[CHAT] M1 selected — calling M1 sync (timeout=30s)")
-            _m1_resp = await _call_m1_sync(pipeline_output)
+            _m1_resp = await _call_m1_sync(pipeline_output, customer_id=req.customer_id)
             if _m1_resp is None:
                 print(f"[CHAT] M1 unavailable — returning error to user")
                 return _member_unavailable_response("M1 · Graph RAG", pipeline_output)
