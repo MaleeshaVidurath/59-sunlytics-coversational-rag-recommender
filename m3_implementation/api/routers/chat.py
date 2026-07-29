@@ -84,7 +84,7 @@ async def _call_m2_sync(pipeline_output: dict, timeout: float = 300.0):
         return None
 
 
-async def _call_m1_sync(pipeline_output: dict, customer_id: str, timeout: float = 30.0):
+async def _call_m1_sync(pipeline_output: dict, customer_id: str, timeout: float = 300.0):
     """Calls M1 synchronously.
     Returns the response dict on both success=True and success=False (M1 is reachable).
     Returns None only when M1 cannot be reached at all (timeout, connection error).
@@ -277,6 +277,33 @@ def _to_storage_item(item: dict) -> dict:
         "detail_desc":              item.get("description") or item.get("detail_desc"),
         "price":                    price_float,
     }
+
+
+async def _fetch_last_recommended_items(session_id: str, effective_model: str) -> list[str]:
+    """
+    Fetches the last two recommended article IDs for a given session from MongoDB.
+    Respects the active model (m1, m2, m3) so it pulls from the correct collection.
+    """
+    if not session_id:
+        return []
+        
+    try:
+        from memory.db.mongo import get_db, get_collection_name
+        db = get_db()
+        recs_coll = get_collection_name("recommendations", effective_model)
+        
+        latest_rec = await db[recs_coll].find_one(
+            {"session_id": session_id},
+            sort=[("created_at", -1)]
+        )
+        
+        if latest_rec and "items_recommended" in latest_rec:
+            items = latest_rec["items_recommended"]
+            return [str(item["article_id"]) for item in items[:2] if item.get("article_id")]
+    except Exception as e:
+        print(f"[CHAT] Fallback fetch error: {e}")
+        
+    return []
 
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -484,6 +511,24 @@ async def chat(req: ChatRequest):
         except Exception as _me:
             print(f"[CHAT] model lock warning (non-fatal): {_me}")
 
+        # ── NEW FALLBACK LOGIC FOR COMPARISON ─────────────────────────────
+        # If the user asked to compare but the memory context cache missed the IDs,
+        # fetch the IDs from the last recommendation made in this session.
+        if _ri and _ri.get("action") == "item_compare":
+            _pl = _ri.get("payload", {})
+            if not _pl.get("article_id_a") or not _pl.get("article_id_b"):
+                print("[DEBUG] Comparison IDs missing. Fetching from MongoDB fallback...")
+                _last_items = await _fetch_last_recommended_items(_session_id_for_model, effective_model)
+                if len(_last_items) >= 2:
+                    _pl["article_id_a"] = _last_items[0]
+                    _pl["article_id_b"] = _last_items[1]
+                    _ri["payload"] = _pl
+                    pipeline_output["retrieval_input"] = _ri
+                    print(f"[DEBUG] Fallback success! Comparing {_last_items[0]} vs {_last_items[1]}")
+                else:
+                    print("[DEBUG] Fallback failed. Not enough items in session history.")
+        # ──────────────────────────────────────────────────────────────────
+
         # ── Route pipeline_output to the selected member module only ──────
         # M3: processed locally by rag.process() below — no external call.
         # M2/M1: call synchronously and use their response exclusively.
@@ -499,7 +544,7 @@ async def chat(req: ChatRequest):
                 return _member_unavailable_response("M2 · Multimodal RAG", pipeline_output)
             _member_rag_result = _normalize_member_response(_m2_resp)
         elif effective_model == "m1":
-            print(f"[CHAT] M1 selected — calling M1 sync (timeout=30s)")
+            print(f"[CHAT] M1 selected — calling M1 sync (timeout=300s)")
             _m1_resp = await _call_m1_sync(pipeline_output, customer_id=req.customer_id)
             if _m1_resp is None:
                 print(f"[CHAT] M1 unavailable — returning error to user")

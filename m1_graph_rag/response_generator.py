@@ -1,9 +1,28 @@
 import os
+from pathlib import Path
+from dotenv import load_dotenv, find_dotenv
 from groq import Groq
 from nli_guard import verify_against_graph
 
+# ── Automatically locate and load the .env file ──────────────────────────
+# 1. Search upwards for any .env file in parent directories
+env_file = find_dotenv()
+if env_file:
+    load_dotenv(env_file)
+else:
+    # 2. Explicit fallback to check project root (one directory above m1_graph_rag)
+    root_env = Path(__file__).resolve().parent.parent / ".env"
+    if root_env.exists():
+        load_dotenv(dotenv_path=root_env)
+
+# ── Initialize Groq Client ───────────────────────────────────────────────
+api_key = os.getenv("GROQ_API_KEY")
+
 try:
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    if not api_key:
+        raise ValueError("GROQ_API_KEY is missing from environment/vars.")
+    client = Groq(api_key=api_key)
+    print("[Module 1] Groq client initialized successfully.")
 except Exception as e:
     print(f"Warning: Groq client failed to initialize. {e}")
     client = None
@@ -59,7 +78,7 @@ def _call_groq(system_prompt, user_prompt, temperature=0.3):
         ],
         model="llama-3.1-8b-instant",
         temperature=temperature,
-        max_tokens=300
+        max_tokens=1024
     )
     return response.choices[0].message.content.strip()
 
