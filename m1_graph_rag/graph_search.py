@@ -2,6 +2,7 @@ import networkx as nx
 import json
 import torch
 import os
+import difflib
 from sentence_transformers import SentenceTransformer
 from build_graph import construct_knowledge_graph
 from gnn_model import FashionGNN
@@ -43,182 +44,7 @@ with torch.no_grad():
 print("AI is fully awake and ready for live searches!\n")
 
 # ==========================================
-# REASONING PATH GENERATOR
-# ==========================================
-def generate_reasoning_path(G, customer_id, recommended_item_id):
-    """Finds the logical graph bridge between the user and the item, translating IDs to real names."""
-    try:
-        raw_path = nx.shortest_path(G, source=customer_id, target=recommended_item_id)
-        
-        translated_path = []
-        for node in raw_path:
-            # 1. If the node is the user's long ID, change it to "User"
-            if node == customer_id:
-                translated_path.append("User")
-                
-            # 2. If the node exists in the graph and has a 'name' (it's a product)
-            elif G.has_node(node) and 'name' in G.nodes[node]:
-                product_name = G.nodes[node]['name']
-                translated_path.append(f"'{product_name}'")
-                
-            # 3. Otherwise, it's an attribute like 'Skirt' or 'Black', just keep the text
-            else:
-                translated_path.append(str(node))
-                
-        # Formats the path to look clean: User ➔ 'Old Skirt' ➔ Skirt ➔ 'Elsa'
-        return " ➔ ".join(translated_path)
-        
-    except (nx.NetworkXNoPath, nx.NodeNotFound):
-        return "Trending item matching your preferences."
-
-# ==========================================
-# THE CORE SEARCH ENGINE
-# ==========================================
-def run_catalog_search(G, payload, items_in_context, exclude_ids, user_message, customer_id):
-    print("\n--- Executing AI-Powered Graph Catalog Search ---")
-    
-    filters = payload.get("filters", {})
-    soft_constraints = payload.get("soft_constraints", {})
-    boosts = payload.get("preference_boosts", [])
-    penalties = payload.get("penalties", {})
-    hints = payload.get("purchase_history_hints", {})
-    
-    # ------------------------------------------
-    # LIVE AI TRANSLATION
-    # ------------------------------------------
-    print(f"--> Translating user message: '{user_message}'")
-    user_text_math = text_model.encode(user_message, convert_to_tensor=True)
-    
-    gnn_user_math = None
-    if customer_id in user_mapping:
-        math_idx = user_mapping[customer_id]
-        gnn_user_math = FINAL_USERS[math_idx]
-    else:
-        print(f"--> Note: Customer '{customer_id}' is new! Relying strictly on Text Vibe.")
-
-    # ------------------------------------------
-    # PART A: STRICT FILTERS & COUNTERFACTUAL TRACKING
-    # ------------------------------------------
-    all_articles = [n for n, attr in G.nodes(data=True) if attr.get('type') == 'article']
-    valid_items = []
-    discarded_reasons = [] # Counterfactual tracking list
-    
-    for article_id in all_articles:
-        item_name = G.nodes[article_id].get('name', 'Unknown Product')
-        
-        if article_id in exclude_ids:
-            discarded_reasons.append({
-                "article_id": article_id,
-                "name": item_name,
-                "reason": "Explicitly excluded by user history/context"
-            })
-            continue 
-            
-        is_valid = True
-        for key, required_value in filters.items():
-            if not G.has_edge(article_id, required_value):
-                is_valid = False
-                discarded_reasons.append({
-                    "article_id": article_id,
-                    "name": item_name,
-                    "reason": f"Failed filter constraint: Missing attribute node '{required_value}'"
-                })
-                break 
-                
-        if is_valid:
-            valid_items.append(article_id)
-
-    if not valid_items:
-        return {
-            "status": "success", 
-            "data": [], 
-            "counterfactuals": discarded_reasons[:5] # Return top reasons for empty results
-        }
-
-    # ------------------------------------------
-    # PART B: THE SCORING ALGORITHM
-    # ------------------------------------------
-    item_scores = {}
-    
-    for item_id in valid_items:
-        score = 1.0 # Base score
-        item_attributes = list(G.neighbors(item_id))
-        
-        # --- 1. THE AI SCORES ---
-        if item_id in item_mapping:
-            item_idx = item_mapping[item_id]
-            
-            # THE VIBE SCORE (Text Match)
-            item_text_math = product_math[item_idx]
-            vibe_match = torch.nn.functional.cosine_similarity(user_text_math.unsqueeze(0), item_text_math.unsqueeze(0)).item()
-            score += (vibe_match * 5.0)
-            
-            # THE HISTORY SCORE (GNN Prediction)
-            if gnn_user_math is not None:
-                item_gnn_math = FINAL_ITEMS[item_idx]
-                history_match = torch.sigmoid(torch.dot(gnn_user_math, item_gnn_math)).item()
-                score += (history_match * 3.0)
-
-        # --- 2. THE STRICT RULES & PENALTIES ---
-        for boost in boosts:
-            if boost.get("value") in item_attributes:
-                score += boost.get("weight", 0.0)
-                
-        for penalty_key, bad_values in penalties.items():
-            for bad_val in bad_values:
-                if bad_val in item_attributes:
-                    score -= 5.0
-                    discarded_reasons.append({
-                        "article_id": item_id,
-                        "name": G.nodes[item_id].get('name', 'Unknown Product'),
-                        "reason": f"Penalized due to attribute '{bad_val}'"
-                    })
-                    
-        for constraint_type, constraint_val in soft_constraints.items():
-            if constraint_val in item_attributes:
-                score += 0.5 
-                
-        top_colours = hints.get("top_colours", [])
-        if any(color in item_attributes for color in top_colours):
-            score += 0.1 
-
-        item_scores[item_id] = score
-
-    # ------------------------------------------
-    # FINAL SELECTION & REASONING
-    # ------------------------------------------
-    ranked_items = sorted(item_scores.items(), key=lambda x: x[1], reverse=True)
-    top_2_results = []
-    
-    print("\n--> Scoring complete! Top 2 items selected:")
-    for item_id, final_score in ranked_items[:2]:
-        item_name = G.nodes[item_id].get('name', 'Unknown Product')
-        reasoning = generate_reasoning_path(G, customer_id, item_id)
-        
-        result_package = {
-            "article_id": str(item_id),
-            "name": item_name,
-            "final_score": round(final_score, 2),
-            "reasoning_path": reasoning
-        }
-        top_2_results.append(result_package)
-
-    # Collect counterfactuals for lower-ranked items
-    for item_id, final_score in ranked_items[2:5]:
-        discarded_reasons.append({
-            "article_id": str(item_id),
-            "name": G.nodes[item_id].get('name', 'Unknown Product'),
-            "reason": f"Lower relevance match score ({round(final_score, 2)})"
-        })
-
-    return {
-        "status": "success", 
-        "data": top_2_results, 
-        "counterfactuals": discarded_reasons[:5]
-    }
-
-# ==========================================
-# SECONDARY HELPERS
+# HELPER FUNCTIONS & NODE RESOLVERS
 # ==========================================
 
 def resolve_graph_id(G, raw_id):
@@ -226,7 +52,6 @@ def resolve_graph_id(G, raw_id):
     if not raw_id:
         return None
         
-    # If the input is a dictionary (e.g. from items_in_context), extract the ID
     if isinstance(raw_id, dict):
         raw_id = raw_id.get("article_id")
         if not raw_id:
@@ -245,14 +70,224 @@ def resolve_graph_id(G, raw_id):
         
     return None
 
-def run_attribute_lookup(G, payload):
+def resolve_attribute_node(G, raw_val):
+    """Fuzzy-resolves extracted attribute values to match exact node labels."""
+    if not raw_val:
+        return None
+        
+    val_str = str(raw_val).strip()
+    
+    if G.has_node(val_str):
+        return val_str
+        
+    val_normalized = val_str.lower().replace("-", " ").replace("_", " ")
+    
+    for node, attr in G.nodes(data=True):
+        if attr.get('type') != 'article':
+            node_str = str(node)
+            node_normalized = node_str.lower().replace("-", " ").replace("_", " ")
+            if val_normalized == node_normalized:
+                return node
+                
+    non_article_nodes = [str(n) for n, attr in G.nodes(data=True) if attr.get('type') != 'article']
+    matches = difflib.get_close_matches(val_str, non_article_nodes, n=1, cutoff=0.7)
+    if matches:
+        return matches[0]
+        
+    return val_str
+
+def generate_reasoning_path(G, customer_id, recommended_item_id):
+    """Finds the logical graph bridge between the user and the item."""
+    try:
+        raw_path = nx.shortest_path(G, source=customer_id, target=recommended_item_id)
+        
+        translated_path = []
+        for node in raw_path:
+            if node == customer_id:
+                translated_path.append("User")
+            elif G.has_node(node) and 'name' in G.nodes[node]:
+                product_name = G.nodes[node]['name']
+                translated_path.append(f"'{product_name}'")
+            else:
+                translated_path.append(str(node))
+                
+        return " ➔ ".join(translated_path)
+        
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        return "Trending item matching your preferences."
+
+# ==========================================
+# THE CORE SEARCH ENGINE
+# ==========================================
+
+def run_catalog_search(G, payload, items_in_context, exclude_ids, user_message, customer_id):
+    print("\n--- Executing AI-Powered Graph Catalog Search ---")
+    
+    raw_filters = payload.get("filters", {}) or {}
+    soft_constraints = payload.get("soft_constraints", {}) or {}
+    boosts = payload.get("preference_boosts", []) or []
+    penalties = payload.get("penalties", {}) or {}
+    hints = payload.get("purchase_history_hints", {}) or {}
+    
+    filters = {}
+    for k, v in raw_filters.items():
+        resolved_v = resolve_attribute_node(G, v)
+        filters[k] = resolved_v if resolved_v else v
+
+    print(f"--> Translating user message: '{user_message}'")
+    user_text_math = text_model.encode(user_message, convert_to_tensor=True)
+    
+    gnn_user_math = None
+    if customer_id in user_mapping:
+        math_idx = user_mapping[customer_id]
+        gnn_user_math = FINAL_USERS[math_idx]
+    else:
+        print(f"--> Note: Customer '{customer_id}' is new! Relying strictly on Text Vibe.")
+
+    all_articles = [n for n, attr in G.nodes(data=True) if attr.get('type') == 'article']
+    valid_items = []
+    discarded_reasons = [] 
+    
+    for article_id in all_articles:
+        item_name = G.nodes[article_id].get('name', 'Unknown Product')
+        
+        if article_id in exclude_ids:
+            discarded_reasons.append({
+                "article_id": str(article_id),
+                "name": item_name,
+                "reason": "Explicitly excluded by user history/context"
+            })
+            continue 
+            
+        is_valid = True
+        for key, required_value in filters.items():
+            if not G.has_edge(article_id, required_value):
+                is_valid = False
+                discarded_reasons.append({
+                    "article_id": str(article_id),
+                    "name": item_name,
+                    "reason": f"Failed filter constraint: Missing attribute node '{required_value}'"
+                })
+                break 
+                
+        if is_valid:
+            valid_items.append(article_id)
+
+    soft_filter_fallback = False
+    if not valid_items:
+        print("--> Notice: Strict filter yielded 0 items. Softening filter constraints to prevent empty results.")
+        valid_items = [n for n in all_articles if n not in exclude_ids]
+        soft_filter_fallback = True
+
+    item_scores = {}
+    
+    for item_id in valid_items:
+        score = 1.0 
+        item_attributes = list(G.neighbors(item_id))
+        
+        if item_id in item_mapping:
+            item_idx = item_mapping[item_id]
+            
+            item_text_math = product_math[item_idx]
+            vibe_match = torch.nn.functional.cosine_similarity(user_text_math.unsqueeze(0), item_text_math.unsqueeze(0)).item()
+            score += (vibe_match * 5.0)
+            
+            if gnn_user_math is not None:
+                item_gnn_math = FINAL_ITEMS[item_idx]
+                history_match = torch.sigmoid(torch.dot(gnn_user_math, item_gnn_math)).item()
+                score += (history_match * 3.0)
+
+        if soft_filter_fallback:
+            for key, required_value in filters.items():
+                if not G.has_edge(item_id, required_value):
+                    score -= 4.0
+
+        for boost in boosts:
+            raw_boost_val = boost.get("value")
+            resolved_boost_val = resolve_attribute_node(G, raw_boost_val)
+            if resolved_boost_val in item_attributes or raw_boost_val in item_attributes:
+                score += boost.get("weight", 0.0)
+                
+        for penalty_key, bad_values in penalties.items():
+            for bad_val in bad_values:
+                resolved_bad_val = resolve_attribute_node(G, bad_val)
+                if resolved_bad_val in item_attributes or bad_val in item_attributes:
+                    score -= 5.0
+                    discarded_reasons.append({
+                        "article_id": str(item_id),
+                        "name": G.nodes[item_id].get('name', 'Unknown Product'),
+                        "reason": f"Penalized due to attribute '{bad_val}'"
+                    })
+                    
+        for constraint_type, constraint_val in soft_constraints.items():
+            resolved_c_val = resolve_attribute_node(G, constraint_val)
+            if resolved_c_val in item_attributes or constraint_val in item_attributes:
+                score += 0.5 
+                
+        top_colours = hints.get("top_colours", [])
+        for color in top_colours:
+            resolved_color = resolve_attribute_node(G, color)
+            if resolved_color in item_attributes or color in item_attributes:
+                score += 0.1 
+
+        item_scores[item_id] = score
+
+    ranked_items = sorted(item_scores.items(), key=lambda x: x[1], reverse=True)
+    
+    # ── Extract and normalize requested quantity with default fallback of 2 ──
+    raw_quantity = payload.get("quantity") if payload else None
+
+    try:
+        if raw_quantity is not None and str(raw_quantity).strip().isdigit():
+            requested_quantity = int(raw_quantity)
+            if requested_quantity <= 0:
+                requested_quantity = 2
+        else:
+            requested_quantity = 2
+    except Exception:
+        requested_quantity = 2
+
+    final_results = []
+    
+    print(f"\n--> Scoring complete! Target items to retrieve: {requested_quantity} (raw input: {raw_quantity})")
+    for item_id, final_score in ranked_items[:requested_quantity]:
+        item_name = G.nodes[item_id].get('name', 'Unknown Product')
+        reasoning = generate_reasoning_path(G, customer_id, item_id)
+        
+        result_package = {
+            "article_id": str(item_id),
+            "name": item_name,
+            "final_score": round(final_score, 2),
+            "reasoning_path": reasoning
+        }
+        final_results.append(result_package)
+
+    for item_id, final_score in ranked_items[requested_quantity:requested_quantity + 3]:
+        discarded_reasons.append({
+            "article_id": str(item_id),
+            "name": G.nodes[item_id].get('name', 'Unknown Product'),
+            "reason": f"Lower relevance match score ({round(final_score, 2)})"
+        })
+
+    return {
+        "status": "success", 
+        "data": final_results, 
+        "counterfactuals": discarded_reasons[:5]
+    }
+
+# ==========================================
+# SECONDARY HELPERS
+# ==========================================
+
+def run_attribute_lookup(G, payload, items_in_context):
     print("\n--- Executing Graph Attribute Lookup ---")
     
-    actual_id = resolve_graph_id(G, payload.get("article_id"))
+    raw_id = payload.get("article_id") or items_in_context.get("item_a")
+    actual_id = resolve_graph_id(G, raw_id)
     topic = payload.get("attribute_topic", "general_details")
     
     if not actual_id:
-        print(f"--> Error: Article {payload.get('article_id')} not found in graph.")
+        print(f"--> Error: Article ID not found in payload or context.")
         return {"status": "error", "data": []}
         
     node_data = G.nodes[actual_id]
@@ -260,7 +295,6 @@ def run_attribute_lookup(G, payload):
     
     found_attributes = []
     
-    # Traverse edges and filter based on the requested topic
     for neighbor in neighbors:
         edge_data = G.get_edge_data(actual_id, neighbor)
         relation = edge_data.get("relation", "")
@@ -286,7 +320,6 @@ def run_attribute_lookup(G, payload):
 def run_item_compare(G, payload, items_in_context):
     print("\n--- Executing Graph Comparison ---")
     
-    # Check payload first, fallback to items_in_context
     raw_a = payload.get("article_id_a") or items_in_context.get("item_a")
     raw_b = payload.get("article_id_b") or items_in_context.get("item_b")
     
@@ -300,15 +333,12 @@ def run_item_compare(G, payload, items_in_context):
     name_a = G.nodes[actual_id_a].get("name", str(actual_id_a))
     name_b = G.nodes[actual_id_b].get("name", str(actual_id_b))
     
-    # Get all connected attribute nodes
     attrs_a = set(G.neighbors(actual_id_a))
     attrs_b = set(G.neighbors(actual_id_b))
     
-    # Filter out numeric item IDs AND long 64-character Customer ID hashes
     attrs_a = {str(a) for a in attrs_a if not str(a).isdigit() and len(str(a)) < 40}
     attrs_b = {str(a) for a in attrs_b if not str(a).isdigit() and len(str(a)) < 40}
     
-    # Math set operations for shared vs unique traits
     shared = list(attrs_a.intersection(attrs_b))
     unique_a = list(attrs_a - attrs_b)
     unique_b = list(attrs_b - attrs_a)
@@ -324,14 +354,15 @@ def run_item_compare(G, payload, items_in_context):
         }]
     }
 
-def run_explanation_generate(G, payload):
+def run_explanation_generate(G, payload, items_in_context):
     print("\n--- Executing Graph Explanation Generation ---")
     
-    actual_id = resolve_graph_id(G, payload.get("article_id"))
+    raw_id = payload.get("article_id") or items_in_context.get("item_a")
+    actual_id = resolve_graph_id(G, raw_id)
     matched_prefs = payload.get("matched_prefs", [])
     
     if not actual_id:
-        print(f"--> Error: Article {payload.get('article_id')} not found in graph.")
+        print(f"--> Error: Article ID not found in payload or context.")
         return {"status": "error", "data": []}
         
     name = G.nodes[actual_id].get("name", "Unknown Product")
@@ -339,11 +370,14 @@ def run_explanation_generate(G, payload):
     
     for pref in matched_prefs:
         pref_value = pref.get("attribute_value")
+        resolved_pref_value = resolve_attribute_node(G, pref_value) or pref_value
         
-        if G.has_edge(actual_id, pref_value):
-            edge_data = G.get_edge_data(actual_id, pref_value)
+        target_node = resolved_pref_value if G.has_edge(actual_id, resolved_pref_value) else (pref_value if G.has_edge(actual_id, pref_value) else None)
+        
+        if target_node:
+            edge_data = G.get_edge_data(actual_id, target_node)
             relation = edge_data.get("relation", "MATCHES")
-            verified_paths.append(f"{name} ➔ {relation} ➔ {pref_value}")
+            verified_paths.append(f"{name} ➔ {relation} ➔ {target_node}")
             
     explanation_package = {
         "article_id": str(actual_id),
@@ -354,27 +388,27 @@ def run_explanation_generate(G, payload):
     print(f"--> Verified {len(verified_paths)} preference connections for {name}")
     return {"status": "success", "data": [explanation_package]}
 
-def run_item_detail_lookup(G, payload):
+def run_item_detail_lookup(G, payload, items_in_context):
     print("\n--- Executing Graph Item Detail Lookup ---")
     
-    actual_id = resolve_graph_id(G, payload.get("article_id"))
+    raw_id = payload.get("article_id") or items_in_context.get("item_a")
+    actual_id = resolve_graph_id(G, raw_id)
     
     if not actual_id:
-        print(f"--> Error: Article {payload.get('article_id')} not found in graph.")
+        print(f"--> Error: Article ID not found in payload or context.")
         return {"status": "error", "data": []}
         
     node_data = G.nodes[actual_id]
     
     connected_attributes = []
     for neighbor in G.neighbors(actual_id):
-        # Ignore long customer ID hashes to save LLM tokens
         if len(str(neighbor)) < 40:
             edge_data = G.get_edge_data(actual_id, neighbor)
             relation = edge_data.get("relation") if edge_data else "UNKNOWN_RELATION"
             connected_attributes.append(f"{relation}: {neighbor}")
     
     item_details = {
-        "article_id": str(actual_id), # Always return as string to satisfy frontend
+        "article_id": str(actual_id),
         "name": node_data.get("name", "Unknown Product"),
         "description": node_data.get("description", ""),
         "graph_connections": connected_attributes 
@@ -386,13 +420,15 @@ def run_item_detail_lookup(G, payload):
 # ==========================================
 # THE TICKET READER (The Router)
 # ==========================================
+
 def handle_retrieval_request(G, retrieval_input):
-    if retrieval_input is None: return None
+    if retrieval_input is None: 
+        return None
 
     action = retrieval_input.get("action")
-    items_in_context = retrieval_input.get("items_in_context", {})
-    exclude_ids = retrieval_input.get("exclude_ids", [])
-    payload = retrieval_input.get("payload", {})
+    items_in_context = retrieval_input.get("items_in_context") or {}
+    exclude_ids = retrieval_input.get("exclude_ids") or []
+    payload = retrieval_input.get("payload") or {}
     
     user_message = retrieval_input.get("user_message", "")
     customer_id = retrieval_input.get("customer_id", "Unknown") 
@@ -400,33 +436,12 @@ def handle_retrieval_request(G, retrieval_input):
     if action == "catalog_search":
         return run_catalog_search(G, payload, items_in_context, exclude_ids, user_message, customer_id)
     elif action == "item_attribute_lookup":
-        return run_attribute_lookup(G, payload)
+        return run_attribute_lookup(G, payload, items_in_context)
     elif action == "item_compare":
-        # Pass payload and items_in_context since the ID could be in either
         return run_item_compare(G, payload, items_in_context)
     elif action == "explanation_generate":
-        return run_explanation_generate(G, payload)
+        return run_explanation_generate(G, payload, items_in_context)
     elif action == "item_detail_lookup":
-        return run_item_detail_lookup(G, payload)
+        return run_item_detail_lookup(G, payload, items_in_context)
     else:
         return {"status": "success", "data": "Routed to secondary function."}
-
-# ==========================================
-# TEST THE ENTIRE PIPELINE
-# ==========================================
-if __name__ == "__main__":
-    kg = construct_knowledge_graph() 
-    
-    dummy_ticket = {
-        "action": "catalog_search",
-        "retrieval_strategy": "FULL",
-        "customer_id": "7f0ac4394297dc4a885d3b9277ba526cbbfbf7fb7cae465b256ed8e55b864f03",
-        "user_message": "are there any skirts",
-        "items_in_context": {"item_a": None, "item_b": None},
-        "exclude_ids": ["108775015"],
-        "payload": {
-            "filters": {}
-        }
-    }
-
-    handle_retrieval_request(kg, dummy_ticket)
