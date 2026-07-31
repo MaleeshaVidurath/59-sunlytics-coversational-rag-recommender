@@ -476,6 +476,7 @@ class EvidenceAssembler:
         pref_weights     = payload.get("preference_weights", {})
         user_message     = ri.get("user_message", "")
         ids_list         = payload.get("article_ids_list")  # all context items if >2
+        items_in_context = ri.get("items_in_context", {})
         use_historical   = mc.get("use_historical_items", False)
         historical_items = mc.get("historical_items", [])
 
@@ -483,19 +484,29 @@ class EvidenceAssembler:
             _names = [h.get("prod_name", "?") for h in historical_items[:2] if isinstance(h, dict)]
             print(f"[ASSEMBLER-COMPARE] historical items: {_names} — context_article path will be used")
 
-        ctx_a = payload.get("context_article_a") or {}
-        ctx_b = payload.get("context_article_b") or {}
+        ctx_a = payload.get("context_article_a") or items_in_context.get("item_a") or {}
+        ctx_b = payload.get("context_article_b") or items_in_context.get("item_b") or {}
 
-        if ctx_a.get("detail_desc") and ctx_b.get("detail_desc"):
+        # Require BOTH items to have detail_desc to skip DB query.
+        # If either has None/empty detail_desc, fetch full data from database.
+        has_full_ctx_a = ctx_a.get("detail_desc") and str(ctx_a.get("detail_desc")).strip()
+        has_full_ctx_b = ctx_b.get("detail_desc") and str(ctx_b.get("detail_desc")).strip()
+
+        if has_full_ctx_a and has_full_ctx_b:
             print("[ASSEMBLER-COMPARE] using stored context for both items (no DB query)")
             item_a = _ctx_to_article(ctx_a)
             item_b = _ctx_to_article(ctx_b)
         else:
-            print("[ASSEMBLER-COMPARE] context missing detail_desc — querying DB")
+            print(f"[ASSEMBLER-COMPARE] context missing detail_desc (a={has_full_ctx_a} b={has_full_ctx_b}) — querying DB for complete data")
             item_a, item_b = await get_articles_for_comparison(
                 str(id_a) if id_a else "",
                 str(id_b) if id_b else ""
             )
+            # Log what we fetched from DB
+            if item_a:
+                print(f"[ASSEMBLER-COMPARE] DB fetch: item_a={item_a.get('prod_name')} detail_desc={'present' if item_a.get('detail_desc') else 'NULL'}")
+            if item_b:
+                print(f"[ASSEMBLER-COMPARE] DB fetch: item_b={item_b.get('prod_name')} detail_desc={'present' if item_b.get('detail_desc') else 'NULL'}")
 
         # Build items_all for multi-item comparisons (>2 items)
         items_all = None
@@ -835,13 +846,13 @@ def _build_material_facts(facts: dict, item_a: dict, item_b: dict, items_all: Op
         facts["all_items"] = [
             {
                 "name":        a.get("prod_name", ""),
-                "description": a.get("detail_desc", "")[:200],
+                "description": (a.get("detail_desc") or "")[:200],
             }
             for a in items_all
         ]
     else:
-        facts["item_a_description"] = item_a.get("detail_desc", "")[:200]
-        facts["item_b_description"] = item_b.get("detail_desc", "")[:200]
+        facts["item_a_description"] = (item_a.get("detail_desc") or "")[:200]
+        facts["item_b_description"] = (item_b.get("detail_desc") or "")[:200]
 
 
 def _build_style_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optional[list]) -> None:
@@ -851,7 +862,7 @@ def _build_style_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optio
                 "name":    a.get("prod_name", ""),
                 "section": a.get("section_name", ""),
                 "garment": a.get("garment_group_name", ""),
-                "desc":    a.get("detail_desc", "")[:150],
+                "desc":    (a.get("detail_desc") or "")[:150],
             }
             for a in items_all
         ]
@@ -860,8 +871,8 @@ def _build_style_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optio
         facts["item_b_section"]    = item_b.get("section_name", "")
         facts["item_a_garment"]    = item_a.get("garment_group_name", "")
         facts["item_b_garment"]    = item_b.get("garment_group_name", "")
-        facts["item_a_desc_short"] = item_a.get("detail_desc", "")[:150]
-        facts["item_b_desc_short"] = item_b.get("detail_desc", "")[:150]
+        facts["item_a_desc_short"] = (item_a.get("detail_desc") or "")[:150]
+        facts["item_b_desc_short"] = (item_b.get("detail_desc") or "")[:150]
 
 
 def _build_overall_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optional[list]) -> None:
@@ -872,7 +883,7 @@ def _build_overall_facts(facts: dict, item_a: dict, item_b: dict, items_all: Opt
                 "price":  _format_price(a.get("avg_price")),
                 "colour": a.get("colour_group_name", ""),
                 "type":   a.get("product_type_name", ""),
-                "desc":   a.get("detail_desc", "")[:150],
+                "desc":   (a.get("detail_desc") or "")[:150],
             }
             for a in items_all
         ]
@@ -883,6 +894,6 @@ def _build_overall_facts(facts: dict, item_a: dict, item_b: dict, items_all: Opt
         facts["item_b_colour"]     = item_b.get("colour_group_name", "")
         facts["item_a_type"]       = item_a.get("product_type_name", "")
         facts["item_b_type"]       = item_b.get("product_type_name", "")
-        facts["item_a_desc_short"] = item_a.get("detail_desc", "")[:150]
-        facts["item_b_desc_short"] = item_b.get("detail_desc", "")[:150]
+        facts["item_a_desc_short"] = (item_a.get("detail_desc") or "")[:150]
+        facts["item_b_desc_short"] = (item_b.get("detail_desc") or "")[:150]
 

@@ -312,7 +312,34 @@ def _build_catalog_terms() -> tuple:
     return frozenset(type_terms), frozenset(name_tokens)
 
 
+def _build_product_names() -> frozenset:
+    """
+    Reads sample_articles.csv and returns a frozenset of ALL product names
+    (lowercased) for Stage 2e product-name matching.
+
+    This catches exact product names like "Jeff AOP(1)" that don't match
+    token-level checks but still refer to actual catalog items.
+    """
+    import csv as _csv
+    _csv_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                     "shared", "main_data_set", "sample_articles.csv")
+    )
+    names: set = set()
+    try:
+        with open(_csv_path, encoding="utf-8") as _f:
+            for _row in _csv.DictReader(_f):
+                _pn = _row.get("prod_name", "").strip().lower()
+                if _pn:
+                    names.add(_pn)
+    except Exception as _e:
+        print(f"[FashionGuard] Warning: could not load product names: {_e}")
+    print(f"[FashionGuard] Product names loaded: {len(names)} unique names")
+    return frozenset(names)
+
+
 _CATALOG_TYPE_TERMS, _CATALOG_NAME_TOKENS = _build_catalog_terms()
+_CATALOG_PRODUCT_NAMES = _build_product_names()
 
 # ── Stage 1: Continuation bypass phrases ──────────────────────────────────────
 # When these appear in a message that has conversation history, the message
@@ -591,6 +618,23 @@ def _fg_stage2b_block(msg: str) -> tuple | None:
     return None
 
 
+def _fg_stage2e_product_names(msg: str) -> tuple | None:
+    """
+    Stage 2e: Product name matching. Checks if any product name from the
+    catalog appears in the user message (exact or partial match).
+    Returns True if found, None otherwise to continue pipeline.
+
+    Catches cases like "what is the colour of Jeff AOP(1)" where "jeff aop(1)"
+    is an actual product name in the database.
+    """
+    msg_lower = msg.lower()
+    for prod_name in _CATALOG_PRODUCT_NAMES:
+        if prod_name in msg_lower:
+            print(f"[FashionGuard] Stage2e-product-name: matched '{prod_name}' in '{msg[:60]}'")
+            return True, 0.96, "stage2e_product_name"
+    return None
+
+
 def _fg_stage3(message: str, msg: str) -> tuple[tuple | None, float, float]:
     """Stage 3: dual-pool semantic scoring. Returns (result_or_None, f_score, o_score)."""
     f_score, o_score = _semantic_scores(message)
@@ -626,6 +670,7 @@ async def is_fashion_relevant_async(
         _fg_stage1(msg, history),
         _fg_stage2_allow(msg, msg_words, history),
         _fg_stage2b_block(msg),
+        _fg_stage2e_product_names(msg),
     ):
         if check is not None:
             return check
@@ -665,6 +710,11 @@ def is_fashion_relevant(message: str) -> tuple:
     for pattern in _BLOCKLIST_PATTERNS:
         if re.search(pattern, msg):
             return False, 0.05
+
+    # Stage 2e: product name matching
+    result = _fg_stage2e_product_names(msg)
+    if result is not None:
+        return result[:2]
 
     # Stage 3: semantic scoring — runs for ALL remaining messages
     f_score, o_score = _semantic_scores(message)
