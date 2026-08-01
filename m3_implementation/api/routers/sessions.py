@@ -1,6 +1,6 @@
 # m3_implementation/api/routers/sessions.py
 from fastapi import APIRouter, HTTPException, Query
-from memory.db.mongo import get_db
+from memory.db.mongo import get_db, get_collection_name
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -113,16 +113,48 @@ async def get_session_history(session_id: str, user_id: str = Query(...)):
         ).sort("created_at", 1).to_list(length=200)
         turns = turn_docs
 
+    # Product cards live in the recommendations collection, linked to a turn by
+    # recommendation_id. Without this join a reopened chat shows only the text,
+    # losing the product cards and the "why this for you" reasoning entirely.
+    rec_ids = [t.get("recommendation_id") for t in turns if t.get("recommendation_id")]
+    recs_by_id = {}
+    if rec_ids:
+        for prefix in ("m3", "m2", "m1"):
+            try:
+                coll = get_collection_name("recommendations", prefix)
+                async for rec in db[coll].find({"recommendation_id": {"$in": rec_ids}}):
+                    recs_by_id.setdefault(rec["recommendation_id"], rec)
+            except Exception as e:
+                print(f"[Sessions] recommendation lookup ({prefix}) skipped: {e}")
+
+    def _to_card(item: dict) -> dict:
+        """Maps a stored ItemInContext to the shape ProductCard expects."""
+        return {
+            "article_id":    str(item.get("article_id", "")),
+            "name":          item.get("prod_name", ""),
+            "colour":        item.get("colour_group_name", ""),
+            "type":          item.get("product_type_name", ""),
+            "price":         (f"£{float(item['price']):.2f}"
+                              if item.get("price") is not None else ""),
+            "description":   (item.get("detail_desc") or "")[:120],
+            "pattern":       item.get("graphical_appearance_name", ""),
+            "why":           item.get("why") or [],
+            "match_percent": item.get("match_percent"),
+        }
+
     messages = []
     for t in turns:
         classification = t.get("classification") or {}
+        rec_id = t.get("recommendation_id")
+        rec    = recs_by_id.get(rec_id) if rec_id else None
         messages.append({
             "turn_id":           t.get("turn_id", ""),
             "role":              t.get("role", ""),
             "content":           t.get("content", ""),
             "timestamp":         str(t.get("timestamp", t.get("created_at", ""))),
             "label":             classification.get("label", "") if classification else "",
-            "recommendation_id": t.get("recommendation_id", None),
+            "recommendation_id": rec_id,
+            "items_recommended": [_to_card(i) for i in (rec.get("items", []) if rec else [])],
         })
 
     return {

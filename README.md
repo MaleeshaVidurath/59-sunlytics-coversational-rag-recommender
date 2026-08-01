@@ -52,13 +52,29 @@ sunlytics-rag-recommender/
 │   └── notebooks/
 │       └── M2_multimodal_rag.ipynb
 │
-├── m3_adaptive_rag/
-│   ├── adaptive_trigger.py
-│   ├── hallucination_guard.py
-│   ├── explanation_memory.py
-│   ├── orchestrator.py
-│   └── notebooks/
-│       └── M3_adaptive_rag.ipynb
+├── m3_implementation/
+│   ├── api/                          # FastAPI app + routers (chat, sessions, auth)
+│   ├── adaptive_rag/
+│   │   └── distilbert_training/      # per-turn retrieval trigger classifier
+│   ├── memory/
+│   │   ├── core/                     # pipeline, enrichment, CSE, preferences,
+│   │   │                             #   contradiction detection
+│   │   ├── db/                       # MongoDB + Redis clients
+│   │   └── models/schemas.py
+│   ├── text_rag/
+│   │   ├── core/
+│   │   │   ├── evidence_assembler.py     # action → evidence bundle
+│   │   │   ├── personalized_ranker.py    # per-user selection + "why" reasons
+│   │   │   ├── response_generator.py     # action-specific prompts
+│   │   │   ├── hallucination_checker.py  # NLI + exact-value gates
+│   │   │   └── rag_pipeline.py           # generate → check → regenerate loop
+│   │   └── db/
+│   │       ├── postgres_client.py        # 41,794 articles, structured filters
+│   │       ├── qdrant_client.py          # semantic search
+│   │       └── article_stats.py          # offline buying statistics builder
+│   └── test_result/                  # evaluation suites and results
+│
+├── frontend/                         # React + Vite chat UI
 │
 ├── shared/
 │   ├── config.py
@@ -117,6 +133,29 @@ kaggle competitions download \
 ### 5. Configure paths
 
 Edit `shared/config.py` and set `DATA_DIR` to your local data folder.
+
+### 6. Build the databases (M3)
+
+M3 needs PostgreSQL, Qdrant, MongoDB and Redis running locally.
+
+```bash
+cd m3_implementation
+
+# Articles into PostgreSQL + vectors into Qdrant (~10-15 min for indexing)
+python -m text_rag.core.rag_pipeline --setup
+
+# Per-customer purchase profiles into MongoDB
+python -m memory.core.customer_profile_loader
+
+# Per-article buying statistics — required by the personalised ranker
+python -m text_rag.db.article_stats --build
+```
+
+The last step creates the `article_stats` and `group_stats` tables that drive popularity,
+age-group matching and the "why this for you" reasons. **If it is skipped**, the system
+still runs: the ranker logs a warning and falls back to user-history and semantic signals
+only, losing the buying-statistics half of the ranking. Rebuild with `--force` after any
+CSV change.
 
 ---
 
@@ -190,6 +229,14 @@ refactor(m3): simplify adaptive trigger logic
 3. **Adaptive Retrieval Trigger** — per-turn decision whether to retrieve or reuse cached evidence
 4. **NLI Hallucination Guard** — sentence-level entailment check before any response reaches the user
 5. **Explanation Memory** — cross-turn coherence tracking to prevent contradictions
+6. **Traceable Personalised Ranking** — once hard filters are satisfied every candidate is
+   equally valid, so selection is decided by a transparent scorer blending the user's own
+   purchase behaviour with per-article buying statistics (popularity, age-group affinity,
+   repeat rate). Every signal that fires records a plain-language reason containing a real
+   statistic, and those reasons are what the user sees, what the "why did you recommend
+   this" answer cites, and what the hallucination checker verifies — so the justification
+   is a trace of the actual decision rather than a story reconstructed afterwards.
+   See [`PERSONALIZED_RANKER_PROCESS.md`](m3_implementation/text_rag/core/PERSONALIZED_RANKER_PROCESS.md)
 
 ---
 
