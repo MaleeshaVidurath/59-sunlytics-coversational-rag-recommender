@@ -71,7 +71,7 @@ def _build_catalog_search_prompt(evidence: dict, strictness: int = 0) -> str:
     for i, item in enumerate(items, 1):
         price = item.get("price", "N/A")
         desc  = item.get("material_description", "")[:200]
-        item_texts.append(
+        line = (
             f"Option {i}: {item.get('name','')} | "
             f"Type: {item.get('type','')} | "
             f"Colour: {item.get('colour','')} | "
@@ -82,6 +82,14 @@ def _build_catalog_search_prompt(evidence: dict, strictness: int = 0) -> str:
             f"Garment group: {item.get('garment_group','')} | "
             f"Description: {desc}"
         )
+        # Ranking reasons are computed from real statistics, so they are the
+        # only justification the model is allowed to give. Without this the
+        # model invents its own "matches your style" claims.
+        for reason in item.get("why", []):
+            line += f"\n    WHY THIS WAS SELECTED: {reason}"
+        item_texts.append(line)
+
+    any_why = any(item.get("why") for item in items)
 
     pref_text = ""
     if prefs:
@@ -127,7 +135,7 @@ Write a recommendation response:
 - Keep total response under 100 words
 - Do not mention internal IDs or article numbers
 - Do not invent details not in the evidence above
-- Do not say items "suit the user" or "match preferences" unless explicitly listed in evidence above
+- {"For the 'why' sentence, paraphrase ONLY the WHY THIS WAS SELECTED lines for that item. Never invent a different reason." if any_why else 'Do not say items "suit the user" or "match preferences" unless explicitly listed in evidence above'}
 - Format each item clearly on its own line starting with Option number
 - Use plain text only, no markdown, no asterisks, no dashes"""
 
@@ -250,27 +258,55 @@ Write a clear comparison in 2-3 sentences. State which clothing item is better f
 def _build_explanation_all_prompt(evidence: dict, strictness: int = 0) -> str:
     """Prompt when user asks 'why' with no specific product name — summarise all recommended items."""
     articles  = evidence.get("articles", [])
-    all_prefs = evidence.get("matched_prefs", [])
     user_msg  = evidence.get("user_message", "")
 
+    # Per-item reasons recovered from the ranker. These are the ACTUAL signals
+    # that selected each item, so they are what the explanation must cite.
     item_lines = []
+    have_reasons = False
     for i, a in enumerate(articles, 1):
         item_lines.append(
             f"  Option {i}: {a.get('name','')} | "
             f"{a.get('colour','')} {a.get('type','')} | {a.get('price','')}"
         )
+        for reason in a.get("why", []):
+            have_reasons = True
+            item_lines.append(f"      REASON IT WAS SELECTED: {reason}")
 
-    top_prefs = sorted(all_prefs, key=lambda x: x.get("weight", 0), reverse=True)[:3]
-    pref_text = ", ".join(
-        f"{p.get('attribute_value','')} {p.get('attribute_name','').replace('_group_name','').replace('_name','').replace('_','  ')}"
-        for p in top_prefs if p.get("attribute_value")
-    ) or "general fashion preferences"
+    if have_reasons:
+        # Grounded path: cite only the reasons that actually fired.
+        strictness_instruction = {
+            0: "Give a natural, friendly explanation in 2-3 sentences.",
+            1: "STRICT MODE: Reference only the REASON lines listed below.",
+            2: "STRICTEST MODE: One sentence per item, each restating one REASON line.",
+        }.get(strictness, "Give a natural, friendly explanation in 2-3 sentences.")
 
+        return FASHION_CONTEXT + f"""You are a fashion shopping assistant.
+{strictness_instruction}
+
+USER QUESTION: "{user_msg}"
+
+RECOMMENDED ITEMS AND THE REASONS THEY WERE SELECTED:
+{chr(10).join(item_lines)}
+
+TASK: Explain why these items were recommended.
+- Base every justification ONLY on the REASON lines above; paraphrase them naturally
+- Include the specific numbers from the REASON lines, they make the answer credible
+- You may reference individual items by name
+- Keep total response under 100 words
+
+STRICT RULES:
+- Never claim the user asked for something that is not in their question above
+- Never mention a product type, colour or category that is not in the items listed
+- If a REASON line is not listed for an item, do not invent one for it"""
+
+    # Fallback: ranker reasons unavailable (e.g. stats tables not built yet).
+    # Stay vague rather than fabricating a specific preference match.
     strictness_instruction = {
-        0: "Give a natural, friendly group explanation in 2-3 sentences.",
-        1: "STRICT MODE: Only reference items and preferences listed below.",
+        0: "Give a natural, friendly group explanation in 2 sentences.",
+        1: "STRICT MODE: Only reference the items listed below.",
         2: "STRICTEST MODE: One sentence per item. No additional claims.",
-    }.get(strictness, "Give a natural, friendly group explanation in 2-3 sentences.")
+    }.get(strictness, "Give a natural, friendly group explanation in 2 sentences.")
 
     return FASHION_CONTEXT + f"""You are a fashion shopping assistant.
 {strictness_instruction}
@@ -280,12 +316,13 @@ USER QUESTION: "{user_msg}"
 RECOMMENDED ITEMS:
 {chr(10).join(item_lines)}
 
-USER PREFERENCES: {pref_text}
+TASK: Explain briefly why these items were shown.
+- Say they match what the user asked for, and describe the items themselves
+- Keep total response under 60 words
 
-TASK: Explain briefly why these items were recommended as a group.
-- Mention how the overall selection matches the user's preferences
-- You may reference individual items by name
-- Keep total response under 100 words
+STRICT RULES:
+- Do NOT claim the user asked for any product type other than what is shown above
+- Do NOT state which preferences matched: that information is not available here
 - Do not invent details not listed above"""
 
 
@@ -342,6 +379,11 @@ def _build_explanation_prompt(evidence: dict, strictness: int = 0) -> str:
 
     pref_lines = []
 
+    # Ranking reasons first: these are the signals that actually selected the
+    # item, computed from the user's history and the article's buying stats.
+    for reason in evidence.get("ranking_reasons", []):
+        pref_lines.append(f"  SELECTION REASON: {reason}")
+
     # Confirmed matches: article attribute literally equals preference value
     for m in matches[:4]:
         attr = _human(m.get("attribute", ""))
@@ -352,9 +394,15 @@ def _build_explanation_prompt(evidence: dict, strictness: int = 0) -> str:
             f"({_strength(wt)} preferred, weight={wt:.2f})"
         )
 
-    # Top user preferences (from matched_prefs in payload)
-    # These use attribute_name/attribute_value keys from enrichment layer
-    top_prefs = sorted(all_prefs, key=lambda x: x.get("weight", 0), reverse=True)[:5]
+    # Top user preferences, ONLY as a fallback. These are the user's globally
+    # highest-weighted preferences regardless of whether this item satisfies
+    # them, so citing them alongside real reasons invites the model to claim a
+    # match that never happened. Included only when nothing better exists.
+    top_prefs = (
+        []
+        if pref_lines
+        else sorted(all_prefs, key=lambda x: x.get("weight", 0), reverse=True)[:5]
+    )
     for p in top_prefs:
         attr = _human(p.get("attribute_name", p.get("attribute", "")))
         val  = p.get("attribute_value", p.get("value", ""))

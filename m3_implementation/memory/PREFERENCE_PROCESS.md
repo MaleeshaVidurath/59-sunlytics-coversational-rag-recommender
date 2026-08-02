@@ -144,25 +144,54 @@ sentiment_label, sentiment_score = classify_feedback(current_message)
 # sentiment_score: float in [-1.0, +1.0]
 ```
 
-**Step 2:** Extract attributes from the currently shown item (`item_a`):
+**Step 2:** Decide **which** attributes of `item_a` the feedback actually implicates —
+`_attribute_feedback()` in `enrichment.py`:
+
 ```python
-item_entities = {
-    "colour_group_name": item_a.colour_group_name,
-    "product_type_name": item_a.product_type_name,
-    "index_group_name":  item_a.index_group_name,    ← if available
-    "garment_group_name": item_a.garment_group_name, ← if available
-}
+item_entities, note = _attribute_feedback(item_a, all_shown, state.hard_constraints)
 ```
 
-**Step 3:** Update preferences using those item attributes + sentiment score:
+The user reacts to an item as a whole, and we do not know which of its attributes caused
+that reaction. Recording all of them at full strength is a credit-assignment error, and
+it compounds: after a few rejections the dislike list names most of the catalogue —
+including colours the user buys constantly and the very product type they just asked for.
+
+Three rules decide what survives:
+
+| Rule | Reasoning |
+|---|---|
+| **Contrastive** | An attribute shared by *every* item shown cannot explain why one was singled out. Four shirts shown, one rejected → "Shirt" explains nothing. If only that one was Red, Red is a genuine candidate |
+| **Requested** | Never blame an attribute the user asked for. Matched loosely across columns, so a "Skirt" request also protects the "Skirts" garment group |
+| **Demographic** | `index_group_name` is never attributable. A rejection is not evidence against an entire age/gender segment — and treating it that way demotes all adult clothing while leaving `Baby/Children` untouched |
+
+**Step 3:** Update preferences, **splitting the sentiment** across whatever survived:
 ```python
+split_sentiment = sentiment_score / len(item_entities)
 update_preferences_from_entities(
     entities=item_entities,
-    sentiment=sentiment_score,   ← e.g. +0.876 (positive) or -0.954 (negative)
+    sentiment=split_sentiment,   ← no single attribute absorbs the full strength
     source="implicit",
     confidence=0.80
 )
 ```
+
+Worked example — four shirts shown, the black one rejected:
+
+```
+BEFORE:  Black −0.8, Shirt −0.8, Ladieswear −0.8, Shirts −0.8
+AFTER:   Black −0.8
+         dropped: index_group_name  (demographic)
+                  product_type_name (user asked for it)
+                  garment_group_name (shared by all 4 items shown)
+```
+
+Only the attribute that actually distinguished the rejected item survives. Combined with
+the `effective_weight >= 0.5` threshold below, a dislike now needs repeated confirmation
+before it can influence ranking.
+
+**Note on existing data:** these rules govern *new* feedback. Profiles polluted before
+this change still hold the old entries, but the ranker's four penalty guards neutralise
+them at the point of use, so no migration is needed.
 
 **Step 4:** Update session state:
 - **Positive:** Add `item_a.article_id` to `accepted_items`. If score > 0.7, update `purchase_summary`.
@@ -287,10 +316,14 @@ payload = {
         "dominant_type":        "Dress"
     },
 
-    # PENALTIES — soft-demote items matching these in PostgreSQL ranking
-    # Applied as -0.5 score deduction in _rank_by_preferences(), NOT as SQL exclusions.
-    # Values matching the current turn's hard filters are automatically suppressed
-    # so user-requested attributes are never penalised.
+    # PENALTIES — soft-demote matching items during ranking, NOT SQL exclusions.
+    # Applied by PersonalizedRanker._c_dislike_penalty() with four guards:
+    #   1. values requested this turn are suppressed (matched loosely, so a
+    #      "Shirt" request also protects the "Shirts" garment group)
+    #   2. values holding >= 8% of the user's purchase history are never penalised
+    #   3. index_group_name is never penalised (demographic, not taste)
+    #   4. the total is capped at -0.5 per item, however many attributes hit
+    # The guards exist because dislike lists drift — see PERSONALIZED_RANKER_PROCESS.md.
     "penalties": {
         "colour_group_name": ["Orange"]   ← only strong dislikes (effective_weight >= 0.5)
     },
@@ -369,7 +402,8 @@ User: "I want a black dress under £40"
 | **Penalties are soft demotions, not hard exclusions** | Disliked items are scored `-0.5` in ranking, not removed from SQL results. User can still see them if no better alternatives exist |
 | **Filter suppression on penalties** | If a penalty value matches what the user explicitly asked for this turn (e.g. user asks for "Blue" but "Blue" is in penalties), the penalty is skipped for that turn |
 | **Merge, not replace** | New sentiment = (old × 0.7) + (new × 0.3) — prevents one strong signal from dominating |
-| **Feedback uses item attributes** | When user says "I don't like them", the system reads the shown item's colour and type and saves those as dislikes — not the words the user said |
+| **Feedback uses item attributes** | When user says "I don't like them", the system reads the shown item's attributes and saves those as dislikes — not the words the user said |
+| **Feedback is attributed contrastively** | Only attributes that *distinguish* the reacted-to item from the others shown are recorded, and the sentiment is split between them. Blaming every attribute equally is what let one rejection mark a whole wardrobe as disliked |
 | **Price is never a preference** | `price_max` and `price_min` are session-only filters. Budget tier comes from purchase history only. |
 | **inferred_gender is a soft boost, not a hard filter** | `inferred_gender` from purchase history adds `+0.25` to matching gender group items in ranking — it never blocks results from other groups, which is important for gift shoppers or mixed-history users |
 

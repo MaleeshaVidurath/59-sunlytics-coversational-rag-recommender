@@ -113,51 +113,48 @@ async def get_session_history(session_id: str, user_id: str = Query(...)):
         ).sort("created_at", 1).to_list(length=200)
         turns = turn_docs
 
-    # ── Attach recommended items to assistant turns ────────────────────
-    # Bot turns store only a recommendation_id; the item data (name,
-    # colour, price, article_id) lives in the model-prefixed
-    # recommendations collection. Without this join, product cards
-    # disappear when a session is reloaded after a browser refresh.
+    # Product cards live in the recommendations collection, linked to a turn by
+    # recommendation_id. Without this join a reopened chat shows only the text,
+    # losing the product cards and the "why this for you" reasoning entirely.
     rec_ids = [t.get("recommendation_id") for t in turns if t.get("recommendation_id")]
-    rec_items_map: dict = {}
+    recs_by_id = {}
     if rec_ids:
-        try:
-            lock = await db.session_model_locks.find_one(
-                {"session_id": session_id}, {"selected_model": 1}
-            )
-            model = (lock or {}).get("selected_model", "m3")
-            recs_coll = get_collection_name("recommendations", model)
-            rec_docs = await db[recs_coll].find(
-                {"recommendation_id": {"$in": rec_ids}},
-                {"recommendation_id": 1, "items": 1},
-            ).to_list(length=len(rec_ids))
-            for rec in rec_docs:
-                rec_items_map[rec["recommendation_id"]] = [
-                    {
-                        "article_id": str(it.get("article_id", "")),
-                        "name":       it.get("prod_name", ""),
-                        "colour":     it.get("colour_group_name", ""),
-                        "type":       it.get("product_type_name", ""),
-                        "price":      (f"£{it.get('price')}" if it.get("price") else ""),
-                        "description":(it.get("detail_desc") or "")[:120],
-                        "pattern":    it.get("graphical_appearance_name", ""),
-                    }
-                    for it in (rec.get("items") or [])
-                ]
-        except Exception as e:
-            print(f"[Sessions] recommendation items join warning (non-fatal): {e}")
+        for prefix in ("m3", "m2", "m1"):
+            try:
+                coll = get_collection_name("recommendations", prefix)
+                async for rec in db[coll].find({"recommendation_id": {"$in": rec_ids}}):
+                    recs_by_id.setdefault(rec["recommendation_id"], rec)
+            except Exception as e:
+                print(f"[Sessions] recommendation lookup ({prefix}) skipped: {e}")
+
+    def _to_card(item: dict) -> dict:
+        """Maps a stored ItemInContext to the shape ProductCard expects."""
+        return {
+            "article_id":    str(item.get("article_id", "")),
+            "name":          item.get("prod_name", ""),
+            "colour":        item.get("colour_group_name", ""),
+            "type":          item.get("product_type_name", ""),
+            "price":         (f"£{float(item['price']):.2f}"
+                              if item.get("price") is not None else ""),
+            "description":   (item.get("detail_desc") or "")[:120],
+            "pattern":       item.get("graphical_appearance_name", ""),
+            "why":           item.get("why") or [],
+            "match_percent": item.get("match_percent"),
+        }
 
     messages = []
     for t in turns:
         classification = t.get("classification") or {}
+        rec_id = t.get("recommendation_id")
+        rec    = recs_by_id.get(rec_id) if rec_id else None
         messages.append({
             "turn_id":           t.get("turn_id", ""),
             "role":              t.get("role", ""),
             "content":           t.get("content", ""),
             "timestamp":         str(t.get("timestamp", t.get("created_at", ""))),
             "label":             classification.get("label", "") if classification else "",
-            "recommendation_id": t.get("recommendation_id", None),
-            "items":             rec_items_map.get(t.get("recommendation_id"), []),
+            "recommendation_id": rec_id,
+            "items_recommended": [_to_card(i) for i in (rec.get("items", []) if rec else [])],
         })
 
     return {

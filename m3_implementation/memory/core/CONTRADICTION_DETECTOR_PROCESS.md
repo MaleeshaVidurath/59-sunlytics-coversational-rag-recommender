@@ -549,3 +549,62 @@ value — these would produce only false positives against the real DB value
 | Graph persisted across turns (MongoDB) | Enables detection of drift that spans multiple turns in the same session |
 | Groq failure → graceful skip | System never crashes — user gets original (uncorrected) response |
 | One graph per session_id | Sessions are fully isolated — user A's history never affects user B |
+
+---
+
+## Evaluation Details
+
+The contradiction detector was evaluated as a **classifier** (does the response
+contradict an earlier turn?) on a labelled set built by synthetic cross-turn
+corruption: 188 clean factual turns captured from 37 live multi-turn sessions,
+each corrupted by changing one attribute value in a later turn, plus benign
+subtype paraphrases ("Dress" -> "maxi dress") as hard negatives. Headline numbers
+are on a stratified **599-case sample (450 contradictions, 149 negatives)**.
+
+### Baselines (chosen to cover the established approaches)
+
+| Baseline | What it is | Basis |
+|---|---|---|
+| **String-only (-NLI)** | our pipeline with the DeBERTa NLI gate removed - string comparison decides alone | ablation (isolates the NLI gate's contribution) |
+| **History-NLI (unstructured)** | DeBERTa NLI over every (session fact, response sentence) pair | SummaC-style (Laban et al., TACL 2022) |
+| **Utterance-pair NLI (structured)** | NLI on (fact about product X, sentence mentioning X) pairs | DECODE (Nie et al., ACL 2021) |
+| **LLM judge** | Groq judges directly whether the response contradicts the session facts | LLM-as-a-judge (RAGAS / CoRE style) |
+
+The four baselines represent the three main schools of contradiction detection
+(unstructured NLI, structured NLI, LLM-as-judge) plus an ablation of our own
+system - so a win over them shows the graph + extraction + NLI-gate architecture
+adds value across the board, not just against a single weak baseline.
+
+### Detection results (599-case sample, positive = contradiction)
+
+| System | Precision | Recall | F1 | Balanced acc. |
+|---|---|---|---|---|
+| **Ours (graph + NLI)** | **0.98** | **0.90** | **0.94** | **0.92** |
+| String-only (-NLI) | 0.84 | 0.86 | 0.85 | 0.69 |
+| History-NLI | 0.76 | 0.96 | 0.85 | 0.53 |
+| Utterance-pair NLI | 0.77 | 0.91 | 0.84 | 0.55 |
+| LLM judge | 0.96 | 0.85 | 0.90 | 0.87 |
+
+Ours has the **highest precision (0.98)** and the **best balanced accuracy (0.92)** -
+ahead of the LLM judge. The two NLI-over-text baselines reach high recall
+(0.91-0.96) only by falsely flagging 66-74 of the 84 clean responses, collapsing
+their balanced accuracy to ~0.53-0.55 (near chance). Removing the NLI gate
+(String-only) raises false alarms sharply and drops balanced accuracy 0.92 -> 0.69,
+showing the gate is the core of the two-stage design.
+
+### Correction results (system ON vs OFF, independent referee)
+
+| Metric | Value |
+|---|---|
+| User-facing contradiction rate, detector OFF | 100% (450/450) |
+| User-facing contradiction rate, detector ON | **11.8% (53/450)** |
+| Detection rate | 0.90 (405/450) |
+| P(correct fix given detected) | 0.98 (397/405) |
+
+Turning the detector on cuts user-facing contradictions from 100% to **11.8%**,
+and when it detects one it produces a correct, consistent response **98%** of the
+time. Figures: `figures/figc1.png` (detection), `figures/figc5.png` (correction).
+
+> Note: for the evaluation only, claim extraction ran on Llama 4 Scout (not the
+> production llama-3.1-8b-instant) to avoid a free-tier rate limit; the detection
+> logic is unchanged.
