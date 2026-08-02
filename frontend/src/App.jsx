@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const BASE = "http://localhost:8000";
+const M2_IMAGE_BASE = "http://localhost:8001";   // M2 serves product photos at /api/images/{article_id}
 
 async function apiGetCustomers() {
   const r = await fetch(`${BASE}/api/auth/customers`);
@@ -98,15 +99,49 @@ function labelColor(label) {
 
 function ProductCard({ item }) {
   const why = item.why || [];
+  const [imgFailed, setImgFailed] = useState(false);
+  const [preview, setPreview]     = useState(false);
+  const imgSrc = `${M2_IMAGE_BASE}/api/images/${item.article_id}`;
   return (
     <div style={{ background:"#1a1a1a", border:`1px solid ${C.border}`,
       borderRadius:10, padding:"10px 14px", marginTop:8,
-      display:"flex", alignItems:"flex-start", gap:12 }}>
-      <div style={{ width:36, height:36, borderRadius:8, flexShrink:0,
-        background:`linear-gradient(135deg,${C.accentDim},${C.accent})`,
-        display:"flex", alignItems:"center", justifyContent:"center", fontSize:16 }}>
-        👗
-      </div>
+      display:"flex", alignItems:"flex-start", gap:14 }}>
+      {item.article_id && !imgFailed ? (
+        <img
+          src={imgSrc}
+          alt={item.name || "product"}
+          title="Click to enlarge"
+          onError={() => setImgFailed(true)}
+          onClick={() => setPreview(true)}
+          style={{ width:80, height:80, borderRadius:10, flexShrink:0,
+            objectFit:"cover", background:"#242424", cursor:"zoom-in",
+            border:`1px solid ${C.border}` }}
+        />
+      ) : (
+        <div style={{ width:80, height:80, borderRadius:10, flexShrink:0,
+          background:`linear-gradient(135deg,${C.accentDim},${C.accent})`,
+          display:"flex", alignItems:"center", justifyContent:"center", fontSize:26 }}>
+          👗
+        </div>
+      )}
+      {preview && (
+        <div
+          onClick={() => setPreview(false)}
+          style={{ position:"fixed", inset:0, zIndex:1000,
+            background:"rgba(0,0,0,0.88)", cursor:"pointer",
+            display:"flex", flexDirection:"column",
+            alignItems:"center", justifyContent:"center", gap:14 }}>
+          <img src={imgSrc} alt={item.name || "product"}
+            style={{ maxWidth:"82vw", maxHeight:"72vh", borderRadius:12,
+              boxShadow:"0 24px 80px rgba(0,0,0,0.7)" }} />
+          <div style={{ color:"#fff", fontWeight:600, fontSize:16 }}>{item.name}</div>
+          <div style={{ color:"#aaa", fontSize:13 }}>
+            {item.colour} · {item.type}{item.price ? ` · ${item.price}` : ""}
+          </div>
+          <div style={{ color:"#fff", fontSize:14, marginTop:6, opacity:0.85,
+            fontWeight:600 }}>Close</div>
+        </div>
+      )}
       <div style={{ flex:1, minWidth:0 }}>
         <div style={{ color:C.text, fontWeight:600, fontSize:13,
           whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>

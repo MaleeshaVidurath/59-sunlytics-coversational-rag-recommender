@@ -36,6 +36,8 @@ class FAISSDatabase:
                 # Load the row-to-article_id mapping so we know which vector = which product
                 self.mapping_df = pd.read_csv(self.mapping_path)
                 self.mapping = self.mapping_df['article_id'].astype(str).str.zfill(10).tolist()
+                # O(1) article_id → FAISS row lookup (used by filtered search + MMR)
+                self.article_to_idx = {aid: i for i, aid in enumerate(self.mapping)}
                 print(f"[OK] Successfully loaded {self.index.ntotal:,} vectors from FAISS database!")
                 
             except Exception as e:
@@ -45,9 +47,29 @@ class FAISSDatabase:
             print("[WARNING] 'm2_clip_faiss.bin' or mapping NOT FOUND in m2_multimodal_rag/vector_db/ directory.")
             print("[WARNING] Download both files from the Kaggle notebook Output tab and place them in m2_multimodal_rag/vector_db/")
 
-    def search(self, query_vector: np.ndarray, top_k: int = 5):
+    def build_id_selector(self, allowed_article_ids):
+        """
+        Filtered FAISS (index-level hard filtering): maps allowed article ids
+        to FAISS row positions and returns an IDSelectorBatch that restricts
+        the search to those rows only. Returns None when the DB is not ready,
+        the faiss build lacks SearchParameters support, or no allowed id
+        exists in the index — callers must fall back to unfiltered search.
+        """
+        if not self.database_ready or not allowed_article_ids:
+            return None
+        if not hasattr(faiss, "SearchParametersIP") and not hasattr(faiss, "SearchParameters"):
+            print("[WARNING] This faiss build lacks SearchParameters — index-level filtering disabled.")
+            return None
+        rows = [self.article_to_idx[aid] for aid in allowed_article_ids if aid in self.article_to_idx]
+        if not rows:
+            return None
+        return faiss.IDSelectorBatch(np.array(rows, dtype='int64'))
+
+    def search(self, query_vector: np.ndarray, top_k: int = 5, selector=None):
         """
         Executes an Inner-Product (Cosine Similarity) search in FAISS using the 512-D CLIP vector.
+        When `selector` (an IDSelector from build_id_selector) is given, FAISS only
+        scans the allowed rows — hard filters applied at index level.
         """
         if query_vector is None:
             return []
@@ -67,7 +89,14 @@ class FAISSDatabase:
             return list(zip(dummy_articles, dummy_scores))
 
         # Launch the actual real-time FAISS RAM search
-        distances, indices = self.index.search(query_vector, top_k)
+        if selector is not None:
+            # Older faiss builds expose SearchParametersIP; newer ones (>=1.8)
+            # use the generic SearchParameters for flat indexes.
+            params_cls = getattr(faiss, "SearchParametersIP", None) or faiss.SearchParameters
+            params = params_cls(sel=selector)
+            distances, indices = self.index.search(query_vector, top_k, params=params)
+        else:
+            distances, indices = self.index.search(query_vector, top_k)
 
         # Yield the (article_id, score) pairs
         results = []
@@ -78,6 +107,28 @@ class FAISSDatabase:
 
         return results
 
+    def search_multi(self, query_vectors: list, top_k: int = 50, selector=None) -> list:
+        """
+        Multi-Query FAISS search with Reciprocal Rank Fusion (RRF).
+        Runs a separate FAISS search for each query vector, then merges
+        the ranked lists using RRF (Cormack et al., 2009).
+        RRF score = Σ 1 / (k + rank)  where k=60 is the standard constant.
+        This preserves per-variant retrieval signals that mean-averaging loses.
+        """
+        K = 60  # standard RRF constant
+        rrf_scores: dict = {}
+
+        for vec in query_vectors:
+            if vec is None:
+                continue
+            results = self.search(vec, top_k=top_k, selector=selector)
+            for rank, (article_id, _) in enumerate(results):
+                rrf_scores[article_id] = rrf_scores.get(article_id, 0.0) + 1.0 / (K + rank + 1)
+
+        fused = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+        print(f"   [RRF] Fused {len(query_vectors)} query lists → {len(fused)} unique candidates")
+        return [(aid, score) for aid, score in fused[:top_k]]
+
     def get_item_vector(self, article_id: str) -> np.ndarray:
         """
         NOVELTY 3 (MMR helper): Reconstructs the stored 512-D CLIP vector for a
@@ -87,7 +138,7 @@ class FAISSDatabase:
         if not self.database_ready:
             return None
         try:
-            idx = self.mapping.index(article_id)
+            idx = self.article_to_idx[article_id]
             vec = self.index.reconstruct(idx)
             return vec.reshape(1, -1).astype('float32')
         except Exception:
