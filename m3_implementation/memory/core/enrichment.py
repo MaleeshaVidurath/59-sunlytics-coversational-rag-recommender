@@ -746,6 +746,77 @@ def _items_dict(ctx_items: list) -> dict:
     }
 
 
+def _attribute_feedback(
+    item, all_shown: list, hard_constraints: dict
+) -> tuple[dict, str]:
+    """
+    Decides WHICH attributes of an item deserve credit (or blame) for feedback.
+
+    The user reacts to an item as a whole. Recording every one of its attributes
+    at full strength is a credit-assignment error, and it compounds: after a few
+    rejections the dislike list names most of the catalogue, including colours
+    the user buys constantly and the very product type they just asked for.
+
+    Three rules decide what survives:
+
+      1. CONTRASTIVE — an attribute shared by every item shown cannot be the
+         reason one of them was singled out. If four shirts were shown and one
+         was rejected, "Shirt" explains nothing; if only that one was Red, Red
+         is a genuine candidate.
+      2. REQUESTED — never blame an attribute the user explicitly asked for.
+         Rejecting a shirt after asking for shirts is not evidence against
+         shirts.
+      3. DEMOGRAPHIC — see _NON_ATTRIBUTABLE.
+
+    Returns (entities_to_record, human_readable_note).
+    """
+    def _get(obj, field):
+        return getattr(obj, field, None) if not isinstance(obj, dict) else obj.get(field)
+
+    candidates = {}
+    for field in ("colour_group_name", "product_type_name",
+                  "garment_group_name", "index_group_name"):
+        value = _get(item, field)
+        if value:
+            candidates[field] = value
+
+    dropped = []
+
+    # Rule 3 — demographic segments are never attributable
+    for field in list(candidates):
+        if field in EnrichmentLayer._NON_ATTRIBUTABLE:
+            dropped.append(f"{field} (demographic)")
+            candidates.pop(field)
+
+    # Rule 2 — never blame what was explicitly requested. Matched loosely and
+    # across columns: asking for a 'Skirt' (product_type_name) must also protect
+    # the 'Skirts' garment group, which names the same concept.
+    def _concept(v):
+        return re.sub(r"s$", "", str(v or "").strip().lower())
+
+    requested_concepts = {
+        _concept(v) for v in (hard_constraints or {}).values() if isinstance(v, str)
+    }
+    for field, value in list(candidates.items()):
+        if _concept(value) in requested_concepts:
+            dropped.append(f"{field} (user asked for it)")
+            candidates.pop(field)
+
+    # Rule 1 — drop attributes every shown item shares
+    others = [o for o in (all_shown or []) if _get(o, "article_id") != _get(item, "article_id")]
+    if others:
+        for field, value in list(candidates.items()):
+            if all(_get(o, field) == value for o in others):
+                dropped.append(f"{field} (shared by all {len(others) + 1} items shown)")
+                candidates.pop(field)
+
+    note = (
+        f"kept={list(candidates.keys()) or 'none'} "
+        f"dropped={dropped or 'none'}"
+    )
+    return candidates, note
+
+
 # ── Main EnrichmentLayer class ────────────────────────────────────────────────
 
 class EnrichmentLayer:
@@ -1282,6 +1353,19 @@ class EnrichmentLayer:
                     "matched_prefs":        pref_summary.get("liked_attributes", []),
                     "historical_items":     [target_item.model_dump()] if use_historical else None,
                     "use_historical_items": use_historical,
+                    # Needed so the explanation can recompute the SAME ranking
+                    # reasons that drove the original recommendation, rather
+                    # than guessing from globally top-weighted preferences.
+                    "purchase_history_hints": await self._get_purchase_hints(user_id),
+                    "preference_boosts": [
+                        {
+                            "attribute": p["attribute_name"],
+                            "value":     p["attribute_value"],
+                            "weight":    p["weight"],
+                        }
+                        for p in pref_summary.get("liked_attributes", [])
+                        if p["weight"] > 0.3
+                    ],
                 }
             ),
             "memory_context": memory_ctx,
@@ -1505,6 +1589,15 @@ class EnrichmentLayer:
             "preferred_price_range": None,
             "dominant_colour":       None,
             "dominant_type":         None,
+            # Percentage maps — power the numeric reason strings in the ranker
+            "colour_pcts":           {},
+            "type_pcts":             {},
+            "garment_pcts":          {},
+            "pattern_pcts":          {},
+            "section_pcts":          {},
+            "age":                   None,
+            "age_bucket":            None,
+            "total_purchases":       0,
         }
         try:
             print(f"[ENRICH-HINTS] loading purchase_history for user_id={user_id[:20]}")
@@ -1513,6 +1606,22 @@ class EnrichmentLayer:
             if not ph:
                 print(f"[ENRICH-HINTS] no purchase_history found → returning empty hints")
                 return _empty
+
+            def _pcts(entries, key):
+                """Builds {value: pct} from a profile's ranked list."""
+                return {
+                    e[key]: e.get("pct", 0.0)
+                    for e in entries or []
+                    if isinstance(e, dict) and e.get(key)
+                }
+
+            _age = ph.get("age")
+            try:
+                from text_rag.db.article_stats import age_bucket as _age_bucket
+                _bucket = _age_bucket(_age)
+            except Exception:
+                _bucket = None
+
             hints = {
                 "top_colours": [
                     c["colour"] for c in ph.get("top_colours", [])
@@ -1527,6 +1636,15 @@ class EnrichmentLayer:
                 "preferred_price_range": ph.get("price_stats", {}).get("preferred_range"),
                 "dominant_colour":       ph.get("dominant_colour"),
                 "dominant_type":         ph.get("dominant_product_type"),
+                # ── Numeric detail for reason strings ───────────────────────
+                "colour_pcts":     _pcts(ph.get("top_colours"),               "colour"),
+                "type_pcts":       _pcts(ph.get("top_product_types"),         "type"),
+                "garment_pcts":    _pcts(ph.get("top_garment_groups"),        "group"),
+                "pattern_pcts":    _pcts(ph.get("top_graphical_appearances"), "pattern"),
+                "section_pcts":    _pcts(ph.get("top_sections"),              "section"),
+                "age":             _age,
+                "age_bucket":      _bucket or None,
+                "total_purchases": ph.get("total_purchases", 0),
             }
             print(f"[ENRICH-HINTS] hints built: top_colours={hints['top_colours'][:3]} gender={hints['inferred_gender']} budget={hints['budget_tier']} dominant_colour={hints['dominant_colour']}")
             return hints
@@ -1535,6 +1653,13 @@ class EnrichmentLayer:
             import traceback; traceback.print_exc()
             return _empty
 
+
+    # Attributes describing WHO a garment is for rather than what it looks like.
+    # Feedback on one item is never evidence about an entire demographic
+    # segment, and recording it as such is actively harmful: once Ladieswear,
+    # Menswear and Divided are all marked disliked, adult clothing is demoted
+    # and Baby/Children rises to the top of every search.
+    _NON_ATTRIBUTABLE = {"index_group_name"}
 
     async def _enrich_feedback(
         self, session_id, user_id, current_message, entities, state
@@ -1561,26 +1686,32 @@ class EnrichmentLayer:
         is_negative = sentiment_label == "negative"
 
         if item_a:
-            item_entities = {
-                "colour_group_name": item_a.colour_group_name,
-                "product_type_name": item_a.product_type_name,
-            }
-            if item_a.index_group_name:
-                item_entities["index_group_name"] = item_a.index_group_name
-            if item_a.garment_group_name:
-                item_entities["garment_group_name"] = item_a.garment_group_name
+            item_entities, attribution_note = _attribute_feedback(
+                item_a, all_ctx_items, state.hard_constraints
+            )
+            print(f"[FEEDBACK-ATTR] {attribution_note}")
 
-            await self.user_mgr.update_preferences_from_entities(
-                user_id=user_id,
-                entities=item_entities,
-                sentiment=sentiment_score,
-                source="implicit",
-                confidence=0.80
-            )
-            side_effects.append(
-                f"Preferences updated from feedback ({sentiment_label}): "
-                f"{list(item_entities.keys())}"
-            )
+            if item_entities:
+                # Split the signal across the surviving attributes. Feedback is
+                # about the item as a whole; we do not know which attribute
+                # caused it, so no single one may absorb the full strength.
+                split_sentiment = sentiment_score / len(item_entities)
+                await self.user_mgr.update_preferences_from_entities(
+                    user_id=user_id,
+                    entities=item_entities,
+                    sentiment=split_sentiment,
+                    source="implicit",
+                    confidence=0.80
+                )
+                side_effects.append(
+                    f"Preferences updated from feedback ({sentiment_label}): "
+                    f"{list(item_entities.keys())} at {split_sentiment:+.3f} each"
+                )
+            else:
+                side_effects.append(
+                    f"Feedback ({sentiment_label}) recorded but not attributed: "
+                    f"{attribution_note}"
+                )
 
             # Branch strictly on label — neutral makes NO state changes
             if sentiment_label == "positive":

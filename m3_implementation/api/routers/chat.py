@@ -621,6 +621,14 @@ async def chat(req: ChatRequest):
                     "price":       item.get("price", ""),
                     "description": (item.get("material_description") or "")[:120],
                     "pattern":     item.get("pattern", ""),
+                    # Why this item was selected for THIS user — template strings
+                    # built from real statistics by PersonalizedRanker, never
+                    # LLM text, so they are safe to render verbatim.
+                    "why":           item.get("why", []),
+                    # 0-100 display figure, or None when nothing meaningful
+                    # matched. Never send the raw score to the UI: it is
+                    # unbounded and goes negative once penalties apply.
+                    "match_percent": item.get("match_percent"),
                 })
 
         print(f"[CHAT] ─── Returning final response to frontend")

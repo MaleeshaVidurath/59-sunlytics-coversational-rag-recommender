@@ -200,8 +200,17 @@ def _should_skip_sentence(sentence: str) -> bool:
 # "priced at £11.08" vs "£13.58" usually scores neutral, not contradiction).
 
 def _norm_ws(text: str) -> str:
-    """Collapses whitespace runs — catalog names may contain double spaces."""
-    return re.sub(r"\s+", " ", text or "").strip()
+    """
+    Normalises a product name for comparison.
+
+    Collapses whitespace runs (catalog names may contain double spaces) and
+    tightens spacing around hyphens. Catalog entries carry stray spacing such
+    as 'Victoria Pull- On TRS', which any LLM renders as 'Victoria Pull-On
+    TRS'. Without this the name gate reads that as a swapped product and
+    flags a hallucination that never happened.
+    """
+    t = re.sub(r"\s+", " ", text or "").strip()
+    return re.sub(r"\s*-\s*", "-", t)
 
 
 _catalog_names = None
@@ -273,13 +282,29 @@ def _find_wrong_name(sentence: str, true_name: str, evidence: dict) -> str | Non
     return None
 
 
-def _find_wrong_price(sentence: str, true_price: str) -> str | None:
+def _find_wrong_price(sentence: str, true_price: str, grounded: set = None) -> str | None:
     """Two-sided price check: returns a differing £value found in the
     sentence, or None if no £value is present. Only called after the true
-    price failed verbatim containment."""
+    price failed verbatim containment.
+
+    `grounded` holds £values that appear elsewhere in the evidence and are not
+    item prices — most importantly the user's habitual spend range, which the
+    ranker cites as a selection reason ("£4.59 is inside your usual
+    £4.02-£9.07 range"). Quoting a grounded value is not an invented price.
+    Passed only at response level; the locked-sentence branch stays strict so
+    genuine cross-item price swaps are still caught."""
     sent_prices = re.findall(r"£[\d,]+(?:\.\d{1,2})?", sentence)
-    wrong = [p for p in sent_prices if p != true_price]
+    allowed = grounded or set()
+    wrong = [p for p in sent_prices if p != true_price and p not in allowed]
     return wrong[0] if wrong else None
+
+
+def _grounded_prices(facts: list[dict]) -> set:
+    """Every £value stated anywhere in the evidence facts."""
+    found = set()
+    for f in facts:
+        found.update(re.findall(r"£[\d,]+(?:\.\d{1,2})?", f.get("text", "")))
+    return found
 
 
 # ── Evidence flattening ────────────────────────────────────────────────────────
@@ -346,6 +371,22 @@ def _flatten_evidence(evidence: dict) -> list[dict]:
 
     elif action == "explanation_generate":
         add_article_facts(evidence.get("article"))
+
+        # All-items path: the bundle carries `articles`, not `article`. Without
+        # these the checker had zero facts to verify and passed everything.
+        for item_idx, art in enumerate(evidence.get("articles", [])):
+            add_article_facts(art, item_idx=item_idx)
+            for reason in art.get("why", []):
+                facts.append({
+                    "field": "selection_reason",
+                    "text":  reason,
+                    "item_idx": item_idx,
+                })
+
+        # Single-item path reasons.
+        for reason in evidence.get("ranking_reasons", []):
+            facts.append({"field": "selection_reason", "text": reason})
+
         for match in evidence.get("confirmed_matches", []):
             facts.append({
                 "field": match.get("attribute", "match"),
@@ -608,7 +649,9 @@ class HallucinationChecker:
                     elif true_price in response_text:
                         print("[HALL-CHECK] SKIP [price] correct elsewhere in response")
                     else:
-                        wrong_price = _find_wrong_price(response_text, true_price)
+                        wrong_price = _find_wrong_price(
+                            response_text, true_price, _grounded_prices(structured_facts)
+                        )
                         if wrong_price is not None:
                             print(f"[HALL-CHECK] FLAG [price] response-level: "
                                   f"expected '{true_price}' found '{wrong_price}'")

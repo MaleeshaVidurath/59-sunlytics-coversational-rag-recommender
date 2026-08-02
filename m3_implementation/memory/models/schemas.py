@@ -141,6 +141,12 @@ class ItemInContext(BaseModel):
     detail_desc: Optional[str] = None
     graphical_appearance_name: Optional[str] = None
     price: Optional[float] = None        # From transactions if available
+    # Why the ranker selected this item for this user, and its 0-100 match
+    # figure. Persisted so reopening a past chat still shows the justification
+    # — these are template strings built from statistics, not LLM output, so
+    # they stay valid indefinitely.
+    why: Optional[list[str]] = None
+    match_percent: Optional[int] = None
 
 
 # ─── 6. Dialogue State ────────────────────────────────────────────────────────
