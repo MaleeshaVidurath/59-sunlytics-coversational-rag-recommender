@@ -25,9 +25,10 @@
 #         INITIAL_REQUEST → similar questions found in same session
 #         REFINEMENT      → prior constraints / discussing items exist
 #
-#   partial_subtype:
-#     "PARTIAL_RECENT"   — needed context found in last 3 exchanges (Redis hot)
-#     "PARTIAL_SESSION"  — needed context found earlier in session (MongoDB)
+#   partial_subtype:  which store answered the turn
+#     "PARTIAL_RECENT"   — item was in the Redis context window; no MongoDB read
+#     "PARTIAL_SESSION"  — item had aged out of the window and was recovered
+#                          from the MongoDB session history
 #
 # Routing decision is carried entirely by tier + subtype + excluded_ids.
 # No numerical scores are computed — the tier assignment IS the decision.
@@ -336,7 +337,7 @@ class ContextSufficiencyEvaluator:
         The excluded_ids are preserved so the user can request fresh results.
 
         Sub-level:
-          PARTIAL_RECENT  — cached items found in last 3 exchanges (Redis)
+          PARTIAL_RECENT  — cached items still held in the Redis context window
           PARTIAL_SESSION — cached items found in earlier session history
           FULL_STANDARD   — fresh question, no similar prior question
         """
@@ -514,7 +515,7 @@ class ContextSufficiencyEvaluator:
               f"(from label={label} msg='{message[:50]}')")
 
         # ── Items are in dialogue_state — check recency ────────────────────
-        items_recent    = self._items_in_recent_history(history, target_item, None)
+        items_recent    = self._items_in_context_window(dialogue_state, target_item, None)
         partial_subtype = "PARTIAL_RECENT" if items_recent else "PARTIAL_SESSION"
 
         return SufficiencyResult(
@@ -526,7 +527,7 @@ class ContextSufficiencyEvaluator:
             rationale=(
                 f"{label} → {partial_subtype}. "
                 f"Target item: '{target_name}'. "
-                f"Context {'from last 3 exchanges (Redis)' if items_recent else 'from earlier in session (MongoDB)'}. "
+                f"Context {'served from the Redis window (no MongoDB read)' if items_recent else 'recovered from MongoDB session history'}. "
                 "I(A;C_t) ≫ I(A;K\\C_t): bounded DB lookup sufficient. "
                 "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
             ),
@@ -662,7 +663,7 @@ class ContextSufficiencyEvaluator:
                      if isinstance(v, dict) and v.get("article_id") == _target_id),
                     _discussing.get("item_a"),
                 )
-                _items_recent = self._items_in_recent_history(history, _target_dict, None)
+                _items_recent = self._items_in_context_window(dialogue_state, _target_dict, None)
                 _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
                 _target_name  = (_target_dict or {}).get("prod_name", "unknown")
             print(f"[CSE-ITEMREF] ATTRIBUTE_QUESTION → enrichment=PARTIAL  "
@@ -676,7 +677,7 @@ class ContextSufficiencyEvaluator:
                 rationale=(
                     f"ATTRIBUTE_QUESTION → {_partial_sub}. "
                     f"Enrichment resolved target: '{_target_name}'. "
-                    f"Context from {'last 3 exchanges (Redis)' if _partial_sub == 'PARTIAL_RECENT' else 'earlier in session (MongoDB)'}. "
+                    f"Context {'served from the Redis window (no MongoDB read)' if _partial_sub == 'PARTIAL_RECENT' else 'recovered from MongoDB session history'}. "
                     "Bounded DB lookup sufficient. "
                     "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
                 ),
@@ -734,7 +735,7 @@ class ContextSufficiencyEvaluator:
                      if isinstance(v, dict) and v.get("article_id") == _b_id),
                     _discussing.get("item_b"),
                 )
-                _items_recent = self._items_in_recent_history(history, _item_a_dict, _item_b_dict)
+                _items_recent = self._items_in_context_window(dialogue_state, _item_a_dict, _item_b_dict)
                 _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
                 _a_name       = (_item_a_dict or {}).get("prod_name", "item A")
                 _b_name       = (_item_b_dict or {}).get("prod_name", "item B")
@@ -750,7 +751,7 @@ class ContextSufficiencyEvaluator:
                 rationale=(
                     f"COMPARISON → {_partial_sub}. "
                     f"Enrichment resolved: '{_a_name}' vs '{_b_name}'. "
-                    f"Context from {'last 3 exchanges (Redis)' if _partial_sub == 'PARTIAL_RECENT' else 'earlier in session (MongoDB)'}. "
+                    f"Context {'served from the Redis window (no MongoDB read)' if _partial_sub == 'PARTIAL_RECENT' else 'recovered from MongoDB session history'}. "
                     "Bounded DB lookup sufficient. "
                     "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
                 ),
@@ -802,7 +803,7 @@ class ContextSufficiencyEvaluator:
                         _discussing.get("item_a"),
                     ) if _target_id else _discussing.get("item_a")
                 )
-                _items_recent = self._items_in_recent_history(history, _target_dict, None)
+                _items_recent = self._items_in_context_window(dialogue_state, _target_dict, None)
                 _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
                 _target_name  = (_target_dict or {}).get("prod_name", "all items") if _target_dict else "all items"
             print(f"[CSE-ITEMREF] EXPLANATION_WHY → enrichment=PARTIAL  "
@@ -816,7 +817,7 @@ class ContextSufficiencyEvaluator:
                 rationale=(
                     f"EXPLANATION_WHY → {_partial_sub}. "
                     f"Enrichment resolved target: '{_target_name}'. "
-                    f"Context from {'last 3 exchanges (Redis)' if _partial_sub == 'PARTIAL_RECENT' else 'earlier in session (MongoDB)'}. "
+                    f"Context {'served from the Redis window (no MongoDB read)' if _partial_sub == 'PARTIAL_RECENT' else 'recovered from MongoDB session history'}. "
                     "Bounded DB lookup sufficient. "
                     "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
                 ),
@@ -874,7 +875,7 @@ class ContextSufficiencyEvaluator:
                         _discussing.get("item_a"),
                     ) if _target_id else _discussing.get("item_a")
                 )
-                _items_recent = self._items_in_recent_history(history, _target_dict, None)
+                _items_recent = self._items_in_context_window(dialogue_state, _target_dict, None)
                 _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
                 _target_name  = (_target_dict or {}).get("prod_name", "unknown")
 
@@ -889,7 +890,7 @@ class ContextSufficiencyEvaluator:
                 rationale=(
                     f"SELECTION_REFERENCE → {_partial_sub}. "
                     f"Enrichment resolved target: '{_target_name}'. "
-                    f"Context from {'last 3 exchanges (Redis)' if _partial_sub == 'PARTIAL_RECENT' else 'earlier in session (MongoDB)'}. "
+                    f"Context {'served from the Redis window (no MongoDB read)' if _partial_sub == 'PARTIAL_RECENT' else 'recovered from MongoDB session history'}. "
                     "Bounded DB lookup sufficient. "
                     "[Joren2025: Sufficient(q,C_t)=1; Roy2024: follow-up on known items]"
                 ),
@@ -1130,50 +1131,54 @@ class ContextSufficiencyEvaluator:
         ).lower()
         return any(w in msg for w in name.split() if len(w) > 3)
 
-    def _items_in_recent_history(
+    def _items_in_context_window(
         self,
-        history: list[dict],
-        item_a:  Optional[dict],
-        item_b:  Optional[dict],
+        dialogue_state: dict,
+        item_a:         Optional[dict],
+        item_b:         Optional[dict],
     ) -> bool:
         """
-        Checks whether the currently_discussing items appear in the recent
-        turn history (last 3 exchanges, passed from pipeline's get_turns_as_history).
+        Checks whether the target items are held in the Redis context window,
+        i.e. whether this turn can be answered without querying MongoDB.
 
-        Matches by product name words in bot turn content, and by generic
-        recommendation markers (£, "option 1", etc.).
+        This is what separates PARTIAL_RECENT from PARTIAL_SESSION, so the
+        sub-level is a factual record of what the turn cost: RECENT means the
+        answer came out of Redis, SESSION means MongoDB was read.
+
+        Two earlier versions measured something else:
+
+          1. It searched recent bot turns for the item's name and, failing
+             that, for markers like "£" or "option 1". Every recommendation
+             reply contains those, so it answered "did the bot show anything
+             recently" and returned True almost unconditionally.
+
+          2. It compared rec_turn against the newest few recommendation turns.
+             That is a property of the dialogue, not of storage — an item four
+             turns old but still cached was reported as SESSION even though no
+             database was touched, which made the sub-level a poor guide to
+             what the turn actually cost.
         """
-        if not history:
+        discussing = (dialogue_state or {}).get("currently_discussing") or {}
+        window_ids = {
+            str(v.get("article_id", "")).strip()
+            for k, v in discussing.items()
+            if k.startswith("item_") and isinstance(v, dict)
+        }
+        window_ids.discard("")
+        if not window_ids:
             return False
 
-        bot_content = " ".join(
-            t.get("content", "").lower()
-            for t in history
-            if t.get("role") in ("assistant", "bot")
-        )
-        if not bot_content:
-            return False
-
-        # Check for item names in bot content
         for item in (item_a, item_b):
             if not item:
                 continue
-            name = (
-                item.get("prod_name", "")
-                if isinstance(item, dict)
-                else getattr(item, "prod_name", "") or ""
-            ).lower()
-            if name and len(name) > 3:
-                # Match on first 3 significant words (handles truncation)
-                words = [w for w in name.split()[:4] if len(w) > 3]
-                if any(w in bot_content for w in words):
-                    return True
+            aid = str(
+                (item.get("article_id") if isinstance(item, dict)
+                 else getattr(item, "article_id", "")) or ""
+            ).strip()
+            if aid and aid in window_ids:
+                return True
 
-        # Generic recommendation markers (bot showed items)
-        return any(
-            kw in bot_content
-            for kw in ["option 1", "option 2", "here are", "£", "found two", "found these"]
-        )
+        return False
 
     def _label_to_default_strategy(self, label: str) -> str:
         """Returns the DistilBERT default retrieval strategy for a label."""
