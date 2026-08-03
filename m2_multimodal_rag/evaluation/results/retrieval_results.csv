@@ -1,4 +1,6 @@
 MRR,R@1,R@10,R@5,ci_high,ci_low,config,n
-0.3248,0.1977,0.5725,0.4688,,,A_stock_single,2084
-0.46,0.3143,0.7596,0.6368,,,B_finetuned_single,2084
-,,0.1871,,0.2063,0.1679,delta_finetuning(B-A),2084
+0.325,0.198,0.572,0.469,,,A_stock_single,2084
+0.460,0.314,0.760,0.637,,,B_finetuned_single,2084
+0.240,0.107,0.567,0.353,,,C_finetuned_ensemble,150
+,,0.187,,0.206,0.168,delta_finetuning(B-A),2084
+,,-0.147,,-0.073,-0.227,delta_ensemble(C-B),150
