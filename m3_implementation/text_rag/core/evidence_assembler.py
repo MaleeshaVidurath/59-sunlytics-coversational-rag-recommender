@@ -61,91 +61,13 @@ def _extract_quantity(message: str, payload_qty: int = 0) -> int:
     return 2  # default when no quantity mentioned
 
 
-def _ensure_colour_diversity(articles: list, requested_qty: int) -> list:
-    """
-    Ensures returned items have diverse colours when multiple are requested.
-    Takes the first item per unique colour, then fills with remaining.
-    """
-    if len(articles) <= 1:
-        return articles
-    seen_colours = set()
-    diverse = []
-    same_colour = []
-    for art in articles:
-        colour = art.get("colour_group_name", "").lower()
-        if colour and colour not in seen_colours:
-            seen_colours.add(colour)
-            diverse.append(art)
-        else:
-            same_colour.append(art)
-    result = diverse + same_colour
-    return result[:requested_qty]
 from text_rag.db.postgres_client import (
     get_article_by_id, get_articles_by_ids,
     search_articles_filtered, get_articles_for_comparison
 )
 from text_rag.db.qdrant_client import semantic_search
+from text_rag.core.personalized_ranker import PersonalizedRanker
 from text_rag.config import MAX_RECOMMENDATIONS
-
-
-def _rank_by_preferences(
-    articles: list,
-    preference_boosts: list = None,
-    purchase_hints: dict = None,
-    penalties: dict = None,
-    filters: dict = None,
-) -> list:
-    """
-    Re-ranks articles by preference boost weights and purchase history hints.
-    Applied separately to Qdrant results and PostgreSQL results before merging,
-    so both sources are ranked on the same scale and Qdrant keeps priority.
-
-    penalties: only passed for PostgreSQL results — demotes disliked items
-               without removing them. Not applied to Qdrant results yet.
-    filters:   current turn's hard filters — penalty values matching a filter
-               value are suppressed so user-requested attributes are never demoted.
-    """
-    if not articles:
-        return []
-
-    boost_map = {}
-    if preference_boosts:
-        for boost in preference_boosts:
-            key = (boost['attribute'], boost['value'])
-            boost_map[key] = boost['weight']
-
-    top_colours   = []
-    top_types     = []
-    gender_groups = []
-    if purchase_hints:
-        top_colours = purchase_hints.get('top_colours', [])
-        top_types   = purchase_hints.get('top_product_types', [])
-        _gender_map = {'female': ['Ladieswear', 'Divided'], 'male': ['Menswear']}
-        gender_groups = _gender_map.get(purchase_hints.get('inferred_gender', ''), [])
-
-    def score(art):
-        s = 0.0
-        for (attr, val), weight in boost_map.items():
-            if art.get(attr) == val:
-                s += weight
-        if art.get('colour_group_name') in top_colours:
-            idx = top_colours.index(art['colour_group_name'])
-            s += 0.3 * (1 - idx / max(len(top_colours), 1))
-        if art.get('product_type_name') in top_types:
-            idx = top_types.index(art['product_type_name'])
-            s += 0.2 * (1 - idx / max(len(top_types), 1))
-        if gender_groups and art.get('index_group_name') in gender_groups:
-            s += 0.25
-        if penalties:
-            filter_values = filters or {}
-            for attr, disliked_values in penalties.items():
-                art_val = art.get(attr)
-                # Never demote a value the user explicitly asked for this turn
-                if art_val in disliked_values and art_val != filter_values.get(attr):
-                    s -= 0.5
-        return s
-
-    return sorted(articles, key=score, reverse=True)
 
 
 def _format_price(price) -> str:
@@ -274,8 +196,6 @@ class EvidenceAssembler:
 
         print(f"[ASSEMBLER-QDRANT] got {len(qdrant_results)} results")
         for _qr in qdrant_results[:3]: print(f"  [QDRANT] {str(_qr.get('article_id',_qr.get('id','?')))[:12]} {str(_qr.get('prod_name',_qr.get('name','?')))[:25]} {_qr.get('colour_group_name',_qr.get('colour','?'))}")
-        # Step 1b: Preference-rank Qdrant results before merge
-        qdrant_results = _rank_by_preferences(qdrant_results, preference_boosts, purchase_hints)
 
         # Step 2: PostgreSQL filtered search for diversity / Qdrant fallback
         print(f"\n[ASSEMBLER-CATALOG] ━━━ catalog search ━━━")
@@ -293,13 +213,14 @@ class EvidenceAssembler:
             exclude_ids=exclude_ids,
             limit=search_limit
         )
-        # Preference-rank PostgreSQL results before merge (penalties applied here as soft demotes)
-        pg_results = _rank_by_preferences(pg_results, preference_boosts, purchase_hints, penalties, filters)
 
         print(f"[ASSEMBLER-POSTGRES] got {len(pg_results)} results")
         for _pr in pg_results[:3]: print(f"  [POSTGRES] {str(_pr.get('article_id','?'))[:12]} {str(_pr.get('prod_name','?'))[:25]} {_pr.get('colour_group_name','?')} £{_pr.get('avg_price','?')}")
-        # Step 3: Merge — Qdrant results first (semantically relevant),
-        # then add PostgreSQL results not already in Qdrant set
+        # Step 3: Pool both sources into one candidate set.
+        # Order here no longer decides anything — PersonalizedRanker scores the
+        # whole pool on a single scale below, so a PostgreSQL candidate can beat
+        # a Qdrant one on merit. Qdrant entries keep their `_score` for the
+        # semantic_relevance component.
         seen_ids = set()
         merged   = []
 
@@ -341,7 +262,6 @@ class EvidenceAssembler:
                     filters=_relaxed, exclude_ids=exclude_ids,
                     limit=search_limit
                 )
-                _pg2 = _rank_by_preferences(_pg2, preference_boosts, purchase_hints, penalties, _relaxed)
                 for art in _qr2 + _pg2:
                     aid = str(art.get("article_id", ""))
                     if aid not in seen_ids:
@@ -362,7 +282,6 @@ class EvidenceAssembler:
                     filters=_minimal, exclude_ids=exclude_ids,
                     limit=search_limit
                 )
-                _pg3 = _rank_by_preferences(_pg3, preference_boosts, purchase_hints, penalties, _minimal)
                 for art in _qr3 + _pg3:
                     aid = str(art.get("article_id", ""))
                     if aid not in seen_ids:
@@ -370,20 +289,36 @@ class EvidenceAssembler:
                         merged.append(art)
                 print(f"[ASSEMBLER-CATALOG] after product_type-only retry: {len(merged)} results")
 
-        # Apply colour diversity for multi-item requests
-        if requested_qty > 2:
-            top_articles = _ensure_colour_diversity(merged, requested_qty)
-        else:
-            top_articles = merged[:requested_qty]
+        # ── Personalised selection ──────────────────────────────────────────
+        # Every candidate already satisfies the hard filters, so the filters
+        # cannot choose between them. The ranker decides, blending the user's
+        # own purchase behaviour with each article's buying statistics, and
+        # records a citable reason for every signal that fired.
+        ranker = PersonalizedRanker()
+        scored = await ranker.rank(merged, payload, filters)
+        selected = ranker.select(scored, quantity=requested_qty)
+        ranker.log(scored, selected)
+
+        top_articles = [s.article for s in selected]
         print(f"[DBG-4d] FINAL ITEMS: {len(top_articles)} selected from {len(merged)} merged")
         for _fa in top_articles:
             print(f"  [DBG-4d] → {_fa.get('article_id','?')} | {str(_fa.get('prod_name',_fa.get('name','?')))[:30]} | {_fa.get('colour_group_name',_fa.get('colour','?'))} | avg_price={_fa.get('avg_price','?')}")
 
+        # Attach the reasoning trace to each item so it can be shown on the
+        # product card AND cited by the explanation action later in the session.
+        items = []
+        for s in selected:
+            summary = _article_summary(s.article)
+            summary["why"]             = s.reasons()
+            summary["match_score"]     = round(s.score, 4)
+            summary["match_percent"]   = ranker.match_percent(s, selected)
+            summary["score_breakdown"] = s.breakdown()
+            items.append(summary)
 
         return {
             "action":          "catalog_search",
             "user_message":    user_message,
-            "items":           [_article_summary(a) for a in top_articles],
+            "items":           items,
             "filters_applied": filters,
             "soft_constraints":soft_constraints,
             "preference_boosts": preference_boosts,
@@ -476,6 +411,7 @@ class EvidenceAssembler:
         pref_weights     = payload.get("preference_weights", {})
         user_message     = ri.get("user_message", "")
         ids_list         = payload.get("article_ids_list")  # all context items if >2
+        items_in_context = ri.get("items_in_context", {})
         use_historical   = mc.get("use_historical_items", False)
         historical_items = mc.get("historical_items", [])
 
@@ -483,19 +419,29 @@ class EvidenceAssembler:
             _names = [h.get("prod_name", "?") for h in historical_items[:2] if isinstance(h, dict)]
             print(f"[ASSEMBLER-COMPARE] historical items: {_names} — context_article path will be used")
 
-        ctx_a = payload.get("context_article_a") or {}
-        ctx_b = payload.get("context_article_b") or {}
+        ctx_a = payload.get("context_article_a") or items_in_context.get("item_a") or {}
+        ctx_b = payload.get("context_article_b") or items_in_context.get("item_b") or {}
 
-        if ctx_a.get("detail_desc") and ctx_b.get("detail_desc"):
+        # Require BOTH items to have detail_desc to skip DB query.
+        # If either has None/empty detail_desc, fetch full data from database.
+        has_full_ctx_a = ctx_a.get("detail_desc") and str(ctx_a.get("detail_desc")).strip()
+        has_full_ctx_b = ctx_b.get("detail_desc") and str(ctx_b.get("detail_desc")).strip()
+
+        if has_full_ctx_a and has_full_ctx_b:
             print("[ASSEMBLER-COMPARE] using stored context for both items (no DB query)")
             item_a = _ctx_to_article(ctx_a)
             item_b = _ctx_to_article(ctx_b)
         else:
-            print("[ASSEMBLER-COMPARE] context missing detail_desc — querying DB")
+            print(f"[ASSEMBLER-COMPARE] context missing detail_desc (a={has_full_ctx_a} b={has_full_ctx_b}) — querying DB for complete data")
             item_a, item_b = await get_articles_for_comparison(
                 str(id_a) if id_a else "",
                 str(id_b) if id_b else ""
             )
+            # Log what we fetched from DB
+            if item_a:
+                print(f"[ASSEMBLER-COMPARE] DB fetch: item_a={item_a.get('prod_name')} detail_desc={'present' if item_a.get('detail_desc') else 'NULL'}")
+            if item_b:
+                print(f"[ASSEMBLER-COMPARE] DB fetch: item_b={item_b.get('prod_name')} detail_desc={'present' if item_b.get('detail_desc') else 'NULL'}")
 
         # Build items_all for multi-item comparisons (>2 items)
         items_all = None
@@ -583,8 +529,28 @@ class EvidenceAssembler:
         if not article_id and all_item_ids:
             print(f"[ASSEMBLER-EXPLAIN] all-items summary for {len(all_item_ids)} items")
             fetched = await get_articles_by_ids(all_item_ids)
-            articles_summary = [_article_summary(a) for a in fetched if a]
-            print(f"[ASSEMBLER-EXPLAIN] fetched {len(articles_summary)} articles for summary")
+            print(f"[ASSEMBLER-EXPLAIN] fetched {len(fetched)} articles for summary")
+
+            # Re-run the ranker over exactly these articles to recover the
+            # reasons that selected them. The scorer is deterministic, so this
+            # reproduces the original decision instead of inventing a rationale
+            # from whichever preference happens to carry the highest weight.
+            ranker = PersonalizedRanker()
+            rescored = await ranker.rank(
+                [a for a in fetched if a], payload, payload.get("filters", {})
+            )
+            by_id = {s.article_id: s for s in rescored}
+
+            articles_summary = []
+            for a in fetched:
+                if not a:
+                    continue
+                summary = _article_summary(a)
+                s = by_id.get(str(a.get("article_id", "")))
+                summary["why"] = s.reasons() if s else []
+                articles_summary.append(summary)
+                print(f"[ASSEMBLER-EXPLAIN] why {summary['article_id']}: {summary['why']}")
+
             return {
                 "action":            "explanation_generate",
                 "user_message":      user_message,
@@ -656,9 +622,20 @@ class EvidenceAssembler:
         for cm in confirmed_matches:
             print(f"  [CONFIRM] {cm['attribute']}={cm['value']} weight={cm['weight']:.2f}")
 
+        # Recover the ranking reasons for this one article, same as the
+        # all-items path, so the explanation cites what actually selected it.
+        ranking_reasons = []
+        if article:
+            _ranker = PersonalizedRanker()
+            _rescored = await _ranker.rank([article], payload, payload.get("filters", {}))
+            if _rescored:
+                ranking_reasons = _rescored[0].reasons()
+                print(f"[ASSEMBLER-EXPLAIN] why {article.get('article_id')}: {ranking_reasons}")
+
         return {
             "action":              "explanation_generate",
             "user_message":        user_message,
+            "ranking_reasons":     ranking_reasons,
             "article":             _article_summary(article) if article else {},
             "prior_claims":        prior_claims,
             "confirmed_matches":   confirmed_matches,
@@ -835,13 +812,13 @@ def _build_material_facts(facts: dict, item_a: dict, item_b: dict, items_all: Op
         facts["all_items"] = [
             {
                 "name":        a.get("prod_name", ""),
-                "description": a.get("detail_desc", "")[:200],
+                "description": (a.get("detail_desc") or "")[:200],
             }
             for a in items_all
         ]
     else:
-        facts["item_a_description"] = item_a.get("detail_desc", "")[:200]
-        facts["item_b_description"] = item_b.get("detail_desc", "")[:200]
+        facts["item_a_description"] = (item_a.get("detail_desc") or "")[:200]
+        facts["item_b_description"] = (item_b.get("detail_desc") or "")[:200]
 
 
 def _build_style_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optional[list]) -> None:
@@ -851,7 +828,7 @@ def _build_style_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optio
                 "name":    a.get("prod_name", ""),
                 "section": a.get("section_name", ""),
                 "garment": a.get("garment_group_name", ""),
-                "desc":    a.get("detail_desc", "")[:150],
+                "desc":    (a.get("detail_desc") or "")[:150],
             }
             for a in items_all
         ]
@@ -860,8 +837,8 @@ def _build_style_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optio
         facts["item_b_section"]    = item_b.get("section_name", "")
         facts["item_a_garment"]    = item_a.get("garment_group_name", "")
         facts["item_b_garment"]    = item_b.get("garment_group_name", "")
-        facts["item_a_desc_short"] = item_a.get("detail_desc", "")[:150]
-        facts["item_b_desc_short"] = item_b.get("detail_desc", "")[:150]
+        facts["item_a_desc_short"] = (item_a.get("detail_desc") or "")[:150]
+        facts["item_b_desc_short"] = (item_b.get("detail_desc") or "")[:150]
 
 
 def _build_overall_facts(facts: dict, item_a: dict, item_b: dict, items_all: Optional[list]) -> None:
@@ -872,7 +849,7 @@ def _build_overall_facts(facts: dict, item_a: dict, item_b: dict, items_all: Opt
                 "price":  _format_price(a.get("avg_price")),
                 "colour": a.get("colour_group_name", ""),
                 "type":   a.get("product_type_name", ""),
-                "desc":   a.get("detail_desc", "")[:150],
+                "desc":   (a.get("detail_desc") or "")[:150],
             }
             for a in items_all
         ]
@@ -883,6 +860,6 @@ def _build_overall_facts(facts: dict, item_a: dict, item_b: dict, items_all: Opt
         facts["item_b_colour"]     = item_b.get("colour_group_name", "")
         facts["item_a_type"]       = item_a.get("product_type_name", "")
         facts["item_b_type"]       = item_b.get("product_type_name", "")
-        facts["item_a_desc_short"] = item_a.get("detail_desc", "")[:150]
-        facts["item_b_desc_short"] = item_b.get("detail_desc", "")[:150]
+        facts["item_a_desc_short"] = (item_a.get("detail_desc") or "")[:150]
+        facts["item_b_desc_short"] = (item_b.get("detail_desc") or "")[:150]
 

@@ -435,36 +435,34 @@ which would produce SQL like `colour = 'White' AND colour != ALL(['White', ...])
 Used by: `item_compare`
 Wraps `get_articles_by_ids()` and returns `(item_a, item_b)` tuple.
 
-### Preference Ranking — `_rank_by_preferences()`
+### Preference Ranking — `PersonalizedRanker`
 
-**Location:** `text_rag/core/evidence_assembler.py` (module-level function)
+**Location:** `text_rag/core/personalized_ranker.py`
 
-Applied **separately** to Qdrant results and PostgreSQL results before merging.
-Both result sets are scored on the same scale so that Qdrant results (placed first in
-the merge) are also preference-ranked, not just raw cosine-similarity order.
+> **Superseded:** this stage used to be a module-level `_rank_by_preferences()` in
+> `evidence_assembler.py`, applied *separately* to the Qdrant and PostgreSQL result
+> sets before a priority-order merge. That function has been removed. Because the
+> merge placed all Qdrant results first, a PostgreSQL candidate could never win
+> regardless of its score, and the Qdrant similarity score was discarded entirely.
 
-```
-score per article =
-    + preference_boost_weight      for each liked attribute match
-    + 0.3 × (1 - rank/n)          if colour matches top purchase history colours
-    + 0.2 × (1 - rank/n)          if product type matches top purchase history types
-    + 0.25                         if index_group matches inferred_gender group
-    - 0.5                          for each disliked attribute match (penalties)
-                                   ← SKIPPED if the penalised value matches the
-                                      current turn's hard filter value
-```
+Both sources are now pooled into a single candidate set and scored **once** on a common
+scale, so any candidate can win on merit. Scoring uses 13 components across two
+families — user fit (purchase history, price band, session preferences) and buying
+statistics (shrunk popularity, age-group lift, repeat rate, trend) — blended by how much
+purchase history the user has. Semantic relevance is included as its own component
+rather than being thrown away.
 
-**Penalty suppression rule (filter suppression):**
-If the user asked for `colour_group_name = "Blue"` this turn, and "Blue" is also in
-their dislike penalties, the `-0.5` deduction is suppressed for that attribute.
-This prevents the system from demoting the exact thing the user just asked for.
+Every component that fires also emits a plain-language reason containing a real
+statistic, and those reasons travel with the item to the product card, the explanation
+prompts, and the hallucination checker.
 
-**Penalties only apply to PostgreSQL results.** Qdrant results are ranked by preference
-boosts and purchase history only — penalty support for Qdrant is a future addition.
+**inferred_gender is still a soft boost, not a filter.** A `mixed` gender history or a
+gift shopper should still see all results — nothing is excluded.
 
-**inferred_gender is a soft boost, not a filter.** A `mixed` gender history or a gift
-shopper should still see all results — the `+0.25` bonus is applied to the matching
-gender group but nothing is excluded.
+**Full documentation:** see
+[`core/PERSONALIZED_RANKER_PROCESS.md`](core/PERSONALIZED_RANKER_PROCESS.md) for the
+component list, weights, the statistical smoothing the sparse H&M sample requires, and
+the guards that stop a drifted dislike list from distorting results.
 
 ### Data Loading (done once at startup)
 
@@ -520,31 +518,30 @@ Memory Pipeline extracts:
 │  → 20 articles (cosine ranked)      │  │  → up to 20 articles (price-ascending)     │
 └────────────────┬────────────────────┘  └──────────────────┬─────────────────────────┘
                  │                                           │
-                 ↓                                           ↓
-  _rank_by_preferences(                      _rank_by_preferences(
-    articles = qdrant_results,                 articles = pg_results,
-    preference_boosts = [...],                 preference_boosts = [...],
-    purchase_hints = {...},                    purchase_hints = {...},
-    penalties = None          ← not applied    penalties = {"colour": ["Orange"]},
-  )                                            filters = {colour: Blue, type: Jacket}
-                                             )
-                                             ← "Blue" penalty suppressed because
-                                                colour_group_name filter = "Blue"
-                 │                                           │
                  └──────────────┬────────────────────────────┘
                                 ↓
-              Merge: Qdrant results first (preserve semantic priority)
-              then PostgreSQL results not already seen (add structural diversity)
-              Deduplicate by article_id
+              Pool both sources, deduplicate by article_id.
+              Order carries no meaning here — the ranker scores everything
+              on one scale, so a PostgreSQL candidate can outrank a Qdrant one.
+              Qdrant entries keep their _score for semantic_relevance.
                                 ↓
               Post-merge hard exclude filter (safety gate for rejected IDs)
                                 ↓
               If 0 results → filter relaxation fallback:
                 Pass 1: drop price constraints → retry Qdrant + PostgreSQL
                 Pass 2: keep only product_type_name → retry Qdrant + PostgreSQL
-                        (each fallback also applies _rank_by_preferences to PG results)
+                        (results simply join the same candidate pool)
                                 ↓
-              Select top N items (colour diversity applied if N > 2)
+              PersonalizedRanker.rank(candidates, payload, filters)
+                13 components: user fit + buying statistics + semantic relevance,
+                blended by purchase-history confidence. Each component that
+                fires records a reason with a real statistic in it.
+                                ↓
+              PersonalizedRanker.select(scored, quantity)
+                variant dedup by product_code → colour spread if N > 2
+                → prefer candidates that can explain themselves
+                                ↓
+              items[].why / .match_percent / .score_breakdown attached
                                 ↓
 EvidenceAssembler builds evidence bundle:
   { action: "catalog_search", items: [N full article dicts] }

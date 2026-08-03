@@ -443,7 +443,25 @@ def get_purchase_history_hints(profile: dict) -> dict:
             "preferred_price_range": None,
             "dominant_colour":    None,
             "dominant_type":      None,
+            "colour_pcts":        {},
+            "type_pcts":          {},
+            "garment_pcts":       {},
+            "pattern_pcts":       {},
+            "section_pcts":       {},
+            "age":                None,
+            "age_bucket":         None,
+            "total_purchases":    0,
         }
+
+    def _pcts(entries, key):
+        """Builds {value: pct} from a ranked profile list."""
+        return {
+            e[key]: e.get("pct", 0.0)
+            for e in entries or []
+            if isinstance(e, dict) and e.get(key)
+        }
+
+    _age = profile.get("age")
 
     return {
         # Top colours as simple list — for ranking
@@ -465,7 +483,34 @@ def get_purchase_history_hints(profile: dict) -> dict:
         # Single dominant values for strong signals
         "dominant_colour": profile.get("dominant_colour"),
         "dominant_type":   profile.get("dominant_product_type"),
+
+        # ── Numeric detail used to build ranker reason strings ──────────────
+        "colour_pcts":     _pcts(profile.get("top_colours"),               "colour"),
+        "type_pcts":       _pcts(profile.get("top_product_types"),         "type"),
+        "garment_pcts":    _pcts(profile.get("top_garment_groups"),        "group"),
+        "pattern_pcts":    _pcts(profile.get("top_graphical_appearances"), "pattern"),
+        "section_pcts":    _pcts(profile.get("top_sections"),              "section"),
+        "age":             _age,
+        "age_bucket":      age_bucket_for(_age),
+        "total_purchases": profile.get("total_purchases", 0),
     }
+
+
+def age_bucket_for(age) -> Optional[str]:
+    """Maps a numeric age to the same buckets used by article_stats."""
+    try:
+        a = float(age)
+    except (TypeError, ValueError):
+        return None
+    if a <= 0:
+        return None
+    if a < 26:
+        return "16-25"
+    if a < 36:
+        return "26-35"
+    if a < 51:
+        return "36-50"
+    return "51+"
 
 
 # ── CLI entry point ────────────────────────────────────────────────────────────

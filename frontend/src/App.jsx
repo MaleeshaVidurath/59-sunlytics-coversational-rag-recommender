@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 
 const BASE = "http://localhost:8000";
-const M2_IMAGE_BASE = "http://localhost:8001";   // M2 serves product photos at /api/images/{article_id}
 
 async function apiGetCustomers() {
   const r = await fetch(`${BASE}/api/auth/customers`);
@@ -98,49 +97,16 @@ function labelColor(label) {
 }
 
 function ProductCard({ item }) {
-  const [imgFailed, setImgFailed] = useState(false);
-  const [preview, setPreview]     = useState(false);
-  const imgSrc = `${M2_IMAGE_BASE}/api/images/${item.article_id}`;
+  const why = item.why || [];
   return (
     <div style={{ background:"#1a1a1a", border:`1px solid ${C.border}`,
       borderRadius:10, padding:"10px 14px", marginTop:8,
-      display:"flex", alignItems:"center", gap:14 }}>
-      {item.article_id && !imgFailed ? (
-        <img
-          src={imgSrc}
-          alt={item.name || "product"}
-          title="Click to enlarge"
-          onError={() => setImgFailed(true)}
-          onClick={() => setPreview(true)}
-          style={{ width:80, height:80, borderRadius:10, flexShrink:0,
-            objectFit:"cover", background:"#242424", cursor:"zoom-in",
-            border:`1px solid ${C.border}` }}
-        />
-      ) : (
-        <div style={{ width:80, height:80, borderRadius:10, flexShrink:0,
-          background:`linear-gradient(135deg,${C.accentDim},${C.accent})`,
-          display:"flex", alignItems:"center", justifyContent:"center", fontSize:26 }}>
-          👗
-        </div>
-      )}
-      {preview && (
-        <div
-          onClick={() => setPreview(false)}
-          style={{ position:"fixed", inset:0, zIndex:1000,
-            background:"rgba(0,0,0,0.88)", cursor:"pointer",
-            display:"flex", flexDirection:"column",
-            alignItems:"center", justifyContent:"center", gap:14 }}>
-          <img src={imgSrc} alt={item.name || "product"}
-            style={{ maxWidth:"82vw", maxHeight:"72vh", borderRadius:12,
-              boxShadow:"0 24px 80px rgba(0,0,0,0.7)" }} />
-          <div style={{ color:"#fff", fontWeight:600, fontSize:16 }}>{item.name}</div>
-          <div style={{ color:"#aaa", fontSize:13 }}>
-            {item.colour} · {item.type}{item.price ? ` · ${item.price}` : ""}
-          </div>
-          <div style={{ color:"#fff", fontSize:14, marginTop:6, opacity:0.85,
-            fontWeight:600 }}>Close</div>
-        </div>
-      )}
+      display:"flex", alignItems:"flex-start", gap:12 }}>
+      <div style={{ width:36, height:36, borderRadius:8, flexShrink:0,
+        background:`linear-gradient(135deg,${C.accentDim},${C.accent})`,
+        display:"flex", alignItems:"center", justifyContent:"center", fontSize:16 }}>
+        👗
+      </div>
       <div style={{ flex:1, minWidth:0 }}>
         <div style={{ color:C.text, fontWeight:600, fontSize:13,
           whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
@@ -154,6 +120,39 @@ function ProductCard({ item }) {
             display:"-webkit-box", WebkitLineClamp:2,
             WebkitBoxOrient:"vertical", overflow:"hidden" }}>
             {item.description}
+          </div>
+        )}
+        {/* Why this item was picked for this user. Generated from real
+            statistics by the ranker, so it is safe to render verbatim. */}
+        {why.length > 0 && (
+          <div style={{ marginTop:6, paddingTop:6,
+            borderTop:`1px solid ${C.border}` }}>
+            <div style={{ color:C.textMuted, fontSize:9, letterSpacing:0.5,
+              textTransform:"uppercase", marginBottom:3 }}>
+              Why this for you
+            </div>
+            {why.map((reason, i) => (
+              <div key={i} style={{ color:C.textDim, fontSize:10, marginTop:2,
+                display:"flex", gap:5, lineHeight:1.35 }}>
+                <span style={{ color:C.accent, flexShrink:0 }}>✓</span>
+                <span>{reason}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end",
+        gap:4, flexShrink:0 }}>
+        <div style={{ fontSize:10, color:C.textMuted, fontFamily:"monospace" }}>
+          #{item.article_id?.slice(-6)}
+        </div>
+        {/* Already a clamped 0-100 figure from the ranker; absent when nothing
+            personalised matched, in which case no badge is shown at all. */}
+        {typeof item.match_percent === "number" && (
+          <div title="Personalised match score"
+            style={{ fontSize:9, color:C.accent, fontFamily:"monospace",
+              border:`1px solid ${C.border}`, borderRadius:5, padding:"1px 5px" }}>
+            {item.match_percent}%
           </div>
         )}
       </div>
@@ -578,9 +577,12 @@ function ChatPage({ user, onLogout, selectedModel, onResetModel }) {
         content: m.content,
         timestamp: m.timestamp,
         label: m.label,
-        items: m.items || [],
-        turn_id: m.turn_id,
-        recommendation_id: m.recommendation_id,
+        // Restore the product cards and their "why this for you" reasons so a
+        // reopened chat looks the same as when it was live.
+        items: m.items_recommended || [],
+        recommendation_id: m.recommendation_id || null,
+        turn_id: m.turn_id || null,
+        session_id: session.session_id,
       }));
       setMessages(msgs);
     } catch(e) { console.error("selectSession failed", e); }

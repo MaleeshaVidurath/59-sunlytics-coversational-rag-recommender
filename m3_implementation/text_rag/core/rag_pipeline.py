@@ -149,6 +149,10 @@ class TextRAGPipeline:
                     "material_description": it.get("detail_desc") or it.get("material_description") or None,
                     "pattern":              it.get("graphical_appearance_name") or it.get("pattern") or None,
                     "price":                it.get("price"),
+                    # Carry the stored justification through so a re-presented
+                    # recommendation keeps its "why" instead of losing it.
+                    "why":                  it.get("why") or [],
+                    "match_percent":        it.get("match_percent"),
                 })
 
             cached_evidence = {"action": "catalog_search", "items": mapped_items}
@@ -181,6 +185,8 @@ class TextRAGPipeline:
                             "garment_group_name":        item.get("garment_group") or None,
                             "detail_desc":               item.get("material_description") or None,
                             "graphical_appearance_name": item.get("pattern") or None,
+                            "why":                       item.get("why") or None,
+                            "match_percent":             item.get("match_percent"),
                         }
                         for item in mapped_items if item.get("article_id")
                     ]
@@ -382,6 +388,10 @@ class TextRAGPipeline:
                             "garment_group_name":        item.get("garment_group") or None,
                             "detail_desc":               item.get("material_description") or None,
                             "graphical_appearance_name": item.get("pattern") or None,
+                            # Persist the ranking justification so reopening this
+                            # chat later still shows why each item was picked.
+                            "why":                       item.get("why") or None,
+                            "match_percent":             item.get("match_percent"),
                         })
 
                 await memory_pipeline.store_response(
