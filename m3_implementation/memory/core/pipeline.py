@@ -220,6 +220,8 @@ class MemoryPipeline:
         # is_fashion_relevant_async runs:
         #   Stage 1 (0ms)    — Conversational bypass: continuation phrases
         #                      in active history always pass through.
+        #   Stage 1b (0ms)   — Greeting bypass: a message that is nothing but
+        #                      a greeting passes without needing history.
         #   Stage 2 (0ms)    — Fast keyword allowlist + expanded blocklist.
         #   Stage 3 (3-5ms)  — Dual-pool mean-top-3 semantic scoring
         #                      (16 fashion anchors vs 12 off-topic anchors).
