@@ -50,14 +50,24 @@ The `dialogue_state` field is a JSON string of the entire `DialogueState` object
       "prod_name": "Winter sneaker",
       "product_type_name": "Sneakers",
       "colour_group_name": "Dark Yellow",
-      "price": 14.11
+      "price": 14.11,
+      "rec_turn": 6
     },
     "item_b": {
       "article_id": "599716003",
       "prod_name": "OL SOUTH PQ sneaker",
       "colour_group_name": "Light Beige",
-      "price": 29.24
-    }
+      "price": 29.24,
+      "rec_turn": 6
+    },
+    "item_c": {
+      "article_id": "612345001",
+      "prod_name": "Suede trainer",
+      "colour_group_name": "Black",
+      "price": 22.50,
+      "rec_turn": 2
+    },
+    "item_d": null
   },
   "rejected_items": [],
   "accepted_items": [],
@@ -69,6 +79,33 @@ The `dialogue_state` field is a JSON string of the entire `DialogueState` object
 ```
 
 This is the "working memory" — everything the system needs to understand the current conversation state. It is read and written on every single turn.
+
+### `currently_discussing` — the context window
+
+`currently_discussing` is a **rolling window of the 12 most recently
+recommended items, newest first** (`CONTEXT_WINDOW_ITEMS` in `pipeline.py`),
+spanning slots `item_a` … `item_l`. In the example above `item_a`/`item_b` came
+from turn 6 and `item_c` is still held from turn 2.
+
+Each item stores its complete record — description, price, and the ranker's
+justification strings — roughly 630 B per item, so a full window is about 8 KB.
+Keeping the full record is what lets `item_detail_lookup` answer from memory
+with no database query at all.
+
+`_push_context_window` maintains it: new items go on the front, earlier turns'
+items shift back, an item recommended again returns to the front with a fresh
+`rec_turn`, and the oldest fall off past 12. All 12 slots are rewritten every
+time — including trailing `null`s — because `update_dialogue_state` deep-merges
+dicts, so an omitted key would strand a dropped item.
+
+> **Superseded:** this dict used to be wiped and refilled with only the current
+> turn's items. That kept ordinal references honest, but made anything
+> recommended earlier in the session unreferenceable. `rec_turn` now separates
+> the two concerns — ordinals read the stamp, name references search the whole
+> window — so history can be retained without ordinals losing their meaning.
+
+Items older than the window are not lost; they live in the `recommendations`
+collection and are recovered on demand by `enrichment._resolve_pool`.
 
 ---
 
@@ -355,6 +392,9 @@ One document per recommendation event — every time the bot showed products to 
 - CSE `_find_similar_question_exclusions` — fetches cached items when a similar question is detected
 - CSE `_all_session_article_ids` — collects all article_ids to exclude on REFINEMENT searches
 - CSE `_find_items_in_full_session` — fallback when `dialogue_state.currently_discussing` is empty
+- Enrichment `_resolve_pool` / `_collect_session_items` — widens the resolution pool
+  beyond the context window when a message references an item that has aged out of it.
+  This is what guarantees any product recommended in the session stays referenceable.
 - `chat.py` — finds the latest `recommendation_id` for RL feedback linking
 
 ---
@@ -490,7 +530,8 @@ Message arrives
 9. store_response()   [after RAG]
    → add_assistant_turn()  → Redis list + MongoDB sessions.turns
    → insert recommendation → MongoDB recommendations
-   → update currently_discussing → Redis Hash + MongoDB sessions
+   → _push_context_window() → Redis Hash + MongoDB sessions
+      (prepends this turn's items to the 12-item window, stamps rec_turn)
 ```
 
 ---

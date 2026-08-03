@@ -47,6 +47,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 # semantically equivalent — recommendations from the prior one are excluded.
 _SIMILAR_QUESTION_THRESHOLD = 0.75
 
+# ── PARTIAL_RECENT vs PARTIAL_SESSION ─────────────────────────────────────────
+# How many of the newest recommendation turns still in the context window count
+# as "recent". An item recommended within them is PARTIAL_RECENT (answerable
+# straight from the Redis hot state); anything older, or reached through the
+# MongoDB session-history fallback, is PARTIAL_SESSION.
+RECENT_REC_TURNS = 3
+
 
 def _cosine(a, b) -> float:
     a, b = np.array(a, dtype=float), np.array(b, dtype=float)
@@ -514,7 +521,7 @@ class ContextSufficiencyEvaluator:
               f"(from label={label} msg='{message[:50]}')")
 
         # ── Items are in dialogue_state — check recency ────────────────────
-        items_recent    = self._items_in_recent_history(history, target_item, None)
+        items_recent    = self._items_in_recent_history(dialogue_state, target_item, None)
         partial_subtype = "PARTIAL_RECENT" if items_recent else "PARTIAL_SESSION"
 
         return SufficiencyResult(
@@ -662,7 +669,7 @@ class ContextSufficiencyEvaluator:
                      if isinstance(v, dict) and v.get("article_id") == _target_id),
                     _discussing.get("item_a"),
                 )
-                _items_recent = self._items_in_recent_history(history, _target_dict, None)
+                _items_recent = self._items_in_recent_history(dialogue_state, _target_dict, None)
                 _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
                 _target_name  = (_target_dict or {}).get("prod_name", "unknown")
             print(f"[CSE-ITEMREF] ATTRIBUTE_QUESTION → enrichment=PARTIAL  "
@@ -734,7 +741,7 @@ class ContextSufficiencyEvaluator:
                      if isinstance(v, dict) and v.get("article_id") == _b_id),
                     _discussing.get("item_b"),
                 )
-                _items_recent = self._items_in_recent_history(history, _item_a_dict, _item_b_dict)
+                _items_recent = self._items_in_recent_history(dialogue_state, _item_a_dict, _item_b_dict)
                 _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
                 _a_name       = (_item_a_dict or {}).get("prod_name", "item A")
                 _b_name       = (_item_b_dict or {}).get("prod_name", "item B")
@@ -802,7 +809,7 @@ class ContextSufficiencyEvaluator:
                         _discussing.get("item_a"),
                     ) if _target_id else _discussing.get("item_a")
                 )
-                _items_recent = self._items_in_recent_history(history, _target_dict, None)
+                _items_recent = self._items_in_recent_history(dialogue_state, _target_dict, None)
                 _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
                 _target_name  = (_target_dict or {}).get("prod_name", "all items") if _target_dict else "all items"
             print(f"[CSE-ITEMREF] EXPLANATION_WHY → enrichment=PARTIAL  "
@@ -874,7 +881,7 @@ class ContextSufficiencyEvaluator:
                         _discussing.get("item_a"),
                     ) if _target_id else _discussing.get("item_a")
                 )
-                _items_recent = self._items_in_recent_history(history, _target_dict, None)
+                _items_recent = self._items_in_recent_history(dialogue_state, _target_dict, None)
                 _partial_sub  = "PARTIAL_RECENT" if _items_recent else "PARTIAL_SESSION"
                 _target_name  = (_target_dict or {}).get("prod_name", "unknown")
 
@@ -1132,48 +1139,59 @@ class ContextSufficiencyEvaluator:
 
     def _items_in_recent_history(
         self,
-        history: list[dict],
-        item_a:  Optional[dict],
-        item_b:  Optional[dict],
+        dialogue_state: dict,
+        item_a:         Optional[dict],
+        item_b:         Optional[dict],
     ) -> bool:
         """
-        Checks whether the currently_discussing items appear in the recent
-        turn history (last 3 exchanges, passed from pipeline's get_turns_as_history).
+        Checks whether the target items were recommended in the last
+        RECENT_REC_TURNS recommendation turns held in the context window.
 
-        Matches by product name words in bot turn content, and by generic
-        recommendation markers (£, "option 1", etc.).
+        Each item carries rec_turn — the turn that recommended it — so this is
+        a comparison of turn numbers. It used to search the recent bot turns
+        for the item's name and, failing that, for markers like "£" or
+        "option 1"; since every recommendation reply contains those, it
+        answered "did the bot show anything recently" rather than "is this
+        item recent", and so returned True almost unconditionally.
+
+        Items stored before rec_turn existed have none. Being in the window at
+        all is the best evidence available for those, so they count as recent.
         """
-        if not history:
+        discussing = (dialogue_state or {}).get("currently_discussing") or {}
+        window = [
+            v for k, v in discussing.items()
+            if k.startswith("item_") and isinstance(v, dict)
+        ]
+        if not window:
             return False
 
-        bot_content = " ".join(
-            t.get("content", "").lower()
-            for t in history
-            if t.get("role") in ("assistant", "bot")
+        turns = sorted(
+            {v["rec_turn"] for v in window if v.get("rec_turn") is not None},
+            reverse=True,
         )
-        if not bot_content:
-            return False
+        recent_turns = set(turns[:RECENT_REC_TURNS])
 
-        # Check for item names in bot content
+        window_ids = {str(v.get("article_id", "")).strip() for v in window}
+        window_ids.discard("")
+
         for item in (item_a, item_b):
             if not item:
                 continue
-            name = (
-                item.get("prod_name", "")
-                if isinstance(item, dict)
-                else getattr(item, "prod_name", "") or ""
-            ).lower()
-            if name and len(name) > 3:
-                # Match on first 3 significant words (handles truncation)
-                words = [w for w in name.split()[:4] if len(w) > 3]
-                if any(w in bot_content for w in words):
-                    return True
+            aid = str(
+                (item.get("article_id") if isinstance(item, dict)
+                 else getattr(item, "article_id", "")) or ""
+            ).strip()
+            if not aid or aid not in window_ids:
+                continue
+            rec_turn = (
+                item.get("rec_turn") if isinstance(item, dict)
+                else getattr(item, "rec_turn", None)
+            )
+            # Legacy item with no rec_turn — presence in the window is all we have.
+            if rec_turn is None or not recent_turns or rec_turn in recent_turns:
+                return True
 
-        # Generic recommendation markers (bot showed items)
-        return any(
-            kw in bot_content
-            for kw in ["option 1", "option 2", "here are", "£", "found two", "found these"]
-        )
+        return False
 
     def _label_to_default_strategy(self, label: str) -> str:
         """Returns the DistilBERT default retrieval strategy for a label."""
