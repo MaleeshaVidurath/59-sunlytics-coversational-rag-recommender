@@ -345,6 +345,32 @@ def _resolve_cheaper_price(
 
 # ── Item reference resolver ───────────────────────────────────────────────────
 
+# Score at which _score_items_by_name_scored is judged to have found a real
+# reference rather than an incidental word in common: naming the product
+# outright is 100, and naming its colour or price is worth 50 each. Anything
+# below is word overlap, which on a pool of same-category items says nothing.
+_STRONG_MATCH = 50
+
+
+def _newest_turn_items(item_list: list) -> list:
+    """
+    Narrows a context window to the items from its most recent recommendation.
+
+    The window spans several turns, so position in it is no longer the same as
+    position in what the user was last shown. Ordinals ("option 2") and
+    "cheaper than these" mean the latest offer specifically, so they resolve
+    against this subset rather than the whole window.
+
+    Items stored before rec_turn existed have none, so there is nothing to
+    narrow by and the full list is returned unchanged.
+    """
+    turns = [t for t in (getattr(it, "rec_turn", None) for it in item_list) if t is not None]
+    if not turns:
+        return item_list
+    newest = max(turns)
+    return [it for it in item_list if getattr(it, "rec_turn", None) == newest]
+
+
 def _match_item_by_price(msg: str, item_list: list) -> Optional[ItemInContext]:
     """Returns the first item whose price appears as a number in msg, or None."""
     price_nums = re.findall(r"[£$]?\d+(?:\.\d{1,2})?", msg)
@@ -388,7 +414,11 @@ def _resolve_item_reference(
 
     msg = message.lower()
 
-    # Ordinal references — map position words to list index
+    # Ordinal references — map position words to list index.
+    # Positions count within the latest recommendation only: the list may span
+    # several turns, and "option 2" always means the second thing just shown.
+    ordinal_list = _newest_turn_items(item_list)
+
     _ORDINALS = [
         (0, ["first",   "option 1", "item 1", "1st", "number one",   "the 1st"]),
         (1, ["second",  "option 2", "item 2", "2nd", "number two",   "the 2nd", "the other"]),
@@ -400,8 +430,8 @@ def _resolve_item_reference(
         (7, ["eighth",  "option 8", "item 8", "8th", "number eight", "the 8th"]),
     ]
     for idx, phrases in _ORDINALS:
-        if any(phrase in msg for phrase in phrases) and idx < len(item_list):
-            return item_list[idx]
+        if any(phrase in msg for phrase in phrases) and idx < len(ordinal_list):
+            return ordinal_list[idx]
 
     # Price-based resolution — specific numeric match takes priority over colour
     price_match = _match_item_by_price(msg, item_list)
@@ -437,6 +467,10 @@ def _resolve_item_reference_checked(
 
     msg = message.lower()
 
+    # Ordinals count within the latest recommendation only — see
+    # _resolve_item_reference.
+    ordinal_list = _newest_turn_items(item_list)
+
     _ORDINALS = [
         (0, ["first",   "option 1", "item 1", "1st", "number one",   "the 1st"]),
         (1, ["second",  "option 2", "item 2", "2nd", "number two",   "the 2nd", "the other"]),
@@ -448,8 +482,8 @@ def _resolve_item_reference_checked(
         (7, ["eighth",  "option 8", "item 8", "8th", "number eight", "the 8th"]),
     ]
     for idx, phrases in _ORDINALS:
-        if any(phrase in msg for phrase in phrases) and idx < len(item_list):
-            return item_list[idx], False
+        if any(phrase in msg for phrase in phrases) and idx < len(ordinal_list):
+            return ordinal_list[idx], False
 
     price_match = _match_item_by_price(msg, item_list)
     if price_match:
@@ -571,7 +605,12 @@ def _resolve_ordinal_items(msg_lower: str, item_list: list) -> list:
     Returns items at ALL ordinal positions mentioned in the message,
     preserving the order they appear in item_list.
     e.g. "compare option 4 and option 5" → [item_list[3], item_list[4]]
+
+    Positions count within the latest recommendation only — see
+    _resolve_item_reference.
     """
+    item_list = _newest_turn_items(item_list)
+
     _ORDINALS = [
         (0, ["first",   "option 1", "item 1", "1st", "number one",   "#1"]),
         (1, ["second",  "option 2", "item 2", "2nd", "number two",   "#2", "the other"]),
@@ -594,6 +633,11 @@ def _resolve_ordinal_items(msg_lower: str, item_list: list) -> list:
 
 
 def _score_items_by_name(message: str, item_pool: list) -> list:
+    """Items only, best first. See _score_items_by_name_scored for the scoring."""
+    return [item for _score, item in _score_items_by_name_scored(message, item_pool)]
+
+
+def _score_items_by_name_scored(message: str, item_pool: list) -> list:
     """
     Scores each item against the message using name, colour, and price signals.
 
@@ -607,6 +651,11 @@ def _score_items_by_name(message: str, item_pool: list) -> list:
     different colours are treated as distinct entries.
     Returns empty list if no item names, colours, or prices are detected
     (all scores == 0).
+
+    Returns (score, item) pairs, best first. Callers need the score to tell a
+    deliberate reference apart from a coincidence: naming the product outright
+    scores >= _STRONG_MATCH, whereas sharing one generic word with the message
+    ("shorts", when everything on offer is shorts) scores 1.
     """
     if not item_pool:
         return []
@@ -666,7 +715,7 @@ def _score_items_by_name(message: str, item_pool: list) -> list:
         )
         if name_key not in seen_keys:
             seen_keys.add(name_key)
-            result.append(item)
+            result.append((score, item))
 
     return result
 
@@ -722,6 +771,54 @@ async def _find_item_in_session_history(message: str, session_id: str) -> Option
     return scored[0]
 
 
+async def _resolve_pool(
+    message: str, window_items: list, session_id: str
+) -> tuple[list, bool]:
+    """
+    Returns (pool, widened) — the item pool a reference should be resolved
+    against, and whether it had to reach past the Redis context window.
+
+    Anything recommended in this session must stay referenceable for the rest
+    of it, and the window is bounded, so a message that does not clearly name
+    something in the window falls through to the session's full recommendation
+    history in MongoDB. That fall-through is unconditional: the previous code
+    gated it on the window having produced no match at all, which a single
+    shared word like "shorts" was enough to prevent, so a product from an
+    earlier turn was answered with whichever item happened to sit in item_a.
+
+    A strong match in the window, or an ordinal or price reference, means the
+    user is talking about something already in front of us and the query is
+    skipped. Otherwise the history is appended behind the window, so the
+    newest items still win ties and the resolvers' default (first item = most
+    recently recommended) is unchanged.
+    """
+    scored = _score_items_by_name_scored(message, window_items)
+    best   = scored[0][0] if scored else 0
+    if best >= _STRONG_MATCH or _has_ordinal_or_price_ref(message.lower()):
+        return window_items, False
+
+    history = await _collect_session_items(session_id)
+    if not history:
+        return window_items, False
+
+    in_window = {it.article_id for it in window_items}
+    extra     = [it for it in history if it.article_id not in in_window]
+    if not extra:
+        return window_items, False
+
+    print(f"[ENRICH-POOL] weak window match (score={best}) → widened "
+          f"{len(window_items)} → {len(window_items) + len(extra)} items "
+          f"with session history")
+    return list(window_items) + extra, True
+
+
+def _came_from_history(item: Optional[ItemInContext], window_items: list) -> bool:
+    """True when the resolved item was reached past the window, via MongoDB."""
+    if item is None:
+        return False
+    return item.article_id not in {it.article_id for it in window_items}
+
+
 async def _find_items_in_session_history(
     message: str, session_id: str, n: int = 2
 ) -> list:
@@ -739,7 +836,9 @@ async def _find_items_in_session_history(
 # ── Helper: build items_in_context dict ───────────────────────────────────────
 
 def _items_dict(ctx_items: list) -> dict:
-    _KEYS = ["item_a", "item_b", "item_c", "item_d", "item_e", "item_f", "item_g", "item_h"]
+    # Matches the CONTEXT_WINDOW_ITEMS slots dialogue_state keeps.
+    _KEYS = ["item_a", "item_b", "item_c", "item_d", "item_e", "item_f",
+             "item_g", "item_h", "item_i", "item_j", "item_k", "item_l"]
     return {
         _KEYS[i]: (item.model_dump() if hasattr(item, "model_dump") else item)
         for i, item in enumerate(ctx_items[: len(_KEYS)])
@@ -1071,9 +1170,12 @@ class EnrichmentLayer:
         }
 
         # Override LLM-guessed price_max when user says "cheaper [than X]"
-        # Pass all currently_discussing items so min price covers all recommended items
+        # "Cheaper" is relative to the latest offer, not to everything still in
+        # the context window: after "show me more expensive ones" the window
+        # also holds the earlier cheap items, and pricing against those would
+        # undercut the request the user just made.
         new_constraints = _resolve_cheaper_price(
-            current_message, new_constraints, *all_ctx_items
+            current_message, new_constraints, *_newest_turn_items(all_ctx_items)
         )
 
         merged_constraints = {**state.hard_constraints, **new_constraints}
@@ -1154,7 +1256,18 @@ class EnrichmentLayer:
             if k.startswith("item_") and v is not None
         ]
 
-        # ── Guard: no items in context ────────────────────────────────────
+        # An empty window may just be an expired Redis key — see
+        # _enrich_selection_reference.
+        window_rebuilt = False
+        if not all_ctx_items:
+            all_ctx_items = await _collect_session_items(session_id)
+            all_ctx_items.reverse()
+            if all_ctx_items:
+                window_rebuilt = True
+                print(f"[ENRICH-ATTR] window empty → rebuilt "
+                      f"{len(all_ctx_items)} item(s) from session history")
+
+        # ── Guard: nothing recommended in this session at all ─────────────
         if not all_ctx_items:
             memory_ctx = await self._base_memory_context(user_id, state)
             memory_ctx["needs_clarification"] = True
@@ -1181,62 +1294,14 @@ class EnrichmentLayer:
                 "side_effects":   ["Reclassified: no items in context → ATTRIBUTE_QUESTION"],
             }
 
-        # Resolve which item the question is about
-        target_item, is_default = _resolve_item_reference_checked(current_message, *all_ctx_items)
-
-        # If fallback default (no real match in currently_discussing), search session history
-        if is_default:
-            hist_item = await _find_item_in_session_history(current_message, session_id)
-            if hist_item:
-                print(f"[ENRICH-ATTR] session history match: '{hist_item.prod_name}' (was default fallback)")
-                attribute_topic = _identify_attribute_topic(current_message)
-                memory_ctx = await self._base_memory_context(user_id, state, include_preferences=False)
-                memory_ctx["historical_items"]    = [hist_item.model_dump()]
-                memory_ctx["use_historical_items"] = True
-                return {
-                    "label": "ATTRIBUTE_QUESTION",
-                    "retrieval_strategy": "PARTIAL",
-                    "retrieval_input": self._make_retrieval_input(
-                        action="item_attribute_lookup",
-                        retrieval_strategy="PARTIAL",
-                        user_message=current_message,
-                        ctx_items=[hist_item],
-                        exclude_ids=state.rejected_items,
-                        payload={
-                            "article_id":          hist_item.article_id,
-                            "attribute_topic":     attribute_topic,
-                            "historical_items":    [hist_item.model_dump()],
-                            "use_historical_items": True,
-                        }
-                    ),
-                    "memory_context": memory_ctx,
-                    "side_effects": ["session history fallback: item found in past recommendations"],
-                }
-            else:
-                print("[ENRICH-ATTR] no match in session history → escalating to FULL retrieval")
-                memory_ctx = await self._base_memory_context(user_id, state)
-                memory_ctx["needs_clarification"] = True
-                memory_ctx["clarification_reason"] = (
-                    "User asked about an item not found in current or past recommendations."
-                )
-                return {
-                    "label": "ATTRIBUTE_QUESTION",
-                    "retrieval_strategy": "FULL",
-                    "retrieval_input": self._make_retrieval_input(
-                        action="catalog_search",
-                        retrieval_strategy="FULL",
-                        user_message=current_message,
-                        ctx_items=[],
-                        exclude_ids=state.rejected_items,
-                        payload={
-                            "filters":           state.hard_constraints,
-                            "preference_boosts": [],
-                            "penalties":         {},
-                        }
-                    ),
-                    "memory_context": memory_ctx,
-                    "side_effects": ["session history fallback: item not found → FULL retrieval"],
-                }
+        # Resolve which item the question is about, reaching past the window
+        # into session history when the message does not clearly name
+        # something still in it.
+        pool, widened = await _resolve_pool(current_message, all_ctx_items, session_id)
+        target_item, _is_default = _resolve_item_reference_checked(current_message, *pool)
+        use_historical = window_rebuilt or (
+            widened and _came_from_history(target_item, all_ctx_items)
+        )
 
         # Identify what attribute is being asked about (hybrid similarity)
         attribute_topic = _identify_attribute_topic(current_message)
@@ -1245,6 +1310,22 @@ class EnrichmentLayer:
             user_id, state, include_preferences=False
         )
 
+        payload = {
+            "article_id":      target_item.article_id if target_item else None,
+            "attribute_topic": attribute_topic,
+        }
+        side_effects = []
+        if use_historical and target_item:
+            print(f"[ENRICH-ATTR] resolved from session history: '{target_item.prod_name}'")
+            hist = [target_item.model_dump()]
+            payload["historical_items"]        = hist
+            payload["use_historical_items"]    = True
+            memory_ctx["historical_items"]     = hist
+            memory_ctx["use_historical_items"] = True
+            side_effects.append(
+                f"Session history fallback: '{target_item.prod_name}'"
+            )
+
         return {
             "label":"ATTRIBUTE_QUESTION",
             "retrieval_strategy": "PARTIAL",
@@ -1252,15 +1333,12 @@ class EnrichmentLayer:
                 action="item_attribute_lookup",
                 retrieval_strategy="PARTIAL",
                 user_message=current_message,
-                ctx_items=all_ctx_items,
+                ctx_items=[target_item] if use_historical and target_item else all_ctx_items,
                 exclude_ids=state.rejected_items,
-                payload={
-                    "article_id":      target_item.article_id if target_item else None,
-                    "attribute_topic": attribute_topic,
-                }
+                payload=payload,
             ),
             "memory_context": memory_ctx,
-            "side_effects":   [],
+            "side_effects":   side_effects,
         }
 
     async def _enrich_explanation_why(
@@ -1282,15 +1360,29 @@ class EnrichmentLayer:
             if k.startswith("item_") and v is not None
         ]
 
+        # An empty window may just be an expired Redis key — see
+        # _enrich_selection_reference.
+        window_rebuilt = False
+        if not all_ctx_items:
+            all_ctx_items = await _collect_session_items(session_id)
+            all_ctx_items.reverse()
+            if all_ctx_items:
+                window_rebuilt = True
+                print(f"[ENRICH-WHY] window empty → rebuilt "
+                      f"{len(all_ctx_items)} item(s) from session history")
+
         # Identify which specific item the user is asking about.
         # _resolve_item_reference handles ordinals (1st–8th), price, colour, name.
         # Returns None only when item_list is empty; default is item_list[0].
         # For EXPLANATION_WHY we treat "no specific item mentioned" as explain-all (None),
         # so we only use the result if the message contains an actual reference signal.
+        # Resolution runs over the session-wide pool, so "why did you recommend
+        # <product from three turns ago>" reaches the product it names.
         msg_lower = current_message.lower()
         msg_words = set(msg_lower.split())
 
-        resolved = _resolve_item_reference(current_message, *all_ctx_items)
+        pool, widened = await _resolve_pool(current_message, all_ctx_items, session_id)
+        resolved = _resolve_item_reference(current_message, *pool)
         # Check whether name-word scoring finds a specific item, otherwise explain all
         best_score = 0
         if resolved:
@@ -1298,14 +1390,9 @@ class EnrichmentLayer:
             best_score = sum(1 for w in name_words if len(w) > 3 and w in msg_words)
         target_item = resolved if (best_score > 0 or _has_ordinal_or_price_ref(msg_lower)) else None
 
-        # If no specific item found in currently_discussing, search session history
-        use_historical = False
-        if target_item is None:
-            hist_item = await _find_item_in_session_history(current_message, session_id)
-            if hist_item:
-                print(f"[ENRICH-WHY] session history match: '{hist_item.prod_name}' (not in currently_discussing)")
-                target_item = hist_item
-                use_historical = True
+        use_historical = (window_rebuilt and target_item is not None) or (
+            widened and _came_from_history(target_item, all_ctx_items)
+        )
 
         print(f"[ENRICH-WHY] target_item="
               f"'{target_item.prod_name if target_item else 'ALL ITEMS'}' "
@@ -1387,28 +1474,38 @@ class EnrichmentLayer:
         print(f"[ENRICH-COMPARE] currently_discussing keys={list(current_items.keys())} "
               f"non-null items={len(all_ctx_items)}")
 
+        # An empty window may just be an expired Redis key — see
+        # _enrich_selection_reference.
+        window_rebuilt = False
+        if not all_ctx_items:
+            all_ctx_items = await _collect_session_items(session_id)
+            all_ctx_items.reverse()
+            if all_ctx_items:
+                window_rebuilt = True
+                print(f"[ENRICH-COMPARE] window empty → rebuilt "
+                      f"{len(all_ctx_items)} item(s) from session history")
+
         # Identify comparison dimension using hybrid similarity
         dimension = _identify_comparison_dimension(current_message)
 
         pref_summary = await self.user_mgr.get_preference_summary(user_id)
         memory_ctx = await self._base_memory_context(user_id, state)
 
+        # Resolve the pair over the session-wide pool, so "compare X and Y"
+        # still works when one or both were recommended several turns ago and
+        # have dropped out of the context window.
+        pool, widened = await _resolve_pool(current_message, all_ctx_items, session_id)
         compare_a, compare_b, compare_list, resolved_both = _resolve_comparison_items(
-            current_message, all_ctx_items
+            current_message, pool
         )
-        use_historical = False
-
-        # Only fall back to session history when current context couldn't identify either item
+        use_historical = window_rebuilt or (
+            widened and (
+                _came_from_history(compare_a, all_ctx_items)
+                or _came_from_history(compare_b, all_ctx_items)
+            )
+        )
         if not resolved_both:
-            hist_items = await _find_items_in_session_history(current_message, session_id)
-            if len(hist_items) >= 2:
-                print(f"[ENRICH-COMPARE] session history match: "
-                      f"'{hist_items[0].prod_name}' vs '{hist_items[1].prod_name}'")
-                compare_a, compare_b = hist_items[0], hist_items[1]
-                compare_list         = hist_items
-                use_historical       = True
-            else:
-                print("[ENRICH-COMPARE] no session history match (< 2 items) — keeping generic fallback")
+            print("[ENRICH-COMPARE] could not identify both items — using generic fallback pair")
 
         print(f"[ENRICH-COMPARE] final pair: "
               f"'{compare_a.prod_name if compare_a else '?'}' vs "
@@ -1485,7 +1582,19 @@ class EnrichmentLayer:
             if k.startswith("item_") and v is not None
         ]
 
-        # ── Guard: no items in context ─────────────────────────────────────
+        # ── Guard: nothing in the window ───────────────────────────────────
+        # An empty window does not mean nothing was recommended — Redis may
+        # simply have expired — so ask MongoDB before giving up. Only a
+        # session with no recommendations at all is a real clarification case.
+        window_rebuilt = False
+        if not all_ctx_items:
+            all_ctx_items = await _collect_session_items(session_id)
+            all_ctx_items.reverse()   # newest first, matching the window's order
+            if all_ctx_items:
+                window_rebuilt = True
+                print(f"[ENRICH-SELECT] window empty → rebuilt "
+                      f"{len(all_ctx_items)} item(s) from session history")
+
         if not all_ctx_items:
             memory_ctx = await self._base_memory_context(
                 user_id, state, include_preferences=False
@@ -1502,21 +1611,16 @@ class EnrichmentLayer:
                 "side_effects":       ["Reclassified: no items in context"],
             }
 
-        msg_lower   = current_message.lower()
-        name_scored = _score_items_by_name(current_message, all_ctx_items)
-        is_default  = not name_scored and not _has_ordinal_or_price_ref(msg_lower)
+        # Resolve against the whole session when the window alone is not
+        # convincing, so a product recommended earlier is still referenceable.
+        pool, widened  = await _resolve_pool(current_message, all_ctx_items, session_id)
+        selected_item  = _resolve_selection_item(current_message, pool)
+        use_historical = window_rebuilt or (
+            widened and _came_from_history(selected_item, all_ctx_items)
+        )
 
-        selected_item  = _resolve_selection_item(current_message, all_ctx_items)
-        use_historical = False
-
-        if is_default:
-            hist_item = await _find_item_in_session_history(current_message, session_id)
-            if hist_item:
-                print(f"[ENRICH-SELECT] session history match: '{hist_item.prod_name}' (was default fallback)")
-                selected_item  = hist_item
-                use_historical = True
-            else:
-                print("[ENRICH-SELECT] no session history match — keeping default fallback item")
+        if use_historical and selected_item:
+            print(f"[ENRICH-SELECT] resolved from session history: '{selected_item.prod_name}'")
 
         # Promote selected item to item_a position so all downstream turns
         # (explanation, follow-up, feedback) default to the correct item.
@@ -1557,7 +1661,10 @@ class EnrichmentLayer:
                 action="item_detail_lookup",
                 retrieval_strategy="PARTIAL",
                 user_message=current_message,
-                ctx_items=all_ctx_items,
+                # A history item is not in the window, so publishing the window
+                # as items_in_context would name a different product than
+                # article_id points at.
+                ctx_items=[selected_item] if use_historical and selected_item else all_ctx_items,
                 exclude_ids=state.rejected_items,
                 payload={
                     "article_id":      selected_item.article_id if selected_item else None,
