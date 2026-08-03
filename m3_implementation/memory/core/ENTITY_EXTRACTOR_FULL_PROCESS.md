@@ -30,7 +30,12 @@ not about fashion, shopping, or clothing, the pipeline skips all downstream step
 (classification, retrieval, response generation) and returns a refusal message
 immediately. This prevents the system from processing irrelevant queries.
 
-### 4-Stage Architecture
+What it blocks is off-topic *subject matter*, not everything that lacks fashion
+vocabulary. Conversational turns that belong in a shopping session — follow-ups
+that reference items already shown (Stage 1) and greetings (Stage 1b) — pass
+through and are handled as `CHITCHAT`.
+
+### Staged Architecture
 
 ```
 User message
@@ -45,6 +50,13 @@ User message
      │     "thanks", "show me more", "which one", "yes please", "first one"
      │     → PASS immediately (these reference items already in context)
      │
+     ├─ Stage 1b (instant) — Greeting bypass
+     │     Needs NO history — a greeting is usually the first message sent
+     │     Every word must be a greeting: exact match against a small token
+     │     set, or repeated letters collapsed and matched against stems
+     │     ("hyy" → "hy", "heyyy" → "hey", "helloo" → "helo")
+     │     → PASS (routed to CHITCHAT, which produces a warm welcome)
+     │
      ├─ Stage 2 (instant) — Keyword gate
      │     2a. Allowlist substring match:
      │         "dress", "jacket", "outfit", "h&m", "t-shirt", "sneakers" → PASS
@@ -54,6 +66,8 @@ User message
      │         Every token from product_type_name column → PASS
      │     2d. Catalog product name tokens (significant words ≥ 5 chars):
      │         Unique identifiers from prod_name column → PASS (with history)
+     │     2e. Full product names (all 21k names from prod_name):
+     │         Substring match against the message → PASS
      │
      ├─ Stage 3 (3–5ms) — Dual-pool mean-of-top-3 semantic scoring
      │     MiniLM encodes: [message] + 16 fashion anchors + 12 off-topic anchors
@@ -73,6 +87,57 @@ User message
            On any error → defaults to PASS (prefer false negatives over false positives)
 ```
 
+### Why Greetings Need Their Own Stage
+
+A greeting carries no fashion vocabulary, so it scores near zero on the
+semantic stage and was being answered with the off-topic refusal:
+
+| message | fashion score | outcome before Stage 1b |
+|---------|---------------|-------------------------|
+| `hi`    | 0.08          | REJECT — below the 0.18 floor |
+| `hyy`   | 0.17          | REJECT — below the 0.18 floor |
+
+Stage 1 could not catch these either: it requires conversation history, and a
+greeting is normally the very first message of a session, when there is none.
+
+Lowering the semantic floor was not an option — it is what keeps genuinely
+off-topic single words out. A greeting is not weak evidence of fashion intent;
+it is a different kind of message, so it gets its own gate.
+
+Two design details keep the gate tight:
+
+- **Every** word must be a greeting, not merely one of them. So `hi` passes,
+  while `hi, what is a good pasta recipe` falls through to the stages below and
+  is still rejected. Stage 1b also sits after Stage 0, so blocklisted words win
+  regardless.
+- Typed greetings are full of doubled letters, and enumerating every spelling
+  is a losing game. Runs of a repeated letter are collapsed to one and matched
+  against stems instead. Words like `good` and `all` stay on the exact-match
+  list, since collapsing would mangle them into `god` and `al`.
+
+Once a greeting passes, nothing else is needed: `_pre_classify_short_message`
+already labels it `CHITCHAT`, and the response generator already holds a
+warm-welcome prompt. Both paths existed; the guard was simply rejecting the
+message before either could run.
+
+### Known Issue — Stage 2e Matches Substrings
+
+Stage 2e checks whether any of ~21,600 catalog product names appears anywhere
+in the message, as a plain substring with no word-boundary check. The catalog
+contains names as short as one character, so this matches almost any text:
+
+```
+[FashionGuard] Stage2e-product-name: matched 's' in 'i need 3 shorts'
+[FashionGuard] Stage2e-product-name: matched 'mo' in 'good morning'
+```
+
+Usually harmless, because an earlier stage has already decided. But when the
+message reaches Stage 2e undecided, it can pass off-topic text — `shhh` is
+admitted on the strength of the product name `s`.
+
+Fix when addressed: require a word-boundary match and ignore catalog names
+shorter than three characters.
+
 ### Why Mean-of-Top-3 Instead of Max
 
 Earlier versions used the single highest cosine score against the anchor pool.
@@ -89,8 +154,16 @@ smoothing outliers and giving a more reliable signal for borderline inputs.
 | Keyword rules only | Cannot handle synonyms, informal phrasing, or novel off-topic inputs |
 | LLM only | 150ms+ per call; too slow when 90% of messages are obviously fashion-related |
 
-The 4-stage cascade gives near-instant decisions (0ms) for easy cases and
-reserves the expensive LLM call only for the genuinely ambiguous ~5%.
+The cascade gives near-instant decisions (0ms) for easy cases and reserves the
+expensive LLM call only for the genuinely ambiguous ~5%.
+
+> **Implementation note.** `is_fashion_relevant_async` collects the stage
+> results into a tuple before iterating, so Python evaluates *every* stage on
+> every message even after one has already decided. The first non-`None` result
+> still wins, so the verdict is correct — but the cheap stages are not actually
+> short-circuiting, which is why decided messages still log lines from later
+> stages. Stage 4 (Groq) is called after the loop and is not affected, so no
+> API calls are wasted.
 
 ### Pipeline Outcome When Not Relevant
 
