@@ -10,8 +10,8 @@
 
 | Member                 | Index   | Module             | Role                                                  |
 |------------------------|---------|--------------------|-------------------------------------------------------|
-| Gunarathna A.M.V.      | 214070G | M2 — Multimodal RAG| CLIP embeddings, FAISS retrieval, BLIP verification   |
-| Weerathunge W.M.C.M.B. | 214225M | M3 — Adaptive RAG  | Hallucination guard, explanation memory, Streamlit UI |
+| Gunarathna A.M.V.      | 214070G | M2 — Multimodal RAG| Fine-tuned CLIP + FAISS retrieval, 3-layer visual verification |
+| Weerathunge W.M.C.M.B. | 214225M | M3 — Adaptive RAG  | Hallucination guard, explanation memory, React UI     |
 | Perera M.I.V.          | 214149H | M1 — Graph RAG     | Knowledge graph, path verbalisation, NLI faithfulness |
 
 ---
@@ -21,7 +21,7 @@
 This system is the first RAG-powered Conversational Recommender System that accompanies every recommendation with a verified, hallucination-free natural language justification. It unifies three RAG pipelines:
 
 - **M1 — Graph RAG**: Retrieves multi-hop KG reasoning paths and converts them into natural language explanations
-- **M2 — Multimodal RAG**: Retrieves image and text evidence, verifies visual claims against product images using BLIP
+- **M2 — Multimodal RAG**: Retrieves image and text evidence with a domain fine-tuned CLIP space, then verifies visual claims against the actual product images through a 3-layer guard
 - **M3 — Adaptive RAG**: Per-turn retrieval trigger, NLI hallucination guard, and explanation memory for cross-turn coherence
 
 **Dataset**: H&M Personalized Fashion Recommendations (Kaggle)
@@ -44,13 +44,32 @@ sunlytics-rag-recommender/
 │       └── M1_graph_rag.ipynb
 │
 ├── m2_multimodal_rag/
-│   ├── clip_embeddings.py
-│   ├── faiss_index.py
-│   ├── retrieval.py
-│   ├── blip_verification.py
-│   ├── data_preprocessing.py
-│   └── notebooks/
-│       └── M2_multimodal_rag.ipynb
+│   ├── backend/                        # FastAPI service (port 8001)
+│   │   ├── main.py                     #   /api/process, /api/images/{article_id}
+│   │   └── schemas.py                  #   typed M3 → M2 request contract
+│   ├── m2_action_router.py             # dispatcher for the 5 M2 actions
+│   ├── m2_handlers.py                  # per-action retrieval + generation logic
+│   ├── clip_embeddings.py              # fine-tuned CLIP text/image encoder
+│   ├── faiss_index.py                  # FAISS search over the shared vector space
+│   ├── cross_encoder_reranker.py       # ms-marco MiniLM reranking of candidates
+│   ├── diversity_bandit.py             # Thompson-sampling diversity control
+│   ├── llm_generator.py                # Groq-hosted Llama text + vision calls
+│   ├── vlm_kansei.py                   # VLM Kansei impression of product images
+│   ├── hallucination_guard/            # 3-layer explanation verification
+│   │   ├── layer_1_knowledge_self_reflection.py
+│   │   ├── layer_2_cove_verification.py
+│   │   ├── layer_3_vlm_visual_verification.py
+│   │   ├── clip_faithfulness_scorer.py
+│   │   └── regeneration_loop.py
+│   ├── knowledge_base/                 # curated Kansei fashion knowledge base
+│   │   ├── fashion_kb.py
+│   │   └── kb_retriever.py
+│   ├── collaborative_filtering/        # NCF cold-start scorer + trained factors
+│   │   ├── cf_scorer.py
+│   │   └── models/                     #   item_factors.npy, popularity.npy, ...
+│   ├── vector_db/                      # FAISS index + article_id mapping
+│   ├── finetune_clip/                  # Kaggle CLIP fine-tuning + index rebuild
+│   └── evaluation/                     # novelty evaluations, figures, results
 │
 ├── m3_implementation/
 │   ├── api/                          # FastAPI app + routers (chat, sessions, auth)
@@ -157,6 +176,45 @@ still runs: the ranker logs a warning and falls back to user-history and semanti
 only, losing the buying-statistics half of the ranking. Rebuild with `--force` after any
 CSV change.
 
+### 7. Run M2 standalone (no databases required)
+
+M2 is a self-contained FastAPI service. It needs **no PostgreSQL, Qdrant, MongoDB or Redis** —
+those are M3's — so it can be started and exercised on its own:
+
+```bash
+# from the repository root
+uvicorn m2_multimodal_rag.backend.main:app --port 8001
+```
+
+Then open **http://localhost:8001/docs** and call `POST /api/process` directly.
+
+Requirements: a `GROQ_API_KEY` in `.env`, the FAISS artifacts
+(`m2_multimodal_rag/vector_db/m2_clip_faiss.bin` + `m2_faiss_mapping.csv`), the trained CF
+factors in `collaborative_filtering/models/`, and the H&M images under `data/`.
+
+`POST /api/process` takes the typed M3 → M2 contract defined in
+[`backend/schemas.py`](m2_multimodal_rag/backend/schemas.py) — a `retrieval_input` whose `payload`
+is resolved by its `action` field, one of `catalog_search`, `item_attribute_lookup`,
+`item_compare`, `explanation_generate`, `item_detail_lookup`. `GET /api/images/{article_id}`
+serves the product image for a result.
+
+### 8. Run the full stack
+
+Three processes: M2 (8001), M3 (8000), frontend (Vite).
+
+```bash
+uvicorn m2_multimodal_rag.backend.main:app --port 8001    # terminal 1
+cd m3_implementation && uvicorn api.main:app --port 8000  # terminal 2
+cd frontend && npm install && npm run dev                 # terminal 3
+```
+
+The frontend talks to M3 at `http://localhost:8000`; M3 reaches M2 via `M2_MULTIMODAL_URL`.
+This has **no default** — set it in `.env` or M3 will silently skip the M2 call:
+
+```
+M2_MULTIMODAL_URL=http://127.0.0.1:8001
+```
+
 ---
 
 ## Branch Strategy
@@ -177,14 +235,14 @@ git checkout develop
 git pull origin develop
 
 # 2. Create your feature branch
-git checkout -b m2/blip-verification
+git checkout -b m2/vlm-verification
 
 # 3. Work, then commit with clear messages
-git add m2_multimodal_rag/blip_verification.py
-git commit -m "feat(m2): add BLIP visual consistency check"
+git add m2_multimodal_rag/hallucination_guard/layer_3_vlm_visual_verification.py
+git commit -m "feat(m2): add VLM visual consistency check"
 
 # 4. Push and open a Pull Request → develop
-git push origin m2/blip-verification
+git push origin m2/vlm-verification
 ```
 
 ### Commit message format
@@ -203,13 +261,14 @@ refactor(m3): simplify adaptive trigger logic
 | Component | Technology |
 |---|---|
 | Language | Python 3.10+ |
-| Text + image embeddings | CLIP (openai/clip-vit-base-patch32) |
-| Visual verification | BLIP (Salesforce/blip-image-captioning-base) |
-| LLM (explanations) | LLaMA-3 (Meta) |
-| Hallucination detection | BART-MNLI |
-| Vector database | FAISS |
-| Orchestration | LangChain |
-| Frontend | Streamlit |
+| Text + image embeddings (M2) | `open_clip` ViT-B-32, `laion2b_s34b_b79k` weights, domain fine-tuned on H&M |
+| Candidate reranking (M2) | Cross-encoder `ms-marco-MiniLM-L-6-v2` |
+| Cold-start scoring (M2) | Neural collaborative filtering (trained item factors) |
+| Visual verification (M2) | ViLT VQA (`ViltForQuestionAnswering`) + CLIP image–text faithfulness scorer |
+| LLM — explanations (M2) | Groq-hosted `llama-3.1-8b-instant` (text), `llama-4-scout-17b-16e-instruct` (vision) |
+| Hallucination detection | M2: 3-layer guard (self-reflection → CoVe → VLM) · M3: NLI entailment gates |
+| Vector database | FAISS (M2) · Qdrant (M3) |
+| Frontend | React + Vite |
 | Deep learning | PyTorch + Transformers (HuggingFace) |
 
 ---
@@ -217,19 +276,40 @@ refactor(m3): simplify adaptive trigger logic
 ## Hardware Requirements
 
 - RAM: 16 GB minimum
-- GPU: NVIDIA with 8 GB+ VRAM (for CLIP, BLIP, LLaMA-3)
+- GPU: NVIDIA with 8 GB+ VRAM (for CLIP, ViLT and the local NLI models; M2's Llama calls are
+  served remotely by Groq and need only a `GROQ_API_KEY`)
 - Storage: 50 GB+ for dataset, models, and FAISS index
 
 ---
 
 ## Key Novel Contributions
 
-1. **Multimodal Retrieval Framework** — unified image + text embeddings in a single FAISS vector space
-2. **Visual Faithfulness Verification** — BLIP-based VLM check that generated explanations match actual product images
-3. **Adaptive Retrieval Trigger** — per-turn decision whether to retrieve or reuse cached evidence
-4. **NLI Hallucination Guard** — sentence-level entailment check before any response reaches the user
-5. **Explanation Memory** — cross-turn coherence tracking to prevent contradictions
-6. **Traceable Personalised Ranking** — once hard filters are satisfied every candidate is
+### M2 — Multimodal RAG
+
+1. **Domain fine-tuned multimodal retrieval** — image + text embeddings in a single FAISS space,
+   with CLIP fine-tuned on H&M rather than used off the shelf.
+   *Recall@10 57.2% → 76.0% (+18.7 pp, 95% CI [+16.8, +20.6], n=2084).*
+2. **Visual faithfulness verification** — a 3-layer guard (knowledge-grounded self-reflection →
+   Chain-of-Verification → ViLT VQA visual check) with a CLIP image–text faithfulness scorer and a
+   regeneration loop, so no claim reaches the user without being checked against the product image.
+   *Visual-corruption recall 0.76 → 0.80 over a text-only first layer (n=168).*
+3. **NCF cold-start recovery** — collaborative-filtering signal fused into ranking for users with
+   no usable purchase history. *Cold-start Hit@10 4.3% → 19.6% (n=46).*
+4. **Thompson-sampling diversity control** — the relevance/diversity trade-off adapts to in-session
+   rejections instead of using a fixed weight. *λ 0.70 → 0.51 across 10 rejections (n=200).*
+5. **Kansei fashion knowledge base** — grounds affective/stylistic language in curated fashion
+   knowledge rather than letting the LLM invent it.
+   *77% win rate in a blind LLM-judge comparison, 23W/7L/0T, 95% CI [59%, 88%] (n=30).*
+
+Evaluation detail: [`m2_multimodal_rag/evaluation/results/SUMMARY.md`](m2_multimodal_rag/evaluation/results/SUMMARY.md)
+· figures in [`evaluation/results/figures/`](m2_multimodal_rag/evaluation/results/figures/)
+
+### M3 — Adaptive RAG
+
+6. **Adaptive Retrieval Trigger** — per-turn decision whether to retrieve or reuse cached evidence
+7. **NLI Hallucination Guard** — sentence-level entailment check before any response reaches the user
+8. **Explanation Memory** — cross-turn coherence tracking to prevent contradictions
+9. **Traceable Personalised Ranking** — once hard filters are satisfied every candidate is
    equally valid, so selection is decided by a transparent scorer blending the user's own
    purchase behaviour with per-article buying statistics (popularity, age-group affinity,
    repeat rate). Every signal that fires records a plain-language reason containing a real
