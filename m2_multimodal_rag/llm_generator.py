@@ -1,6 +1,7 @@
 import base64
 import os
 import random
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -13,6 +14,23 @@ load_dotenv()
 _HALLUCINATION_COLORS = ["neon green", "hot pink", "silver", "striped magenta"]
 _RERANK_POOL_SIZE = 8
 _QUERY_VARIANTS = 3
+
+# Reasoning models (Qwen3.x, and others Groq may substitute in later) prefix their
+# answer with a <think>...</think> block.  reasoning_effort="none" normally
+# suppresses it; this strips any that still leaks through so a model swap can
+# never silently poison an explanation with the model's internal monologue.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_reasoning(text: str | None) -> str | None:
+    """Removes <think> blocks, including an unclosed trailing one."""
+    if not text:
+        return text
+    cleaned = _THINK_RE.sub("", text)
+    # Truncated output can leave an unterminated <think> with no closing tag.
+    if "<think>" in cleaned.lower():
+        cleaned = cleaned[: cleaned.lower().index("<think>")]
+    return cleaned.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +139,12 @@ class ExplanationGenerator:
                 }],
                 max_tokens=max_tokens,
                 temperature=temperature,
+                # Qwen3.6 is a reasoning model: without this it spends the whole
+                # token budget on a <think> block and returns nothing usable.
+                reasoning_effort="none",
             )
             result = resp.choices[0].message.content.strip()
+            result = _strip_reasoning(result)
             print("   [Vision] Image-grounded generation succeeded.")
             return result or None
         except Exception as exc:
