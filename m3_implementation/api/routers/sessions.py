@@ -13,6 +13,36 @@ _ATTR_LABEL = {
 }
 
 
+async def _current_values(session_id: str) -> dict:
+    """
+    {(article_id, attribute): the value the catalogue holds NOW}, read from the
+    session's assertion ledger.
+
+    The ledger is the right source here rather than the notice history: its
+    `evidence_value` is updated on every factual turn, including revisions that
+    produced no notice because no earlier message had quoted the old value.
+    """
+    from memory.core.assertion_ledger import AssertionLedger, TRACKED_ATTRIBUTES
+
+    for prefix in ("m3", "m2", "m1"):
+        try:
+            ledger = await AssertionLedger.load(session_id, prefix)
+        except Exception:
+            continue
+        products = ledger.known_products()
+        if not products:
+            continue
+        out = {}
+        for product in products:
+            aid = str(product.get("article_id", ""))
+            for attribute in TRACKED_ATTRIBUTES:
+                value = product.get(attribute, "")
+                if value:
+                    out[(aid, attribute)] = value
+        return out
+    return {}
+
+
 async def _corrections_by_turn(db, session_id: str) -> dict:
     """
     Groups this session's revision notices by the assistant turn they affect.
@@ -20,26 +50,54 @@ async def _corrections_by_turn(db, session_id: str) -> dict:
     A revision notice is raised when the catalogue value of an article changes
     after the assistant has already quoted it. The earlier message was correct
     when it was sent, so it is annotated rather than rewritten — the user sees
-    what changed and when, and the transcript stays an honest record of what
-    was actually said.
+    what changed and when, and the transcript stays an honest record of what was
+    actually said.
+
+    A NOTE IS NOT A REPLAY OF THE EVENT — IT IS A STATEMENT ABOUT NOW.
+      Each notice records one hop (Black → Green). Rendering hops verbatim goes
+      wrong as soon as a value moves more than once: change Black → Green, then
+      Green → Black, and the first message would still carry "changed to Green"
+      even though it is showing the correct value again.
+
+      So the note is rebuilt on every read from two things: what THAT turn
+      stated (the superseded value the notice was raised against) and what the
+      catalogue says NOW. When those agree the value has come back and the note
+      is dropped entirely — the message needs no annotation, because what it
+      said is true again.
 
     Notices are searched across every member prefix because a session's model
     lock decides which collection its memory was written to.
     """
+    from memory.core.assertion_ledger import values_differ
+
+    current = await _current_values(session_id)
     grouped: dict = {}
+
     for prefix in ("m3", "m2", "m1"):
         try:
             coll = get_collection_name("revision_notices", prefix)
             cursor = db[coll].find({"session_id": session_id}).sort("detected_at", 1)
             async for notice in cursor:
+                attribute = notice.get("attribute", "")
+                article_id = str(notice.get("article_id", ""))
+
+                # What the affected turns actually said. The notice was raised
+                # against exactly this value, so it is what those messages show.
+                stated = notice.get("old_value", "")
+                # Fall back to the notice's own new_value only when the ledger
+                # could not be read at all.
+                now = current.get((article_id, attribute)) or notice.get("new_value", "")
+
+                if not values_differ(stated, now):
+                    continue   # back to what was said — nothing to annotate
+
                 entry = {
-                    "attribute":    notice.get("attribute", ""),
-                    "label":        _ATTR_LABEL.get(notice.get("attribute", ""),
-                                                    notice.get("attribute", "")),
+                    "attribute":    attribute,
+                    "label":        _ATTR_LABEL.get(attribute, attribute),
                     "product_name": notice.get("product_name", ""),
-                    "article_id":   notice.get("article_id", ""),
-                    "old_value":    notice.get("old_value", ""),
-                    "new_value":    notice.get("new_value", ""),
+                    "article_id":   article_id,
+                    "old_value":    stated,
+                    "new_value":    now,
                     "detected_at":  str(notice.get("detected_at", "")),
                 }
                 for turn_id in notice.get("affected_turn_ids", []) or []:
@@ -87,6 +145,10 @@ def _merge_correction(bucket: list, entry: dict) -> None:
     Keeps one correction per (article, attribute) in a turn's bucket.
     A value revised several times should read as a single correction to the
     latest value, not as a stack of intermediate steps.
+
+    `old_value` is deliberately NOT overwritten. Notices arrive oldest-first, so
+    the first one carries what this message actually said; later ones carry
+    intermediate values the message never showed.
     """
     for existing in bucket:
         if (existing["article_id"] == entry["article_id"]
