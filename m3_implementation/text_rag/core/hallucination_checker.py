@@ -27,42 +27,21 @@ import sys
 import re
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-from text_rag.config import (
-    NLI_MODEL_NAME, NLI_CONTRADICTION_THRESHOLD
+from text_rag.config import NLI_CONTRADICTION_THRESHOLD
+
+# Sentence splitting, the item→sentence map and the MiniLM/DeBERTa singletons
+# live in shared modules so the cross-turn consistency layer reads the response
+# through exactly the same lens — one extraction, two consumers.
+from text_rag.core.nli_model import get_nli_model as _get_nli_model
+from text_rag.core.assertion_extractor import (
+    get_embed_model        as _get_embed_model,
+    split_sentences        as _split_sentences,
+    build_item_sentence_map,
+    norm_ws                as _norm_ws,
+    get_catalog_names      as _get_catalog_names,
 )
 
-_nli_model   = None
-_embed_model = None
-
 _MIN_SIMILARITY = 0.35  # MiniLM threshold below which a field is considered unused
-
-
-def _get_nli_model():
-    global _nli_model
-    if _nli_model is None:
-        from sentence_transformers import CrossEncoder
-        _nli_model = CrossEncoder(NLI_MODEL_NAME)
-        print(f"[HallucinationChecker] NLI model loaded: {NLI_MODEL_NAME}")
-    return _nli_model
-
-
-def _get_embed_model():
-    global _embed_model
-    if _embed_model is None:
-        from sentence_transformers import SentenceTransformer
-        _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _embed_model
-
-
-# ── Sentence splitting ─────────────────────────────────────────────────────────
-
-def _split_sentences(text: str) -> list[str]:
-    """Splits text into sentences, filtering out very short ones."""
-    # Also split on newlines immediately before "Option N:" so each catalog option
-    # always starts its own sentence even when the LLM prefixes with an intro line
-    # that has no trailing period (e.g. "Here are your options:\nOption 1: ...").
-    sentences = re.split(r'(?<=[.!?])\s+|\n(?=Option\s+\d+\s*:)', text.strip())
-    return [s.strip() for s in sentences if len(s.strip()) > 15]
 
 
 # ── Sentence skip rules ────────────────────────────────────────────────────────
@@ -79,99 +58,6 @@ _NON_FACTUAL_STARTS = [
     "would you", "do you", "thank you", "these are", "please",
     "i'm happy", "i'd be", "of course", "great choice",
 ]
-
-
-_MIN_LOCK_SIM = 0.30  # minimum similarity to consider a sentence as describing an item
-
-
-def _build_item_sentence_map(sentences: list[str], items: list[dict]) -> dict:
-    """
-    Maps each evidence item to the sentence that best describes it using
-    MiniLM semantic similarity on rich item descriptions (name + colour + price + type).
-
-    Order-independent: does not rely on "Option N:" numbering or LLM response order.
-    Format-independent: works regardless of how the LLM structures its response.
-    Robust to single-field errors: if LLM writes wrong colour, name+price still pull
-    the match to the correct sentence.
-
-    Greedy assignment — highest similarity pair is assigned first, each sentence
-    can only be claimed by one item.  Items with no sentence above _MIN_LOCK_SIM
-    are left out of the map (LLM didn't mention them in this response).
-    """
-    if not sentences or not items:
-        return {}
-
-    import numpy as np
-    model = _get_embed_model()
-
-    # Rich description per item using fields that reliably appear in LLM responses.
-    # Deliberately excludes section/index_group/garment_group — LLM never mentions them.
-    item_descs = []
-    for item in items:
-        parts = [
-            item.get("name", ""),
-            item.get("colour", ""),
-            str(item.get("price", "")),
-            item.get("type", ""),
-        ]
-        item_descs.append(" ".join(p for p in parts if p))
-
-    # Encode items and sentences together in one batch for efficiency
-    all_texts  = item_descs + sentences
-    embeddings = model.encode(all_texts)
-    item_embs  = embeddings[:len(items)]
-    sent_embs  = embeddings[len(items):]
-
-    # Build full similarity matrix
-    scores = []
-    for item_idx, item_emb in enumerate(item_embs):
-        for sent_idx, sent_emb in enumerate(sent_embs):
-            sim = float(
-                np.dot(item_emb, sent_emb) /
-                (np.linalg.norm(item_emb) * np.linalg.norm(sent_emb) + 1e-8)
-            )
-            scores.append((sim, item_idx, sent_idx))
-
-    # Greedy assignment: highest similarity first, no sentence used twice
-    scores.sort(reverse=True)
-    option_map = {}
-    used_sents = set()
-
-    for sim, item_idx, sent_idx in scores:
-        if sim < _MIN_LOCK_SIM:
-            break  # sorted descending — nothing below threshold is useful
-        if item_idx not in option_map and sent_idx not in used_sents:
-            option_map[item_idx] = sent_idx
-            used_sents.add(sent_idx)
-
-    # Print matrix AFTER assignment so ASSIGNED vs best-raw conflict is visible.
-    # "best-raw" means this was the highest score for that item in isolation,
-    # but another item claimed the sentence first in greedy assignment.
-    print("\n[MINILM-SIM] ━━━ similarity matrix (items × sentences) ━━━")
-    for item_idx, desc in enumerate(item_descs):
-        assigned_sent = option_map.get(item_idx)
-        item_scores = sorted(
-            [(sent_idx, sim) for sim, i, sent_idx in scores if i == item_idx],
-            key=lambda x: x[0],
-        )
-        best_sim = max(sim for _, sim in item_scores) if item_scores else 0
-        print(f"  item[{item_idx}] {desc[:60]}")
-        for sent_idx, sim in item_scores:
-            tags = []
-            if sent_idx == assigned_sent:
-                tags.append("ASSIGNED")
-            elif sim == best_sim:
-                tags.append("best-raw")
-            tag_str = f"  ◀ {' | '.join(tags)}" if tags else ""
-            print(f"    sent[{sent_idx}] sim={sim:.4f}{tag_str}  {sentences[sent_idx][:80]}")
-
-    print("\n[ITEM-MAP] ━━━ item→sentence assignments ━━━")
-    for item_idx in sorted(option_map.keys()):
-        sent_idx = option_map[item_idx]
-        print(f"  item[{item_idx}] desc : {item_descs[item_idx]}")
-        print(f"  item[{item_idx}] sent[{sent_idx}]: {sentences[sent_idx][:120]}")
-
-    return option_map
 
 
 def _should_skip_sentence(sentence: str) -> bool:
@@ -198,35 +84,6 @@ def _should_skip_sentence(sentence: str) -> bool:
 # sentence or they are not. String logic decides both directions — these
 # fields NEVER go to NLI (DeBERTa is unreliable on numbers and proper names:
 # "priced at £11.08" vs "£13.58" usually scores neutral, not contradiction).
-
-def _norm_ws(text: str) -> str:
-    """Collapses whitespace runs — catalog names may contain double spaces."""
-    return re.sub(r"\s+", " ", text or "").strip()
-
-
-_catalog_names = None
-
-def _get_catalog_names() -> frozenset:
-    """All prod_name values from the articles CSV (original casing).
-    Used to recognise a hallucinated product name that belongs to a real
-    catalog item outside the current evidence."""
-    global _catalog_names
-    if _catalog_names is None:
-        names = set()
-        try:
-            import csv
-            from text_rag.config import ARTICLES_CSV
-            with open(ARTICLES_CSV, newline='', encoding='utf-8') as f:
-                for row in csv.DictReader(f):
-                    n = _norm_ws(row.get('prod_name') or '')
-                    if len(n) >= 5:
-                        names.add(n)
-            print(f"[HallucinationChecker] {len(names)} catalog names loaded for name gate")
-        except Exception as e:
-            print(f"[HallucinationChecker] catalog names unavailable: {e}")
-        _catalog_names = frozenset(names)
-    return _catalog_names
-
 
 _SLOT_GENERIC_STARTS = ("this ", "that ", "these ", "those ", "it ", "the ",
                         "here ", "there ", "i ", "we ", "you ")
@@ -273,13 +130,29 @@ def _find_wrong_name(sentence: str, true_name: str, evidence: dict) -> str | Non
     return None
 
 
-def _find_wrong_price(sentence: str, true_price: str) -> str | None:
+def _find_wrong_price(sentence: str, true_price: str, grounded: set = None) -> str | None:
     """Two-sided price check: returns a differing £value found in the
     sentence, or None if no £value is present. Only called after the true
-    price failed verbatim containment."""
+    price failed verbatim containment.
+
+    `grounded` holds £values that appear elsewhere in the evidence and are not
+    item prices — most importantly the user's habitual spend range, which the
+    ranker cites as a selection reason ("£4.59 is inside your usual
+    £4.02-£9.07 range"). Quoting a grounded value is not an invented price.
+    Passed only at response level; the locked-sentence branch stays strict so
+    genuine cross-item price swaps are still caught."""
     sent_prices = re.findall(r"£[\d,]+(?:\.\d{1,2})?", sentence)
-    wrong = [p for p in sent_prices if p != true_price]
+    allowed = grounded or set()
+    wrong = [p for p in sent_prices if p != true_price and p not in allowed]
     return wrong[0] if wrong else None
+
+
+def _grounded_prices(facts: list[dict]) -> set:
+    """Every £value stated anywhere in the evidence facts."""
+    found = set()
+    for f in facts:
+        found.update(re.findall(r"£[\d,]+(?:\.\d{1,2})?", f.get("text", "")))
+    return found
 
 
 # ── Evidence flattening ────────────────────────────────────────────────────────
@@ -346,6 +219,22 @@ def _flatten_evidence(evidence: dict) -> list[dict]:
 
     elif action == "explanation_generate":
         add_article_facts(evidence.get("article"))
+
+        # All-items path: the bundle carries `articles`, not `article`. Without
+        # these the checker had zero facts to verify and passed everything.
+        for item_idx, art in enumerate(evidence.get("articles", [])):
+            add_article_facts(art, item_idx=item_idx)
+            for reason in art.get("why", []):
+                facts.append({
+                    "field": "selection_reason",
+                    "text":  reason,
+                    "item_idx": item_idx,
+                })
+
+        # Single-item path reasons.
+        for reason in evidence.get("ranking_reasons", []):
+            facts.append({"field": "selection_reason", "text": reason})
+
         for match in evidence.get("confirmed_matches", []):
             facts.append({
                 "field": match.get("attribute", "match"),
@@ -463,7 +352,7 @@ class HallucinationChecker:
         option_sentence_map = {}
         if evidence.get("action") == "catalog_search":
             items = evidence.get("items", [])
-            option_sentence_map = _build_item_sentence_map(sentences, items)
+            option_sentence_map = build_item_sentence_map(sentences, items)
 
         results             = []
         flagged             = []
@@ -608,7 +497,9 @@ class HallucinationChecker:
                     elif true_price in response_text:
                         print("[HALL-CHECK] SKIP [price] correct elsewhere in response")
                     else:
-                        wrong_price = _find_wrong_price(response_text, true_price)
+                        wrong_price = _find_wrong_price(
+                            response_text, true_price, _grounded_prices(structured_facts)
+                        )
                         if wrong_price is not None:
                             print(f"[HALL-CHECK] FLAG [price] response-level: "
                                   f"expected '{true_price}' found '{wrong_price}'")

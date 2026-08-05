@@ -1,0 +1,205 @@
+{
+  "n_cases": 1346,
+  "n_contradiction": 1013,
+  "note": "v2_reported = verdicts that change the shipped response. v2_detected = every mismatch identified, including those deferred to the hallucination guard.",
+  "v2_reported": {
+    "metrics": {
+      "tp": 15,
+      "fp": 4,
+      "fn": 998,
+      "tn": 329,
+      "precision": 0.7895,
+      "recall": 0.0148,
+      "f1": 0.0291,
+      "specificity": 0.988,
+      "balanced_accuracy": 0.5014,
+      "accuracy": 0.2556,
+      "precision_ci95": [
+        0.5667,
+        0.9149
+      ],
+      "recall_ci95": [
+        0.009,
+        0.0243
+      ],
+      "specificity_ci95": [
+        0.9695,
+        0.9953
+      ],
+      "f1_ci95": [
+        0.0156,
+        0.0423
+      ],
+      "balanced_accuracy_ci95": [
+        0.4941,
+        0.5078
+      ]
+    },
+    "recall_by_corruption": {
+      "colour_drift": {
+        "detected": 4,
+        "total": 215,
+        "recall": 0.0186
+      },
+      "cross_item_swap": {
+        "detected": 0,
+        "total": 140,
+        "recall": 0.0
+      },
+      "name_drift": {
+        "detected": 0,
+        "total": 240,
+        "recall": 0.0
+      },
+      "price_drift": {
+        "detected": 3,
+        "total": 228,
+        "recall": 0.0132
+      },
+      "type_drift": {
+        "detected": 8,
+        "total": 190,
+        "recall": 0.0421
+      }
+    },
+    "recall_by_distance": {
+      "0": {
+        "detected": 0,
+        "total": 455,
+        "recall": 0.0
+      },
+      "1": {
+        "detected": 4,
+        "total": 171,
+        "recall": 0.0234
+      },
+      "2": {
+        "detected": 4,
+        "total": 115,
+        "recall": 0.0348
+      },
+      "3+": {
+        "detected": 7,
+        "total": 272,
+        "recall": 0.0257
+      }
+    },
+    "false_alarms": {
+      "clean": {
+        "fp": 3,
+        "total": 188
+      },
+      "hard_negative": {
+        "fp": 1,
+        "total": 145
+      }
+    }
+  },
+  "v2_detected": {
+    "metrics": {
+      "tp": 909,
+      "fp": 31,
+      "fn": 104,
+      "tn": 302,
+      "precision": 0.967,
+      "recall": 0.8973,
+      "f1": 0.9309,
+      "specificity": 0.9069,
+      "balanced_accuracy": 0.9021,
+      "accuracy": 0.8997,
+      "precision_ci95": [
+        0.9536,
+        0.9767
+      ],
+      "recall_ci95": [
+        0.8771,
+        0.9145
+      ],
+      "specificity_ci95": [
+        0.8709,
+        0.9336
+      ],
+      "f1_ci95": [
+        0.9189,
+        0.9419
+      ],
+      "balanced_accuracy_ci95": [
+        0.8833,
+        0.9188
+      ]
+    },
+    "recall_by_corruption": {
+      "colour_drift": {
+        "detected": 208,
+        "total": 215,
+        "recall": 0.9674
+      },
+      "cross_item_swap": {
+        "detected": 106,
+        "total": 140,
+        "recall": 0.7571
+      },
+      "name_drift": {
+        "detected": 215,
+        "total": 240,
+        "recall": 0.8958
+      },
+      "price_drift": {
+        "detected": 209,
+        "total": 228,
+        "recall": 0.9167
+      },
+      "type_drift": {
+        "detected": 171,
+        "total": 190,
+        "recall": 0.9
+      }
+    },
+    "recall_by_distance": {
+      "0": {
+        "detected": 418,
+        "total": 455,
+        "recall": 0.9187
+      },
+      "1": {
+        "detected": 137,
+        "total": 171,
+        "recall": 0.8012
+      },
+      "2": {
+        "detected": 109,
+        "total": 115,
+        "recall": 0.9478
+      },
+      "3+": {
+        "detected": 245,
+        "total": 272,
+        "recall": 0.9007
+      }
+    },
+    "false_alarms": {
+      "clean": {
+        "fp": 20,
+        "total": 188
+      },
+      "hard_negative": {
+        "fp": 11,
+        "total": 145
+      }
+    }
+  },
+  "ownership": {
+    "contradiction_cases": 1013,
+    "detected": 909,
+    "deferred_to_guard": 894,
+    "reported_by_v2": 15,
+    "share_deferred": 0.9835
+  },
+  "correction": {
+    "user_facing_contradiction_rate_off": 1.0,
+    "user_facing_contradiction_rate_on": 0.9961,
+    "reported_rate": 0.0148,
+    "p_fix_given_reported": 0.2667,
+    "collateral_damage_rate": 0.012
+  }
+}

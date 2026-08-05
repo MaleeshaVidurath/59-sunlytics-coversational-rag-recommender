@@ -58,8 +58,19 @@ Each tier has sub-levels that carry additional routing information:
 
 | Sub-level | Meaning |
 |-----------|---------|
-| `PARTIAL_RECENT` | Items needed are in the last 3 exchanges (Redis hot cache) |
-| `PARTIAL_SESSION` | Items needed are in earlier session history (MongoDB) |
+| `PARTIAL_RECENT` | The item was in the Redis context window — the turn was answered **without reading MongoDB** |
+| `PARTIAL_SESSION` | The item had aged out of the window and was recovered from the MongoDB session history |
+
+**The sub-level records which store answered the turn.** It is a statement
+about cost, and it is verifiable: a turn labelled `PARTIAL_RECENT` provably
+made no MongoDB read for item resolution, and one labelled `PARTIAL_SESSION`
+provably did.
+
+This is deliberately *not* a measure of how far back in the dialogue the item
+was mentioned. An item recommended six turns ago but still cached is
+`PARTIAL_RECENT`, because answering it cost a 0.22 ms Redis read and nothing
+more. Labelling it `SESSION` would imply a database round-trip that never
+happened. See §7.
 
 ---
 
@@ -242,17 +253,23 @@ on where the items are found.
 Item-reference label (AQ, EW, COMP, SELREF)
     ↓
 Call enrichment-backed helper first (pre-builds retrieval_input + memory_context)
+Enrichment resolves the item and reports WHERE it found it
     ↓
-Items in dialogue_state.currently_discussing?
-    ├─ Yes → check recency:
-    │         Items in last 3 exchanges (Redis)?
-    │           ├─ Yes → PARTIAL_RECENT
-    │           └─ No  → PARTIAL_SESSION
+Did enrichment set use_historical_items?
+    ├─ Yes → PARTIAL_SESSION
+    │         (item had aged out of the context window; MongoDB was read)
     │
-    └─ No  → query MongoDB for any session recommendations
-              ├─ Found → PARTIAL_SESSION
-              └─ Not found → FULL_STANDARD (user asked without prior recommendations)
+    └─ No  → is the resolved item in the context window?
+              ├─ Yes → PARTIAL_RECENT   (answered from Redis, no MongoDB read)
+              └─ No  → PARTIAL_SESSION  (defensive; target could not be located
+                                         in the window)
+
+    ↓ (enrichment could not resolve anything — nothing recommended this session)
+FULL_STANDARD
 ```
+
+Only two things can happen, and the sub-level names them: either Redis had the
+item, or MongoDB was read to get it.
 
 **COMPARISON** specifically requires **both** item_a and item_b. If only one
 item is in context, the CSE falls through to the MongoDB fallback.
@@ -297,16 +314,37 @@ Step 4: Default → item_a (first / primary item)
 
 The CSE reads from two memory stores with different scope:
 
-| Layer | Store | Contents | Latency |
-|-------|-------|----------|---------|
-| Hot cache | Redis | Last 10 turns of this session | ~1ms |
-| Full history | MongoDB | All turns since session start | ~5–20ms |
+| Layer | Store | Contents | Measured latency |
+|-------|-------|----------|------------------|
+| Hot cache | Redis | Last 10 turns, plus a rolling window of the 12 most recently recommended items (~8 KB) | 0.22 ms median |
+| Full history | MongoDB | Every recommendation made since the session started | 0.88 ms median, 2.08 ms p95 |
 
-**`_items_in_recent_history(history, item_a, item_b)`**
-— checks whether product names from the items appear in bot turn content
-from the last 3 exchanges (the `history` list passed from the pipeline).
-Matches on first 3+ significant words of the product name, plus generic
-markers like `"£"`, `"option 1"`, `"here are"`.
+Both stores hold **complete** item records — name, colour, price, description,
+and the ranker's justification strings — so a resolved item can be described
+without any further query. The window bounds how much of that is kept hot;
+MongoDB keeps all of it.
+
+**`_items_in_context_window(dialogue_state, item_a, item_b)`**
+— returns True when the target item's `article_id` is present in
+`currently_discussing`. That is the whole test: if Redis holds the item, the
+turn is `PARTIAL_RECENT`.
+
+> **Superseded (twice).** Two earlier versions measured something other than
+> cost, and both collapsed the distinction the sub-levels exist to make:
+>
+> 1. *Text search.* It looked for the item's name in recent bot turns and,
+>    failing that, for markers like `"£"` or `"option 1"`. Every
+>    recommendation reply contains those, so it answered *"did the bot show
+>    anything recently"* and returned True almost unconditionally.
+>
+> 2. *Turn-number band.* It compared `rec_turn` against the newest three
+>    recommendation turns. That is a property of the dialogue, not of storage:
+>    an item four turns old but still cached was reported `PARTIAL_SESSION`
+>    even though no database was touched, so the label no longer described
+>    what the turn cost.
+>
+> `rec_turn` is still stored and still used — but for scoping ordinals to the
+> latest offer (§6 of `ENRICHMENT_FULL_PROCESS.md`), not for tiering.
 
 **`_find_similar_question_exclusions(message, session_id)`**
 — queries MongoDB for all prior INITIAL_REQUEST turns, encodes them with

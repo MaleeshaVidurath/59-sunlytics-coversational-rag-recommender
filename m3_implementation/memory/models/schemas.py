@@ -141,6 +141,18 @@ class ItemInContext(BaseModel):
     detail_desc: Optional[str] = None
     graphical_appearance_name: Optional[str] = None
     price: Optional[float] = None        # From transactions if available
+    # Why the ranker selected this item for this user, and its 0-100 match
+    # figure. Persisted so reopening a past chat still shows the justification
+    # — these are template strings built from statistics, not LLM output, so
+    # they stay valid indefinitely.
+    why: Optional[list[str]] = None
+    match_percent: Optional[int] = None
+    # Turn number of the recommendation that produced this item. Lets the
+    # context window hold items from several turns at once while keeping
+    # ordinals ("option 2") bound to the newest turn, and lets the CSE
+    # decide PARTIAL_RECENT vs PARTIAL_SESSION by arithmetic rather than by
+    # searching bot text. None on items stored before this field existed.
+    rec_turn: Optional[int] = None
 
 
 # ─── 6. Dialogue State ────────────────────────────────────────────────────────
@@ -159,8 +171,13 @@ class DialogueState(BaseModel):
     soft_constraints: dict[str, str] = {}
     # e.g. {"style": "casual", "occasion": "summer"}
 
-    # Items currently being discussed
-    # item_a = first recommended item, item_b = second recommended item
+    # Rolling window of the items most recently recommended in this session,
+    # newest first: item_a is the first item of the latest recommendation.
+    # Items from earlier turns are kept (not wiped) so a reference to anything
+    # shown a few turns ago still resolves without a MongoDB round-trip.
+    # Bounded to CONTEXT_WINDOW_ITEMS entries; anything older lives only in
+    # the recommendations collection and is reached via the session-history
+    # fallback in enrichment._resolve_pool.
     currently_discussing: dict[str, ItemInContext | None] = {
         "item_a": None,
         "item_b": None
