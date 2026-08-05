@@ -538,6 +538,79 @@ The user then sees, **under the turn-1 message**:
 The original message text is **never edited**. It was true when sent, and
 silently rewriting history would be the dishonest fix.
 
+### 6.1 When a value changes more than once
+
+A notice records **one hop** (`Black → Green`). But a note in the transcript is
+not a record of a hop — it is a statement about *where things stand now*. Those
+two come apart as soon as a value moves twice, and the difference is easiest to
+see when a value goes back to where it started:
+
+```
+Turn 1   DB: Black    Bot: "… Black …"          ledger: colour v1 = Black
+   ⟶  UPDATE … colour = 'Green'
+Turn 4   DB: Green    Bot: "… Green …"          REVISION Black → Green   v1→v2
+                                                notice A, affects turn_1
+   ⟶  UPDATE … colour = 'Black'                 (changed back)
+Turn 7   DB: Black    Bot: "… Black …"          REVISION Green → Black   v2→v3
+                                                notice B, affects turn_4
+```
+
+Replaying the notices verbatim would leave turn 1 reading *"changed to Green"*
+while the catalogue — and every other message on screen — says Black. The note
+would be a lie about the present, produced by a system whose whole purpose is
+not to lie about the present.
+
+So the notes are **rebuilt on every transcript read** from two facts, never from
+the hop history:
+
+| | |
+|---|---|
+| what **that message** said | the notice's `old_value` — the notice was raised against exactly this value, so it is what the affected turns show |
+| what the catalogue says **now** | the ledger's `evidence_value` for that slot |
+
+and then:
+
+- **they differ** → show `stated → now`, whatever route the value took between.
+- **they agree** → **drop the note entirely.** The value has come back; what
+  that message said is true again, so it needs no annotation.
+
+For the trace above the end state is:
+
+> **turn 1** — no note. It said Black; the catalogue says Black.
+> **turn 4** — *the colour changed from ~~Green~~ to **Black** after this message.*
+
+The rule holds for any route, not just a revert. Every message always reads
+*"what I said → what it is now"*, and never points at a value the catalogue has
+already left behind:
+
+| Catalogue route | turn 1 said Black | turn 4 said Green | turn 7 said … |
+|---|---|---|---|
+| Black → Green | Black → **Green** | — | — |
+| Black → Green → **Red** | Black → **Red** | Green → **Red** | — |
+| Black → Green → **Black** | *no note* | Green → **Black** | — |
+| Black → Green → Black → **Red** | Black → **Red** | Green → **Red** | Black → **Red** |
+| Black → Green → Red → **Green** | Black → **Green** | *no note* | Red → **Green** (said Red) |
+
+Note the fourth and fifth rows. Turns that agreed with each other still get
+**different** notes, because each is annotated against what *it* printed — and a
+turn drops its note the moment the catalogue returns to that turn's own value,
+even if that value was a middle step rather than the original.
+
+Two details make this correct rather than merely tidy:
+
+- **`old_value` is never overwritten when notices merge.** Notices are read
+  oldest-first, so the first one for a `(turn, article, attribute)` carries what
+  the message actually printed; later ones carry intermediate values that
+  message never showed.
+- **The current value is read from the ledger, not from the newest notice.** A
+  revision that affected no earlier turn writes no notice at all, so notice
+  history can be a turn or more behind. `evidence_value` never is.
+
+Implemented in `api/routers/sessions.py` — `_current_values()` and the filter in
+`_corrections_by_turn()`. It costs one extra ledger read per transcript load and
+makes the annotation **stateless**: the same session always renders the same
+notes, no matter how many times or in what order the catalogue moved.
+
 ---
 
 ## 7. Files and what each one does
@@ -551,7 +624,7 @@ silently rewriting history would be the dishonest fix.
 | `text_rag/core/hallucination_checker.py` | Edited — **imports only, no behaviour change** (see §12). |
 | `text_rag/core/rag_pipeline.py` | Passes `retrieval_input`; runs the check on the cached path too; surfaces `revisions`. |
 | `memory/db/mongo.py` | `revision_notices` collection + indexes. |
-| `api/routers/sessions.py` | Joins notices onto the earlier messages they affect. |
+| `api/routers/sessions.py` | Joins notices onto the earlier messages they affect, reconciled against the current value (§6.1). |
 | `api/routers/chat.py` | Returns `revisions` on the live turn. |
 | `frontend/src/App.jsx` | Renders the amber correction note. |
 
