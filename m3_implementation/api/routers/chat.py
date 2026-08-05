@@ -1,6 +1,7 @@
 # m3_implementation/api/routers/chat.py
 import asyncio
 import json as _json
+import re as _re
 import time
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -110,19 +111,103 @@ async def _call_m1_sync(pipeline_output: dict, timeout: float = 300.0):
         return None
 
 
-def _remap_member_item(item: dict) -> dict:
+# ── M2-only: per-item justification ("Why this for you") ─────────────────────
+# Everything below runs solely on the M2 branch, gated by source == "m2".
+# M1 and M3 keep the exact path they had before.
+
+# Longest "why" line kept on a card. Past this a sentence wraps into a
+# paragraph and stops reading as a bullet.
+_WHY_LINE_MAX = 180
+
+# Most justification lines shown per card — the limit M3's ranker also uses.
+_WHY_LINES_MAX = 3
+
+
+def _plural(word: str) -> str:
+    """
+    Plural of a product-type noun, for the fallback justification line.
+
+    The catalog holds types like "Dress", "Shorts" and "Body" — a bare "+ s"
+    produces "dresss" and "bodys", which reads as a bug on the card.
+    """
+    w = word.strip()
+    if not w:
+        return w
+    if w.endswith(("ss", "x", "z", "ch", "sh")):
+        return w + "es"
+    if w.endswith("s"):
+        return w          # "Trousers", "Shorts" — already plural
+    if w.endswith("y") and len(w) > 1 and w[-2] not in "aeiou":
+        return w[:-1] + "ies"
+    return w + "s"
+
+
+def _m2_why(item: dict) -> list[str]:
+    """
+    User-facing justification lines for one M2 item.
+
+    M2 emits a single `explanation` paragraph per item, already checked by its
+    3-layer hallucination guard, so it is safe to render verbatim. It is split
+    into sentences because the card draws one bullet per line.
+
+    Never returns an empty list: an item whose explanation came back blank
+    still gets an honest line built from its own attributes, so no card ever
+    renders with an empty "Why this for you" block.
+    """
+    raw   = (item.get("explanation") or "").strip()
+    lines = [s.strip() for s in _re.split(r"(?<=[.!?])\s+", raw) if len(s.strip()) > 1]
+    lines = [
+        l if len(l) <= _WHY_LINE_MAX else l[:_WHY_LINE_MAX - 1].rstrip() + "…"
+        for l in lines
+    ]
+    if lines:
+        return lines[:_WHY_LINES_MAX]
+
+    # Fallback — states the truth (it matched the request) without claiming a
+    # personalised signal M2 never computed.
+    colour = (item.get("colour") or item.get("colour_group_name") or "").strip()
+    ptype  = _plural((item.get("type") or item.get("product_type_name") or "item").strip().lower())
+    descriptor = f"{colour.lower()} {ptype}" if colour else ptype
+    return [f"One of the closest matches to what you asked for in {descriptor}"]
+
+
+def _attach_m2_match_percent(items: list[dict]) -> None:
+    """
+    Adds a 0-100 display figure to each M2 item, in place.
+
+    M2's `final_score` sums FAISS relevance, preference boosts, CF history and
+    KB signals minus penalties — unbounded, and negative once penalties
+    dominate, so it can never go on a card raw. It is scaled against the best
+    score in the same result set, the way PersonalizedRanker does it for M3.
+    Left as None when no score is positive: nothing meaningful ranked, so no
+    badge should be shown at all.
+    """
+    numeric = [i.get("score") for i in items if isinstance(i.get("score"), (int, float))]
+    best    = max(numeric, default=0.0)
+
+    for item in items:
+        score = item.get("score")
+        if best > 0 and isinstance(score, (int, float)) and score > 0:
+            item["match_percent"] = int(round(min(score / best, 1.0) * 100))
+        else:
+            item["match_percent"] = None
+
+
+def _remap_member_item(item: dict, source: str = "") -> dict:
     """
     Normalise a single item from M1/M2 response to the field names
     chat.py's item extraction loop expects.
     M2 uses prod_name/colour_group_name/product_type_name/detail_desc;
     M1 may differ — try both names so either works.
+
+    `source` is "m2", "m1" or "" — only "m2" adds the justification fields.
     """
     price_raw = item.get("price") or item.get("avg_price")
     if price_raw and not isinstance(price_raw, str):
         price_str = f"£{price_raw}"
     else:
         price_str = price_raw or ""
-    return {
+    remapped = {
         "article_id":  str(item.get("article_id", "")),
         "name":        item.get("name")    or item.get("prod_name", ""),
         "colour":      item.get("colour")  or item.get("colour_group_name", ""),
@@ -134,11 +219,17 @@ def _remap_member_item(item: dict) -> dict:
         "score":       item.get("score"),
         "image_url":   item.get("image_url", ""),
     }
+    if source == "m2":
+        # Every M2 recommendation carries a justification — see _m2_why.
+        remapped["why"] = _m2_why(item)
+    return remapped
 
 
-def _normalize_member_response(data: dict) -> dict:
+def _normalize_member_response(data: dict, source: str = "") -> dict:
     """Convert M1/M2 API response to the same structure as rag.process() output.
     When success=False, passes M2/M1's own error message as response_text.
+
+    `source` is "m2", "m1" or "" — only "m2" gets justification fields added.
     """
     if not data.get("success", True):
         # M2/M1 is reachable but couldn't fulfil the request (e.g. article not found).
@@ -158,7 +249,10 @@ def _normalize_member_response(data: dict) -> dict:
             "action":              data.get("action", ""),
             "items_recommended":   [],
         }
-    remapped_items = [_remap_member_item(i) for i in data.get("items", [])]
+    remapped_items = [_remap_member_item(i, source) for i in data.get("items", [])]
+    if source == "m2":
+        # Scaling needs the whole set, so it runs after every item is remapped.
+        _attach_m2_match_percent(remapped_items)
     return {
         "response_text":       data.get("response_text", data.get("message", "")),
         "hallucination_flag":  data.get("hallucination_flag", False),
@@ -226,7 +320,7 @@ async def _enrich_member_items(items: list) -> list:
             aid = str(item.get("article_id", ""))
             pg = pg_map.get(aid, {})
             avg_price = pg.get("avg_price")
-            enriched.append({
+            enriched_item = {
                 "article_id":  aid,
                 "name":        pg.get("prod_name")                  or item.get("name", ""),
                 "colour":      pg.get("colour_group_name")          or item.get("colour", ""),
@@ -234,7 +328,14 @@ async def _enrich_member_items(items: list) -> list:
                 "price":       f"£{avg_price}" if avg_price else    item.get("price", ""),
                 "description": (pg.get("detail_desc") or "")[:120],
                 "pattern":     pg.get("graphical_appearance_name")  or item.get("pattern", ""),
-            })
+            }
+            # Catalog enrichment must not discard a justification the module
+            # already produced. Only M2 items carry these keys, so this is a
+            # no-op for M1.
+            for _carry in ("why", "match_percent"):
+                if _carry in item:
+                    enriched_item[_carry] = item[_carry]
+            enriched.append(enriched_item)
         return enriched
     except Exception as _enr_err:
         print(f"[CHAT] item enrichment warning (non-fatal): {_enr_err}")
@@ -266,6 +367,10 @@ def _to_storage_item(item: dict) -> dict:
         "graphical_appearance_name":item.get("pattern") or item.get("graphical_appearance_name"),
         "detail_desc":              item.get("description") or item.get("detail_desc"),
         "price":                    price_float,
+        # Persist the justification so reopening a past chat still shows it.
+        # Only M2 items carry these; for M1 they stay None, exactly as before.
+        "why":                      item.get("why") or None,
+        "match_percent":            item.get("match_percent"),
     }
 
 
@@ -487,14 +592,14 @@ async def chat(req: ChatRequest):
             if _m2_resp is None:
                 print(f"[CHAT] M2 unavailable — returning error to user")
                 return _member_unavailable_response("M2 · Multimodal RAG", pipeline_output)
-            _member_rag_result = _normalize_member_response(_m2_resp)
+            _member_rag_result = _normalize_member_response(_m2_resp, "m2")
         elif effective_model == "m1":
             print(f"[CHAT] M1 selected — calling M1 sync (timeout=300s)")
             _m1_resp = await _call_m1_sync(pipeline_output)
             if _m1_resp is None:
                 print(f"[CHAT] M1 unavailable — returning error to user")
                 return _member_unavailable_response("M1 · Graph RAG", pipeline_output)
-            _member_rag_result = _normalize_member_response(_m1_resp)
+            _member_rag_result = _normalize_member_response(_m1_resp, "m1")
         else:
             print(f"[CHAT] M3 selected — processing locally")
 
@@ -613,13 +718,20 @@ async def chat(req: ChatRequest):
         items = []
         for item in rag_result.get("items_recommended", []):
             if item.get("article_id") or item.get("name"):
+                # M3 items carry the product text as `material_description`;
+                # M2 remaps it to `description`. Reading only the first name
+                # dropped M2's text silently, so the M2 branch falls back to
+                # its own key. M1 and M3 keep the original lookup untouched.
+                _desc = item.get("material_description") or ""
+                if not _desc and effective_model == "m2":
+                    _desc = item.get("description") or ""
                 items.append({
                     "article_id":  str(item.get("article_id", "")),
                     "name":        item.get("name", ""),
                     "colour":      item.get("colour", ""),
                     "type":        item.get("type", ""),
                     "price":       item.get("price", ""),
-                    "description": (item.get("material_description") or "")[:120],
+                    "description": _desc[:120],
                     "pattern":     item.get("pattern", ""),
                     # Why this item was selected for THIS user — template strings
                     # built from real statistics by PersonalizedRanker, never
