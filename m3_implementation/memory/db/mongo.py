@@ -68,6 +68,14 @@ async def _create_indexes():
     await db.contradiction_log.create_index("session_id")
     await db.contradiction_log.create_index([("user_id", 1), ("detected_at", -1)])
 
+    # revision_notices — catalogue values that changed mid-session.
+    # The session history endpoint looks these up by session and then places
+    # each notice under the earlier turns listed in affected_turn_ids, so both
+    # of those fields are indexed.
+    await db.revision_notices.create_index("session_id")
+    await db.revision_notices.create_index("affected_turn_ids")
+    await db.revision_notices.create_index([("user_id", 1), ("detected_at", -1)])
+
     # session_model_locks — one document per session, stores which model was selected.
     # Standalone collection — never touches sessions/users/recommendations.
     # {session_id, selected_model, user_id, locked_at}
@@ -79,6 +87,9 @@ async def _create_indexes():
 
     await db.m2_contradiction_log.create_index("session_id")
     await db.m2_contradiction_log.create_index([("user_id", 1), ("detected_at", -1)])
+
+    await db.m2_revision_notices.create_index("session_id")
+    await db.m2_revision_notices.create_index("affected_turn_ids")
 
     await db.m2_recommendations.create_index("session_id")
     await db.m2_recommendations.create_index([("user_id", 1), ("created_at", -1)])
@@ -97,6 +108,9 @@ async def _create_indexes():
 
     await db.m1_contradiction_log.create_index("session_id")
     await db.m1_contradiction_log.create_index([("user_id", 1), ("detected_at", -1)])
+
+    await db.m1_revision_notices.create_index("session_id")
+    await db.m1_revision_notices.create_index("affected_turn_ids")
 
     await db.m1_recommendations.create_index("session_id")
     await db.m1_recommendations.create_index([("user_id", 1), ("created_at", -1)])
@@ -133,16 +147,19 @@ _MEMBER_COLLECTION_MAP: dict[str, dict[str, str]] = {
         "session_graphs":    "session_graphs",
         "contradiction_log": "contradiction_log",
         "recommendations":   "recommendations",
+        "revision_notices":  "revision_notices",
     },
     "m2": {
         "session_graphs":    "m2_session_graphs",
         "contradiction_log": "m2_contradiction_log",
         "recommendations":   "m2_recommendations",
+        "revision_notices":  "m2_revision_notices",
     },
     "m1": {
         "session_graphs":    "m1_session_graphs",
         "contradiction_log": "m1_contradiction_log",
         "recommendations":   "m1_recommendations",
+        "revision_notices":  "m1_revision_notices",
     },
 }
 

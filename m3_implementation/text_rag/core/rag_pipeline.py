@@ -10,8 +10,17 @@
 #   5. If hallucination detected → regenerate with stricter prompt
 #      (up to MAX_REGENERATION_ATTEMPTS = 3 times)
 #   6. If still hallucinating after 3 attempts → return with flag
-#   7. store_response() called on the memory pipeline
-#   8. Return final structured result to caller
+#   7. ContradictionDetector reconciles the response against the session's
+#      Assertion Ledger and the live catalogue — cross-turn drift is corrected,
+#      catalogue revisions are recorded against the turns they affect
+#   8. store_response() called on the memory pipeline
+#   9. Return final structured result to caller
+#
+# STEPS 4 AND 7 ASK DIFFERENT QUESTIONS:
+#   step 4  is this turn faithful to ITS OWN evidence?
+#   step 7  is this turn consistent with what we already told this user, and
+#           is the catalogue still saying what it said back then?
+#   Attributes covered by step 4 are deliberately not re-judged in step 7.
 #
 # OUTPUT STRUCTURE:
 #   {
@@ -20,6 +29,8 @@
 #       flagged_sentences:    list  — sentences that failed NLI check
 #       hallucination_score:  float — 0.0-1.0 severity
 #       attempt_count:        int   — how many attempts were made
+#       contradiction_found:  bool  — cross-turn drift detected and corrected
+#       revisions:            list  — catalogue values that changed mid-session
 #       action:               str   — which action was triggered
 #       items_recommended:    list  — for catalog_search, items returned
 #       evidence_used:        dict  — evidence bundle for audit/debugging
@@ -169,6 +180,20 @@ class TextRAGPipeline:
             if not cached_response:
                 cached_response = self._fallback_response("catalog_search", cached_evidence)
 
+            # A re-presented recommendation is built entirely from session cache
+            # and never touches PostgreSQL, so it is the single most likely place
+            # to quote a price or colour the catalogue has since changed. Running
+            # the reconciler here is what lets that be caught and annotated
+            # instead of being served stale forever.
+            cached_contra = await self._reconcile(
+                response_text=cached_response,
+                evidence=cached_evidence,
+                pipeline_output=pipeline_output,
+                retrieval_input=retrieval_input,
+                collection_prefix=collection_prefix,
+            )
+            cached_response = cached_contra["response_text"]
+
             cached_response += "\n\nWould you like to see new recommendations for this?"
 
             if store_response and memory_pipeline and session_id and user_id:
@@ -210,6 +235,12 @@ class TextRAGPipeline:
                 hallucination_score=0.0,
                 items_recommended=mapped_items,
                 evidence=cached_evidence,
+                contradiction_found=cached_contra["contradiction_found"],
+                contradiction_count=cached_contra["contradiction_count"],
+                contradictions_detail=cached_contra["contradictions"],
+                product_ids=cached_contra["product_ids"],
+                product_names=cached_contra["product_names"],
+                revisions=cached_contra.get("revisions", []),
             )
 
         # ── Step 2: Assemble evidence ───────────────────────────────────────
@@ -336,36 +367,28 @@ class TextRAGPipeline:
                         f"{MAX_REGENERATION_ATTEMPTS} attempts. Returning with flag."
                     )
 
-        # ── Step 6: Contradiction detection ─────────────────────────────────
-        # After hallucination check passes, check the response against
-        # all prior claims made about the same products in this session.
-        # This catches cross-turn inconsistencies and corrects them.
-        try:
-            contra_result = await self.contradector.check_and_resolve(
-                response_text=final_response,
-                evidence=evidence,
-                session_id=session_id,
-                user_id=user_id,
-                turn_id=pipeline_output.get("turn_id", ""),
-                collection_prefix=collection_prefix,
-            )
-            # Use corrected response if contradiction was found and fixed
-            final_response          = contra_result["response_text"]
-            contradiction_found     = contra_result["contradiction_found"]
-            contradiction_count     = contra_result["contradiction_count"]
-            print(f"[DBG-7] CONTRADICTION: found={contradiction_found} count={contradiction_count} claims_stored={contra_result.get('claims_stored',0)}")
-            contradictions_detail   = contra_result["contradictions"]
-            product_ids             = contra_result["product_ids"]
-            product_names           = contra_result["product_names"]
-            claims_stored           = contra_result["claims_stored"]
-        except Exception as e:
-            print(f"[TextRAGPipeline] Contradiction check error: {e}")
-            contradiction_found   = False
-            contradiction_count   = 0
-            contradictions_detail = []
-            product_ids           = []
-            product_names         = []
-            claims_stored         = 0
+        # ── Step 6: Cross-turn consistency reconciliation ───────────────────
+        # The hallucination guard has just verified this turn against its OWN
+        # evidence. This step verifies it against the session's Assertion
+        # Ledger — everything the system has already told this user — and
+        # against the live catalogue, which may have changed since those
+        # earlier turns. retrieval_input is passed so the reconciler can still
+        # identify the products under discussion when the evidence bundle names
+        # none of them (follow-up turns answered from session memory).
+        contra_result = await self._reconcile(
+            response_text=final_response,
+            evidence=evidence,
+            pipeline_output=pipeline_output,
+            retrieval_input=retrieval_input,
+            collection_prefix=collection_prefix,
+        )
+        final_response        = contra_result["response_text"]
+        contradiction_found   = contra_result["contradiction_found"]
+        contradiction_count   = contra_result["contradiction_count"]
+        contradictions_detail = contra_result["contradictions"]
+        product_ids           = contra_result["product_ids"]
+        product_names         = contra_result["product_names"]
+        revisions             = contra_result.get("revisions", [])
 
         # ── Step 7: Store response in memory ─────────────────────────────────
         items_recommended = []
@@ -423,7 +446,54 @@ class TextRAGPipeline:
             contradictions_detail=contradictions_detail,
             product_ids=product_ids,
             product_names=product_names,
+            revisions=revisions,
         )
+
+    async def _reconcile(
+        self,
+        response_text:     str,
+        evidence:          dict,
+        pipeline_output:   dict,
+        retrieval_input:   dict,
+        collection_prefix: str,
+    ) -> dict:
+        """
+        Runs the cross-turn consistency check, never letting a failure there
+        block the response. Returns the detector's own empty result on error so
+        callers always see the same keys.
+        """
+        try:
+            result = await self.contradector.check_and_resolve(
+                response_text=response_text,
+                evidence=evidence,
+                session_id=pipeline_output.get("session_id", ""),
+                user_id=pipeline_output.get("user_id", ""),
+                turn_id=pipeline_output.get("turn_id", ""),
+                collection_prefix=collection_prefix,
+                retrieval_input=retrieval_input,
+            )
+            print(f"[DBG-7] CONTRADICTION: found={result['contradiction_found']} "
+                  f"count={result['contradiction_count']} "
+                  f"cross_turn={result.get('cross_turn_count', 0)} "
+                  f"anchors={result.get('anchor_breakdown', {})} "
+                  f"revisions={result.get('revision_count', 0)} "
+                  f"deferred={result.get('deferred_count', 0)} "
+                  f"claims_stored={result.get('claims_stored', 0)}")
+            return result
+        except Exception as e:
+            print(f"[TextRAGPipeline] Cross-turn reconciliation error: {e}")
+            return {
+                "response_text":       response_text,
+                "contradiction_found": False,
+                "contradiction_count": 0,
+                "contradictions":      [],
+                "claims_stored":       0,
+                "product_ids":         [],
+                "product_names":       [],
+                "revisions":           [],
+                "revision_count":      0,
+                "deferred_count":      0,
+            }
 
     def _build_result(
         self,
@@ -440,6 +510,7 @@ class TextRAGPipeline:
         contradictions_detail:list = None,
         product_ids:          list = None,
         product_names:        list = None,
+        revisions:            list = None,
     ) -> dict:
         return {
             # ── Response ───────────────────────────────────────────────
@@ -454,10 +525,15 @@ class TextRAGPipeline:
             ],
             "attempt_count":          attempt_count,
 
-            # ── Contradiction check results ────────────────────────────
+            # ── Cross-turn consistency results ─────────────────────────
             "contradiction_found":    contradiction_found,
             "contradiction_count":    contradiction_count,
             "contradictions":         contradictions_detail or [],
+
+            # Catalogue values that changed mid-session. Not errors — the
+            # earlier statements were true when made — so they are reported
+            # separately and annotated against the turns that quoted them.
+            "revisions":              revisions or [],
 
             # ── Product references ─────────────────────────────────────
             "product_ids":            product_ids or [],
