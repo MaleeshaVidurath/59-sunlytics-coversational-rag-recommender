@@ -153,6 +153,7 @@ def _normalize_member_response(data: dict) -> dict:
             "contradiction_found": False,
             "contradiction_count": 0,
             "contradictions":      [],
+            "revisions":           [],
             "product_ids":         [],
             "product_names":       [],
             "action":              data.get("action", ""),
@@ -168,6 +169,7 @@ def _normalize_member_response(data: dict) -> dict:
         "contradiction_found": data.get("contradiction_found", False),
         "contradiction_count": data.get("contradiction_count", 0),
         "contradictions":      data.get("contradictions", []),
+        "revisions":           data.get("revisions", []),
         "product_ids":         data.get("product_ids") or [i["article_id"] for i in remapped_items if i["article_id"]],
         "product_names":       data.get("product_names") or [i["name"] for i in remapped_items if i["name"]],
         "action":              data.get("action", ""),
@@ -193,6 +195,7 @@ def _member_unavailable_response(member_label: str, pipeline_output: dict) -> di
         "contradiction_found": False,
         "contradiction_count": 0,
         "contradictions":      [],
+        "revisions":           [],
         "cse":                 pipeline_output.get("cse", {}),
         "recommendation_id":   None,
         "turn_id":             pipeline_output.get("turn_id", ""),
@@ -697,6 +700,10 @@ async def chat(req: ChatRequest):
             "contradiction_found": rag_result.get("contradiction_found", False),
             "contradiction_count": rag_result.get("contradiction_count", 0),
             "contradictions":      rag_result.get("contradictions", []),
+            # Catalogue values that changed since an earlier turn quoted them.
+            # Sent on the live turn so the correction appears immediately; the
+            # session-history endpoint replays the same notices on reload.
+            "revisions":           rag_result.get("revisions", []),
             "cse":                 pipeline_output.get("cse", {}),
             # ── NEW: recommendation_id for RL explicit feedback ────────────
             # Frontend uses this to submit 👍/👎 via POST /api/rl/feedback

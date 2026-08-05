@@ -4,6 +4,98 @@ from memory.db.mongo import get_db, get_collection_name
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
+# Attribute name → the wording used in the in-chat correction note.
+_ATTR_LABEL = {
+    "price":        "price",
+    "colour":       "colour",
+    "product_type": "product type",
+    "name":         "name",
+}
+
+
+async def _corrections_by_turn(db, session_id: str) -> dict:
+    """
+    Groups this session's revision notices by the assistant turn they affect.
+
+    A revision notice is raised when the catalogue value of an article changes
+    after the assistant has already quoted it. The earlier message was correct
+    when it was sent, so it is annotated rather than rewritten — the user sees
+    what changed and when, and the transcript stays an honest record of what
+    was actually said.
+
+    Notices are searched across every member prefix because a session's model
+    lock decides which collection its memory was written to.
+    """
+    grouped: dict = {}
+    for prefix in ("m3", "m2", "m1"):
+        try:
+            coll = get_collection_name("revision_notices", prefix)
+            cursor = db[coll].find({"session_id": session_id}).sort("detected_at", 1)
+            async for notice in cursor:
+                entry = {
+                    "attribute":    notice.get("attribute", ""),
+                    "label":        _ATTR_LABEL.get(notice.get("attribute", ""),
+                                                    notice.get("attribute", "")),
+                    "product_name": notice.get("product_name", ""),
+                    "article_id":   notice.get("article_id", ""),
+                    "old_value":    notice.get("old_value", ""),
+                    "new_value":    notice.get("new_value", ""),
+                    "detected_at":  str(notice.get("detected_at", "")),
+                }
+                for turn_id in notice.get("affected_turn_ids", []) or []:
+                    if turn_id:
+                        _merge_correction(grouped.setdefault(turn_id, []), entry)
+        except Exception as e:
+            print(f"[Sessions] revision notice lookup ({prefix}) skipped: {e}")
+    return grouped
+
+
+def _shift_to_assistant_turns(turns: list, grouped: dict) -> dict:
+    """
+    Moves each correction forward onto the assistant reply it belongs to.
+
+    The pipeline carries the USER turn id through every stage, so that is the id
+    the ledger stores against an assertion. But the value the user actually read
+    was printed by the assistant's reply to that message, and the reply bubble is
+    the only place the UI renders a note. Without this shift the notice is keyed
+    to a user message and silently never appears.
+    """
+    if not grouped:
+        return grouped
+
+    shifted: dict = {}
+    for idx, turn in enumerate(turns):
+        tid = turn.get("turn_id")
+        if not tid or tid not in grouped:
+            continue
+
+        target = tid
+        if turn.get("role") != "assistant":
+            for later in turns[idx + 1:]:
+                if later.get("role") == "assistant":
+                    target = later.get("turn_id") or tid
+                    break
+
+        bucket = shifted.setdefault(target, [])
+        for entry in grouped[tid]:
+            _merge_correction(bucket, entry)
+    return shifted
+
+
+def _merge_correction(bucket: list, entry: dict) -> None:
+    """
+    Keeps one correction per (article, attribute) in a turn's bucket.
+    A value revised several times should read as a single correction to the
+    latest value, not as a stack of intermediate steps.
+    """
+    for existing in bucket:
+        if (existing["article_id"] == entry["article_id"]
+                and existing["attribute"] == entry["attribute"]):
+            existing["new_value"]   = entry["new_value"]
+            existing["detected_at"] = entry["detected_at"]
+            return
+    bucket.append(dict(entry))
+
 
 @router.get("")
 async def list_sessions(user_id: str = Query(...)):
@@ -142,19 +234,29 @@ async def get_session_history(session_id: str, user_id: str = Query(...)):
             "match_percent": item.get("match_percent"),
         }
 
+    # Catalogue values that changed after they were quoted. Each notice names
+    # the earlier assistant turns that stated the old value, so the correction
+    # can be shown under the message it actually applies to rather than being
+    # dumped at the end of the conversation.
+    corrections_by_turn = _shift_to_assistant_turns(
+        turns, await _corrections_by_turn(db, session_id)
+    )
+
     messages = []
     for t in turns:
         classification = t.get("classification") or {}
-        rec_id = t.get("recommendation_id")
-        rec    = recs_by_id.get(rec_id) if rec_id else None
+        rec_id  = t.get("recommendation_id")
+        rec     = recs_by_id.get(rec_id) if rec_id else None
+        turn_id = t.get("turn_id", "")
         messages.append({
-            "turn_id":           t.get("turn_id", ""),
+            "turn_id":           turn_id,
             "role":              t.get("role", ""),
             "content":           t.get("content", ""),
             "timestamp":         str(t.get("timestamp", t.get("created_at", ""))),
             "label":             classification.get("label", "") if classification else "",
             "recommendation_id": rec_id,
             "items_recommended": [_to_card(i) for i in (rec.get("items", []) if rec else [])],
+            "corrections":       corrections_by_turn.get(turn_id, []),
         })
 
     return {
@@ -197,10 +299,20 @@ async def delete_session(session_id: str, user_id: str = Query(...)):
     except Exception as _rl_err:
         print(f"[Sessions] RL session outcome warning (non-fatal): {_rl_err}")
 
-    # Delete from all MongoDB collections
+    # Delete from all MongoDB collections. The per-member prefixes are all
+    # cleared because a session's model lock may have routed its memory to any
+    # of them, and a stale Assertion Ledger left behind would be re-loaded if
+    # the session_id were ever reused.
     await db.sessions.delete_one({"session_id": session_id})
     await db.explanations.delete_many({"session_id": session_id})
-    await db.contradiction_log.delete_many({"session_id": session_id})
+    for prefix in ("m3", "m2", "m1"):
+        for base in ("contradiction_log", "revision_notices", "session_graphs"):
+            try:
+                await db[get_collection_name(base, prefix)].delete_many(
+                    {"session_id": session_id}
+                )
+            except Exception as e:
+                print(f"[Sessions] cleanup of {base} ({prefix}) skipped: {e}")
 
     # Clear Redis cache
     try:
