@@ -120,12 +120,12 @@ def generate_reasoning_path(G, customer_id, recommended_item_id):
 # THE CORE SEARCH ENGINE
 # ==========================================
 
-def run_catalog_search(G, payload, items_in_context, exclude_ids, user_message, customer_id):
+def run_catalog_search(G, payload, items_in_context, exclude_ids, user_message, customer_id, vibe_weight=5.0, history_weight=3.0):
     print("\n--- Executing AI-Powered Graph Catalog Search ---")
     
     raw_filters = payload.get("filters", {}) or {}
     soft_constraints = payload.get("soft_constraints", {}) or {}
-    boosts = payload.get("preference_boosts", []) or []
+    boosts = payload.get("preference_boosts", []) or {}
     penalties = payload.get("penalties", {}) or {}
     hints = payload.get("purchase_history_hints", {}) or {}
     
@@ -190,12 +190,12 @@ def run_catalog_search(G, payload, items_in_context, exclude_ids, user_message, 
             
             item_text_math = product_math[item_idx]
             vibe_match = torch.nn.functional.cosine_similarity(user_text_math.unsqueeze(0), item_text_math.unsqueeze(0)).item()
-            score += (vibe_match * 5.0)
+            score += (vibe_match * vibe_weight)
             
             if gnn_user_math is not None:
                 item_gnn_math = FINAL_ITEMS[item_idx]
                 history_match = torch.sigmoid(torch.dot(gnn_user_math, item_gnn_math)).item()
-                score += (history_match * 3.0)
+                score += (history_match * history_weight)
 
         if soft_filter_fallback:
             for key, required_value in filters.items():
@@ -251,12 +251,39 @@ def run_catalog_search(G, payload, items_in_context, exclude_ids, user_message, 
     
     print(f"\n--> Scoring complete! Target items to retrieve: {requested_quantity} (raw input: {raw_quantity})")
     for item_id, final_score in ranked_items[:requested_quantity]:
-        item_name = G.nodes[item_id].get('name', 'Unknown Product')
+        # 1. Grab the node data
+        node_data = G.nodes[item_id]
+        item_name = node_data.get('name', 'Unknown Product')
+        
+        # Clean the Description: Handle pandas "nan" strings and empty spaces
+        raw_desc = str(node_data.get('description', ''))
+        if raw_desc.lower() == 'nan' or not raw_desc.strip():
+            item_desc = "A stylish and comfortable piece perfect for your wardrobe." # Fallback description
+        else:
+            item_desc = raw_desc.strip()
+        
+        # 2. Grab and Format the Price
+        item_price = "Price not available"
+        for neighbor in G.neighbors(item_id):
+            edge_data = G.get_edge_data(item_id, neighbor)
+            if edge_data and 'price' in edge_data:
+                # Multiply by the exact 590 scale to convert the normalized decimal back to GBP
+                try:
+                    raw_price = float(edge_data['price'])
+                    formatted_price = round(raw_price * 590, 2) 
+                    item_price = f"£{formatted_price}"
+                except (ValueError, TypeError):
+                    item_price = str(edge_data['price'])
+                break 
+                
         reasoning = generate_reasoning_path(G, customer_id, item_id)
         
+        # 3. Add the cleaned description and formatted price to the package
         result_package = {
             "article_id": str(item_id),
             "name": item_name,
+            "description": item_desc,
+            "price": item_price,
             "final_score": round(final_score, 2),
             "reasoning_path": reasoning
         }
