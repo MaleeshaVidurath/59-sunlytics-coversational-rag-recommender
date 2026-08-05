@@ -1,0 +1,4 @@
+policy,n,NO med,PARTIAL med,FULL med,KW p,routing acc %,avoid FULL %
+raw (no filtering),333,885.2,3139.1,5107.0,1.03e-35,94.0,57.1
+minimal (primary),282,835.1,2886.3,4738.8,2.38e-39,95.7,56.7
+strict (v1 R1-R8),251,885.2,2876.8,4553.4,1.04e-33,96.0,59.8

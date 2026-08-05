@@ -312,7 +312,34 @@ def _build_catalog_terms() -> tuple:
     return frozenset(type_terms), frozenset(name_tokens)
 
 
+def _build_product_names() -> frozenset:
+    """
+    Reads sample_articles.csv and returns a frozenset of ALL product names
+    (lowercased) for Stage 2e product-name matching.
+
+    This catches exact product names like "Jeff AOP(1)" that don't match
+    token-level checks but still refer to actual catalog items.
+    """
+    import csv as _csv
+    _csv_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                     "shared", "main_data_set", "sample_articles.csv")
+    )
+    names: set = set()
+    try:
+        with open(_csv_path, encoding="utf-8") as _f:
+            for _row in _csv.DictReader(_f):
+                _pn = _row.get("prod_name", "").strip().lower()
+                if _pn:
+                    names.add(_pn)
+    except Exception as _e:
+        print(f"[FashionGuard] Warning: could not load product names: {_e}")
+    print(f"[FashionGuard] Product names loaded: {len(names)} unique names")
+    return frozenset(names)
+
+
 _CATALOG_TYPE_TERMS, _CATALOG_NAME_TOKENS = _build_catalog_terms()
+_CATALOG_PRODUCT_NAMES = _build_product_names()
 
 # ── Stage 1: Continuation bypass phrases ──────────────────────────────────────
 # When these appear in a message that has conversation history, the message
@@ -328,6 +355,36 @@ _CONTINUATION_PHRASES = [
     "yes please", "yes", "no", "nope", "love it", "hate it",
     "show me", "another one", "different", "instead",
 ]
+
+# ── Stage 1b: Greeting bypass ─────────────────────────────────────────────────
+# A greeting is how a shopper opens the conversation, so it carries no fashion
+# vocabulary and scores near zero on the semantic stage — "hi" scores 0.08 and
+# was being answered with the off-topic refusal. It also arrives before there
+# is any history, so the Stage 1 continuation bypass cannot catch it.
+#
+# Every word must be a greeting token for the bypass to fire (see
+# _fg_stage1b_greeting), so "hi, what is a good pasta recipe" is unaffected.
+_GREETING_TOKENS = frozenset({
+    "hi", "hiya", "hey", "heya", "hello", "howdy", "greetings",
+    "good", "morning", "afternoon", "evening",
+    "there", "everyone", "all",
+})
+
+# Typed greetings are casual and full of doubled letters — "hyy", "heyyy",
+# "hiii", "helloo". Listing every spelling is a losing game, so runs of a
+# repeated letter are collapsed to one and the result is matched against these
+# stems instead: "hyy" → "hy", "heyyy" → "hey", "helloo" → "helo".
+# Only the h/y family needs this; the words above stay exact so that "good"
+# and "all" are not mangled into "god" and "al".
+_GREETING_STEMS = frozenset({
+    "hi", "hy", "hey", "hay", "hai", "helo", "hulo", "hiya", "heya",
+    "yo", "sup", "howdy",
+})
+
+
+def _collapse_repeats(word: str) -> str:
+    """'heyyy' → 'hey', 'helloo' → 'helo'. Runs of one letter become one."""
+    return re.sub(r"(.)\1+", r"\1", word)
 
 # ── Stage 2a: Fast allowlist — always fashion-relevant ────────────────────────
 # Plain substring match (already lowercased). Contains H&M product types,
@@ -565,6 +622,29 @@ def _fg_stage1(msg: str, history: list) -> tuple | None:
     return None
 
 
+def _fg_stage1b_greeting(msg: str, msg_words: set) -> tuple | None:
+    """
+    Stage 1b: the message is *only* a greeting.
+
+    Needs no history, unlike Stage 1 — a greeting is typically the first thing
+    said in a session, so there is none to check against.
+
+    Requires every word to be a greeting token, not merely one of them, so a
+    greeting used as a preamble to something off-topic still falls through to
+    the blocklist and semantic stages below.
+    """
+    words = {w.strip(".,!?'\"") for w in msg_words} - {""}
+    if not words or len(words) > 4:
+        return None
+    if all(
+        w in _GREETING_TOKENS or _collapse_repeats(w) in _GREETING_STEMS
+        for w in words
+    ):
+        print(f"[FashionGuard] Stage1b-greeting: '{msg}' → allow")
+        return True, 0.90, "stage1b_greeting"
+    return None
+
+
 def _fg_stage2_allow(msg: str, msg_words: set, history: list) -> tuple | None:
     """Stages 2a/2c/2d: allowlist, catalog type terms, catalog name tokens."""
     for phrase in _ALLOWLIST_PHRASES:
@@ -588,6 +668,23 @@ def _fg_stage2b_block(msg: str) -> tuple | None:
         if re.search(pattern, msg):
             print(f"[FashionGuard] Stage2-blocklist: pattern={pattern!r} msg='{msg[:60]}'")
             return False, 0.05, "stage2_blocklist"
+    return None
+
+
+def _fg_stage2e_product_names(msg: str) -> tuple | None:
+    """
+    Stage 2e: Product name matching. Checks if any product name from the
+    catalog appears in the user message (exact or partial match).
+    Returns True if found, None otherwise to continue pipeline.
+
+    Catches cases like "what is the colour of Jeff AOP(1)" where "jeff aop(1)"
+    is an actual product name in the database.
+    """
+    msg_lower = msg.lower()
+    for prod_name in _CATALOG_PRODUCT_NAMES:
+        if prod_name in msg_lower:
+            print(f"[FashionGuard] Stage2e-product-name: matched '{prod_name}' in '{msg[:60]}'")
+            return True, 0.96, "stage2e_product_name"
     return None
 
 
@@ -624,8 +721,10 @@ async def is_fashion_relevant_async(
     for check in (
         _fg_stage0(msg, msg_words, history),
         _fg_stage1(msg, history),
+        _fg_stage1b_greeting(msg, msg_words),
         _fg_stage2_allow(msg, msg_words, history),
         _fg_stage2b_block(msg),
+        _fg_stage2e_product_names(msg),
     ):
         if check is not None:
             return check
@@ -656,6 +755,11 @@ def is_fashion_relevant(message: str) -> tuple:
         print(f"[FashionGuard] Stage0-word-block: '{msg}' matched {_blocked_words}")
         return False, 0.0
 
+    # Stage 1b: greeting bypass (kept in step with the async version)
+    _greeting = _fg_stage1b_greeting(msg, _msg_words)
+    if _greeting is not None:
+        return _greeting[:2]
+
     # Stage 2a: allowlist (works for any length including single words)
     for phrase in _ALLOWLIST_PHRASES:
         if phrase in msg:
@@ -665,6 +769,11 @@ def is_fashion_relevant(message: str) -> tuple:
     for pattern in _BLOCKLIST_PATTERNS:
         if re.search(pattern, msg):
             return False, 0.05
+
+    # Stage 2e: product name matching
+    result = _fg_stage2e_product_names(msg)
+    if result is not None:
+        return result[:2]
 
     # Stage 3: semantic scoring — runs for ALL remaining messages
     f_score, o_score = _semantic_scores(message)

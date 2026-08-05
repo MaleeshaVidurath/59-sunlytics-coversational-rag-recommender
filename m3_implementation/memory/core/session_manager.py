@@ -58,6 +58,21 @@ def _get_timeout_seconds() -> int:
     return minutes * 60
 
 
+def _get_max_resume_seconds() -> int:
+    """
+    Hard cap for resuming a session the frontend asked for BY NAME.
+
+    The 30-minute idle timeout above exists to garbage-collect abandoned
+    sessions. It should not apply when the user is demonstrably still in
+    the conversation (frontend sent that exact session_id with
+    force_new_session=False) — otherwise a long pause silently forks the
+    thread into a new empty session and follow-ups like "compare all"
+    lose their items.
+    """
+    hours = int(os.getenv("SESSION_MAX_RESUME_HOURS", 24))
+    return hours * 3600
+
+
 # ── Main SessionManager class ─────────────────────────────────────────────────
 
 class SessionManager:
@@ -91,9 +106,11 @@ class SessionManager:
         """
         redis = get_redis()
 
-        # Case 1: Specific session_id was provided — try to resume it
+        # Case 1: Specific session_id was provided — try to resume it.
+        # explicit=True: the user is still in this conversation, so the
+        # short idle timeout does not apply (see _get_max_resume_seconds).
         if session_id:
-            session = await self._resume_session(session_id, user_id)
+            session = await self._resume_session(session_id, user_id, explicit=True)
             if session:
                 return session
             # If resume failed (expired/not found), fall through to create new
@@ -163,12 +180,20 @@ class SessionManager:
     async def _resume_session(
         self,
         session_id: str,
-        user_id: str
+        user_id: str,
+        explicit: bool = False
     ) -> Optional[SessionDocument]:
         """
         Attempts to resume an existing session.
         Checks Redis first (fast path), falls back to MongoDB (cold path).
         Returns None if the session is expired, completed, or not found.
+
+        Args:
+            explicit: True when the frontend asked for this exact session_id.
+                      Such a session is only given up after
+                      SESSION_MAX_RESUME_HOURS, not the 30-minute idle
+                      timeout. Defaults to False, which keeps the original
+                      behaviour for the implicit (cached-pointer) lookup.
         """
         redis = get_redis()
         timeout = _get_timeout_seconds()
@@ -225,13 +250,23 @@ class SessionManager:
                 last_activity = last_activity.replace(tzinfo=timezone.utc)
 
             idle_seconds = (now_utc() - last_activity).total_seconds()
-            if idle_seconds > _get_timeout_seconds():
+            # A session the frontend named explicitly is still "open" for the
+            # user, so it gets the long cap instead of the short idle timeout.
+            max_idle = (
+                _get_max_resume_seconds() if explicit else _get_timeout_seconds()
+            )
+            if idle_seconds > max_idle:
                 # Session timed out — mark it as expired in MongoDB
                 await db.sessions.update_one(
                     {"session_id": session_id},
                     {"$set": {"status": "expired", "ended_at": now_utc()}}
                 )
                 return None
+            if explicit and idle_seconds > _get_timeout_seconds():
+                print(
+                    f"[SESSION] resuming idle session {session_id} "
+                    f"({idle_seconds / 60:.0f} min since last activity)"
+                )
 
         # Session is valid — warm up Redis from MongoDB
         await self._warm_redis_from_mongodb(doc)

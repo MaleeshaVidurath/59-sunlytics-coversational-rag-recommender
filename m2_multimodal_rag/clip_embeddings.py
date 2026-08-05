@@ -13,26 +13,34 @@ class ClipTextEncoder:
         print(f"Loading local CLIP Text Encoder on {self.device}...")
 
         try:
-            # Load model + image preprocessing transforms
-            self.model, _, self.preprocess_val = open_clip.create_model_and_transforms(
-                'ViT-B-32', pretrained='laion2b_s34b_b79k'
-            )
-
-            # Override with the H&M fine-tuned weights when the checkpoint exists
-            if FINETUNED_WEIGHTS_PATH.exists():
-                state_dict = torch.load(FINETUNED_WEIGHTS_PATH, map_location='cpu')
-                self.model.load_state_dict(state_dict)
-                print(f"   [CLIP] Loaded fine-tuned H&M weights from {FINETUNED_WEIGHTS_PATH.name}")
-            else:
-                print("   [CLIP] Fine-tuned checkpoint not found — using stock laion2b weights")
-
-            self.model = self.model.to(self.device)
-            self.model.eval()
-
-            # Load the CLIP tokenizer
-            self.tokenizer = open_clip.get_tokenizer('ViT-B-32')
+            self._load_model_and_transforms()
+            self._load_finetuned_weights_if_available()
+            self._finalize_model()
+            self._load_tokenizer()
         except ImportError:
             print("Warning: open_clip_torch is not installed. Please run: pip install open_clip_torch")
+
+    def _load_model_and_transforms(self):
+        # Load model + image preprocessing transforms
+        self.model, _, self.preprocess_val = open_clip.create_model_and_transforms(
+            'ViT-B-32', pretrained='laion2b_s34b_b79k'
+        )
+
+    def _load_finetuned_weights_if_available(self):
+        # Override with the H&M fine-tuned weights when the checkpoint exists
+        if FINETUNED_WEIGHTS_PATH.exists():
+            state_dict = torch.load(FINETUNED_WEIGHTS_PATH, map_location='cpu')
+            self.model.load_state_dict(state_dict)
+            print(f"   [CLIP] Loaded fine-tuned H&M weights from {FINETUNED_WEIGHTS_PATH.name}")
+        else:
+            print("   [CLIP] Fine-tuned checkpoint not found — using stock laion2b weights")
+
+    def _finalize_model(self):
+        self.model = self.model.to(self.device)
+        self.model.eval()
+
+    def _load_tokenizer(self):
+        self.tokenizer = open_clip.get_tokenizer('ViT-B-32')
 
     def encode_text(self, text_string: str) -> np.ndarray:
         """

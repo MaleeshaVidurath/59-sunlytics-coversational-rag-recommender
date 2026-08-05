@@ -364,13 +364,44 @@ Passes only `user_message` so the response generator knows what was said.
 
 ## 6. Item Reference Resolution — Shared Logic
 
-All four PARTIAL labels use the same resolution hierarchy:
+All four PARTIAL labels resolve in two stages: **choose the pool**, then
+**resolve within it**.
+
+### Stage 1 — Choosing the pool (`_resolve_pool`)
+
+```
+Start with the context window (dialogue_state.currently_discussing,
+the 12 most recently recommended items, newest first)
+    ↓
+Score the message against it (_score_items_by_name_scored)
+    ↓
+Best score >= 50, or message contains an ordinal / price?
+    ├─ Yes → window is enough. Return it. No MongoDB call.
+    └─ No  → query MongoDB for every recommendation in this session,
+             append the ones not already in the window, and resolve
+             over the merged pool.
+```
+
+The threshold of 50 is the point on the scoring scale below which a match is
+not a real reference: naming the product outright scores 100, and naming its
+colour or price is worth 50 each, so anything lower is incidental word overlap.
+
+**This fall-through is unconditional.** Any product recommended at any point in
+the session stays referenceable for the rest of it — the window is a cache, and
+MongoDB is the pool.
+
+> **Superseded:** the fall-through used to be gated on the window producing *no
+> match at all*. On a pool of same-category items, one shared word ("shorts")
+> was enough to prevent it, so a product from an earlier turn was answered with
+> whichever item happened to occupy `item_a`.
+
+### Stage 2 — Resolving within the pool
 
 ```
 Priority 1 — Ordinal reference
-    "first", "option 1", "1st", "number one"    → item_list[0]
-    "second", "option 2", "2nd", "the other"    → item_list[1]
-    "third" ... "eighth"                         → item_list[2..7]
+    "first", "option 1", "1st", "number one"    → newest turn's item 0
+    "second", "option 2", "2nd", "the other"    → newest turn's item 1
+    "third" ... "eighth"                         → newest turn's item 2..7
 
 Priority 2 — Price match
     "£34.99" appears in message → item whose price == 34.99
@@ -383,15 +414,18 @@ Priority 4 — Name word overlap
     Scored: full name = +100, per word = +1, colour = +50, price = +50
 
 Priority 5 — Default
-    item_list[0] (item_a — first recommended item)
-    Triggers session history fallback before settling
+    pool[0] — the first item of the most recent recommendation
 ```
 
-**Session history fallback:**
-When Priority 5 (default) is reached, `_find_item_in_session_history()` queries
-MongoDB for all INITIAL_REQUEST/REFINEMENT recommendations in this session,
-applies name scoring across all items ever recommended, and returns the best match.
-Items from 10+ turns ago can be correctly resolved this way.
+**Ordinals are scoped to the newest recommendation turn** (`_newest_turn_items`).
+The pool spans several turns, so position in it is not the same as position in
+what the user was last shown; "option 2" always means the second item of the
+latest offer. Each item's `rec_turn` stamp is what makes this possible, which is
+also why promoting a resolved item to `item_a` is safe — the answer comes from
+the stamp, not the slot.
+
+Priority 5 is the deliberate fallback for a message with no item reference at
+all ("tell me more"): the most recently recommended item is the right default.
 
 ---
 

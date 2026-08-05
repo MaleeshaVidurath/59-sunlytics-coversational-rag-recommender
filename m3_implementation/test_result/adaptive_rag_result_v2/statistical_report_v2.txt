@@ -1,0 +1,176 @@
+========================================================================
+ ADAPTIVE RAG TRIGGER - EVALUATION v2
+========================================================================
+Raw rows            : 333
+  - gate-blocked    : 5   (follow-up intent refused pre-retrieval)
+  - outliers        : 46   (within-tier Tukey upper fence; see E7)
+Primary analysis set: 282
+Sessions            : 62
+Date range          : 2026-05-29 22:29:53  ->  2026-08-03 23:24:02
+
+------------------------------------------------------------------------
+ E1  ROUTING DISTRIBUTION  (do inputs spread across tiers?)
+------------------------------------------------------------------------
+  NO       n=  45    16.0%
+  PARTIAL  n= 115    40.8%
+  FULL     n= 122    43.3%
+
+  Turns avoiding FULL retrieval: 56.7%
+  Normalised routing entropy   : 0.929  (1.0 = perfectly even)
+
+    NO                   n=  45
+    PARTIAL/RECENT       n=  92
+    PARTIAL/SESSION      n=  23
+    FULL/STANDARD        n=  69
+    FULL/EXCLUSIONS      n=  53
+
+------------------------------------------------------------------------
+ E2  ROUTING CORRECTNESS  (does the trigger fire CORRECTLY?)
+------------------------------------------------------------------------
+  Ground truth from context_sufficiency_evaluator.py:14-17, 213-217
+  FEEDBACK is sentiment-conditional: positive/neutral->NO, negative->FULL
+
+  ATTRIBUTE_QUESTION     24/26    92.3%   expected=PARTIAL
+  CHITCHAT               31/31   100.0%   expected=NO
+  COMPARISON             14/15    93.3%   expected=PARTIAL
+  EXPLANATION_WHY        19/19   100.0%   expected=PARTIAL
+  FEEDBACK               26/27    96.3%   expected=FULL/NO
+  INITIAL_REQUEST        87/94    92.6%   expected=FULL
+  REFINEMENT             18/18   100.0%   expected=FULL
+  SELECTION_REFERENCE    51/52    98.1%   expected=PARTIAL
+
+  OVERALL ROUTING ACCURACY: 95.7%  (270/282)
+
+  Misroutes by label -> actual tier:
+    INITIAL_REQUEST      expected=FULL     got=PARTIAL  "I need 4 casula skirts"
+    INITIAL_REQUEST      expected=FULL     got=PARTIAL  "I need few shirts to wear at home"
+    INITIAL_REQUEST      expected=FULL     got=PARTIAL  "I need 2 skirts"
+    ATTRIBUTE_QUESTION   expected=PARTIAL  got=FULL     "I am not sure it match to me"
+    INITIAL_REQUEST      expected=FULL     got=PARTIAL  "I need 4 shorts"
+    INITIAL_REQUEST      expected=FULL     got=PARTIAL  "I need party frock"
+    INITIAL_REQUEST      expected=FULL     got=PARTIAL  "I need shorts"
+    FEEDBACK             expected=FULL     got=NO       "I don't like them"
+    ATTRIBUTE_QUESTION   expected=PARTIAL  got=FULL     "what is the colour of Shorts H.W Stretch"
+    SELECTION_REFERENCE  expected=PARTIAL  got=FULL     "tell more about first one"
+    COMPARISON           expected=PARTIAL  got=FULL     "compare all"
+    INITIAL_REQUEST      expected=FULL     got=PARTIAL  "need shorts"
+
+------------------------------------------------------------------------
+ E3  LATENCY BY TIER  (median-first: latency is right-skewed)
+------------------------------------------------------------------------
+           Tier  n  Median (ms)  Mean (ms)  Std Dev  IQR (ms)  Min (ms)  Max (ms)
+             NO 45        835.1      939.8    628.1     541.6      22.6    2722.4
+ PARTIAL/RECENT 92       2837.4     3071.2   1095.4    1064.9     948.8    6513.4
+PARTIAL/SESSION 23       3183.5     3084.6    699.4     939.0    1877.0    4408.8
+  FULL/STANDARD 69       4994.9     6266.7   3549.1    2192.1     920.1   16375.2
+FULL/EXCLUSIONS 53       4513.8     5138.1   2463.5    1461.4    2796.0   15981.8
+
+  NO       n=  45  median=   835.1ms  mean=   939.8ms
+  PARTIAL  n= 115  median=  2886.3ms  mean=  3073.9ms
+  FULL     n= 122  median=  4738.9ms  mean=  5776.4ms
+
+  Kruskal-Wallis: H=177.868  p=2.380e-39  (SIGNIFICANT)
+
+  Pairwise Mann-Whitney U (one-tailed A < B):
+    NO       < PARTIAL  U=     155  p=1.357e-20  rank-biserial r=+0.940  Cohen d=2.51
+    PARTIAL  < FULL     U=    1723  p=5.559e-24  rank-biserial r=+0.754  Cohen d=1.15
+    NO       < FULL     U=      37  p=7.875e-23  rank-biserial r=+0.987  Cohen d=2.12
+
+  PARTIAL sub-tiers RECENT (n=92, med=2837ms) vs SESSION (n=23, med=3184ms)
+    U=986  p=0.617  rank-biserial r=+0.068  -> NOT significantly different
+
+------------------------------------------------------------------------
+ E4  COUNTERFACTUAL SAVINGS  (vs a non-adaptive all-FULL baseline)
+------------------------------------------------------------------------
+  Median FULL rag_ms (baseline retrieval cost): 3541.4 ms
+  Actual adaptive total   :     1100.5 s  over 282 turns
+  All-FULL baseline total :     1349.3 s
+  TIME SAVED              :      248.8 s  (18.4%)
+  Mean per-turn saving    :      882.2 ms
+
+  Per-tier contribution (this is where the saving is earned):
+    NO       n=  45  saved=  142.4 s  (   3164 ms/turn,  77.1% of its own baseline)
+    PARTIAL  n= 115  saved=  106.4 s  (    925 ms/turn,  23.1% of its own baseline)
+    FULL     n= 122  saved=    0.0 s  (      0 ms/turn,   0.0% of its own baseline)
+
+  Restricted to the 160 non-FULL turns (56.7% of traffic):
+    saved 248.8 s of 644.6 s baseline = 38.6% faster
+
+  Per-tier median latency vs FULL median:
+    NO        82.4% faster (median)
+    PARTIAL   39.1% faster (median)
+
+------------------------------------------------------------------------
+ E5  QUALITY GUARD  (did the speed-up cost answer quality?)
+------------------------------------------------------------------------
+response_status  CONTRADICTION  HALLUCINATION   OK  total  ok_rate_%
+tier                                                                
+NO                           0              0   55     55      100.0
+PARTIAL                      2              3  130    135       96.3
+FULL                         3              2  138    143       96.5
+
+  Chi-square: is defect rate independent of tier?
+    chi2=2.050  p=0.359  -> NO significant quality difference
+
+------------------------------------------------------------------------
+ E6  MEMORY vs RAG DECOMPOSITION  (where does the saving come from?)
+------------------------------------------------------------------------
+           Tier  n  memory_ms (median)  rag_ms (median)
+             NO 45               593.8            514.2
+ PARTIAL/RECENT 92               377.8           2453.2
+PARTIAL/SESSION 23               370.2           2578.5
+  FULL/STANDARD 69              1177.1           3670.5
+FULL/EXCLUSIONS 53              1090.7           3469.0
+
+  memory_ms median spread across tiers: 376 -> 1149 ms  (3.1x)
+  rag_ms    median spread across tiers: 514 -> 3541 ms  (6.9x)
+  -> the tier effect lives in RETRIEVAL, not in the memory pipeline.
+
+------------------------------------------------------------------------
+ E7  SENSITIVITY  (does the conclusion survive any filtering policy?)
+------------------------------------------------------------------------
+            policy   n  NO med  PARTIAL med  FULL med     KW p  routing acc %  avoid FULL %
+raw (no filtering) 333   885.2       3139.1    5107.0 1.03e-35           94.0          57.1
+ minimal (primary) 282   835.1       2886.3    4738.8 2.38e-39           95.7          56.7
+ strict (v1 R1-R8) 251   885.2       2876.8    4553.4 1.04e-33           96.0          59.8
+
+  Ordering NO < PARTIAL < FULL and significance hold under all three
+  policies -> the finding is not an artefact of data cleaning.
+
+------------------------------------------------------------------------
+ E8  BASELINE COMPARISON  (does the trigger beat the alternatives?)
+------------------------------------------------------------------------
+  The two gaps claimed in the literature review are tested directly.
+
+  [E8a] Latency vs retrieval-policy baselines
+    Policy                                      Total (s)   vs ours
+    B1 non-adaptive, always FULL (COMPASS/RA-Rec)     1349.3  +248.8 s
+    B2 binary gate, 2-way (RAGate)                 1206.9  +106.4 s
+    OURS 3-way NO/PARTIAL/FULL                     1100.5         -
+
+    GAP 1  adaptive vs always-retrieve : 18.4% faster
+    GAP 2  3-way vs binary gate        : 8.8% faster
+           = the measured value of the PARTIAL tier alone: 106.4 s
+           = 925 ms saved per PARTIAL turn (n=115)
+
+  [E8b] Routing correctness vs decision-policy baselines
+    Router                                       Accuracy
+    Random (stratified, matches our marginals)      37.9%
+    Majority class (always FULL)                    44.7%
+    Intent label only (no CSE)                      95.0%
+    OURS DistilBERT + CSE                           95.7%
+
+    -> A random router matches our latency profile but routes correctly
+       only 37.9% of the time. Latency alone therefore proves
+       nothing; routing accuracy is what establishes the trigger works.
+
+    -> CAVEAT: the intent-only row is a CEILING, scored on the logged
+       label so it inherits none of the classifier's own errors, while
+       our row is the live end-to-end system. The overall gap
+       (+0.7 pp) therefore UNDERSTATES the CSE.
+    -> The structural limit shows on FEEDBACK turns (n=27):
+         intent-only 48.1%   vs   ours 96.3%
+       Without the CSE, all 14 negative-feedback turns route to NO:
+       the user says "I don't like them" and gets no new items at all.
+       That is a functional failure, not a small accuracy delta.
+========================================================================

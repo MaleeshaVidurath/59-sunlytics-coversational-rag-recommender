@@ -49,6 +49,14 @@ from memory.models.schemas import (
     RecommendationDocument, now_utc
 )
 from memory.db.mongo import get_db, get_collection_name
+
+# How many recently recommended items dialogue_state.currently_discussing
+# holds at once, newest first. Spans several recommendation turns so a
+# reference to something shown a few turns ago resolves straight from Redis.
+# Anything older is still reachable through the MongoDB session-history
+# fallback in enrichment._resolve_pool, so this bounds latency, not recall.
+CONTEXT_WINDOW_ITEMS = 12
+
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from adaptive_rag.distilbert_training.predict import Predictor
@@ -212,6 +220,8 @@ class MemoryPipeline:
         # is_fashion_relevant_async runs:
         #   Stage 1 (0ms)    — Conversational bypass: continuation phrases
         #                      in active history always pass through.
+        #   Stage 1b (0ms)   — Greeting bypass: a message that is nothing but
+        #                      a greeting passes without needing history.
         #   Stage 2 (0ms)    — Fast keyword allowlist + expanded blocklist.
         #   Stage 3 (3-5ms)  — Dual-pool mean-top-3 semantic scoring
         #                      (16 fashion anchors vs 12 off-topic anchors).
@@ -683,18 +693,7 @@ class MemoryPipeline:
             print(f"[store_response] {len(recommended_items)} passed in, "
                   f"{len(items)} passed ItemInContext validation")
             if len(items) >= 1:
-                import string as _string
-                _SLOTS = [f"item_{c}" for c in _string.ascii_lowercase[:8]]
-                # Initialise all 8 slots to None so stale items from a previous
-                # turn (e.g. old item_c/item_d) are always cleared on every update.
-                _discussing = {k: None for k in _SLOTS}
-                for i, item in enumerate(items[:8]):
-                    _discussing[_SLOTS[i]] = item.model_dump()
-                print(f"[store_response] saving currently_discussing keys={list(_discussing.keys())}")
-                await self.session_mgr.update_dialogue_state(
-                    session_id,
-                    {"currently_discussing": _discussing}
-                )
+                await self._push_context_window(session_id, items)
 
         bot_turn = await self.turn_mgr.add_assistant_turn(
             session_id=session_id,
@@ -714,6 +713,65 @@ class MemoryPipeline:
             "turn_id":           bot_turn.turn_id,
             "recommendation_id": recommendation_id
         }
+
+    async def _push_context_window(
+        self,
+        session_id: str,
+        items: list[ItemInContext],
+    ):
+        """
+        Pushes this turn's recommendations onto the front of
+        dialogue_state.currently_discussing, keeping earlier turns' items
+        behind them up to CONTEXT_WINDOW_ITEMS.
+
+        This used to overwrite the whole dict every turn, which kept ordinals
+        ("option 2") honest but made anything recommended earlier in the
+        session unreferenceable — asking about a product from two turns ago
+        resolved to whatever sat in item_a instead. Ordinals stay honest here
+        because each item carries rec_turn, and the ordinal resolvers only
+        look at the newest one.
+
+        An item recommended again moves back to the front and takes the new
+        rec_turn, so "recent" always reflects the last time it was shown.
+
+        Every slot is written on each update, including the trailing Nones:
+        update_dialogue_state deep-merges dicts, so a key that is omitted
+        keeps its previous value and would strand a dropped item.
+        """
+        db = get_db()
+        doc = await db.sessions.find_one({"session_id": session_id}, {"turn_count": 1})
+        # The turn number add_assistant_turn is about to assign to this response.
+        rec_turn = (doc.get("turn_count", 0) if doc else 0) + 1
+
+        fresh = []
+        for item in items[:CONTEXT_WINDOW_ITEMS]:
+            payload = item.model_dump()
+            payload["rec_turn"] = rec_turn
+            fresh.append(payload)
+        fresh_ids = {d.get("article_id") for d in fresh}
+
+        prior_state = await self.session_mgr.get_dialogue_state(session_id)
+        carried = [
+            v.model_dump()
+            for k, v in sorted((prior_state.currently_discussing or {}).items())
+            if k.startswith("item_") and v is not None and v.article_id not in fresh_ids
+        ]
+
+        window = (fresh + carried)[:CONTEXT_WINDOW_ITEMS]
+
+        import string as _string
+        _SLOTS = [f"item_{c}" for c in _string.ascii_lowercase[:CONTEXT_WINDOW_ITEMS]]
+        _discussing = {k: None for k in _SLOTS}
+        for i, payload in enumerate(window):
+            _discussing[_SLOTS[i]] = payload
+
+        print(f"[store_response] context window: +{len(fresh)} new, "
+              f"{len(carried)} carried → {len(window)}/{CONTEXT_WINDOW_ITEMS} "
+              f"(rec_turn={rec_turn})")
+        await self.session_mgr.update_dialogue_state(
+            session_id,
+            {"currently_discussing": _discussing}
+        )
 
     # ── Helper methods ────────────────────────────────────────────────────────
 
