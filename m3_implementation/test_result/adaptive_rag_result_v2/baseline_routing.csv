@@ -1,0 +1,5 @@
+router,accuracy_%
+Random (stratified),37.9
+Majority class (always FULL),44.7
+Intent label only (no CSE),95.0
+Ours (DistilBERT + CSE),95.7
