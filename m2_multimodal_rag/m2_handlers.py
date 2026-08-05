@@ -23,6 +23,7 @@ from m2_multimodal_rag.diversity_bandit import diversity_bandit
 from m2_multimodal_rag.knowledge_base.kb_retriever import kb_retriever
 from m2_multimodal_rag.collaborative_filtering.cf_scorer import cf_scorer
 from m2_multimodal_rag.vlm_kansei import visual_psychology_fact
+from m2_multimodal_rag import pipeline_trace as trace
 
 # Attempt to load CF model at import time (silent if files not present)
 cf_scorer.load()
@@ -701,6 +702,8 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
     # ---------------------------------------------------------------
     # PHASE 1 — LLM Query Expansion + Multi-Vector CLIP Ensemble
     # ---------------------------------------------------------------
+    trace.begin("catalog_search", (memory_context or {}).get("session_id"), user_message)
+    trace.stage_start(1, "RETRIEVAL", "Query Expansion + Multi-Vector CLIP + FAISS")
     filter_terms = " ".join(str(v) for v in filters.values() if not isinstance(v, (int, float)))
     soft_terms   = " ".join(str(v) for v in soft_constraints.values() if v)
 
@@ -763,7 +766,13 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
             expanded_queries = [base_search_text]   # ablation: single-vector baseline
         else:
             expanded_queries = llm_generator.expand_query(base_search_text)
+        trace.step("1.1  LLM query expansion (Groq)",
+                   f"{len(expanded_queries)} query variants")
+        for _q in expanded_queries:
+            trace.bullet(_q)
         query_vectors    = [clip_encoder.encode_text(q) for q in expanded_queries if q]
+        trace.step("1.2  CLIP text encoding",
+                   f"{len(query_vectors)} vectors x 512-D")
 
         if not query_vectors:
             return {"action": "catalog_search", "success": False,
@@ -778,8 +787,12 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
             allowed_ids = _hard_filter_allowed_ids(articles_df, filters, exclude_ids)
             selector    = faiss_db.build_id_selector(allowed_ids)
             if selector is not None:
+                trace.step("1.3  Metadata store — hard filters at index level",
+                           f"{len(allowed_ids):,} of {len(articles_df):,} articles valid")
                 candidates  = faiss_db.search_multi(query_vectors, top_k=15, selector=selector)
                 prefiltered = bool(candidates)
+                trace.step("1.4  FAISS multi-vector search + RRF fusion",
+                           f"{len(candidates)} candidates")
                 print(f"  [catalog_search] Filtered FAISS: {len(allowed_ids):,} "
                       f"filter-valid articles → {len(candidates)} candidates")
 
@@ -797,6 +810,11 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
     # PHASE 2 — Hard filter + boost / penalty / purchase history scoring
     # (hard-filter checks skipped when the pool was pre-filtered at index level)
     # ---------------------------------------------------------------
+    trace.stage_start(2, "HARD FILTER + SCORING",
+                      "boosts · penalties · CF history · Kansei KB")
+    trace.step("2.1  Scoring pool", f"{len(candidates)} candidates in")
+    trace.step("2.2  Preference boosts / penalties",
+               f"{len(boosts)} boosts, {len(penalties)} penalty groups")
     filtered_results = []
 
     for article_id, faiss_score in candidates:
@@ -919,6 +937,10 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
     # ---------------------------------------------------------------
     # PHASE 3 — Cross-Encoder Neural Re-ranking (MiniLM-BERT)
     # ---------------------------------------------------------------
+    trace.step("2.3  Scored + filtered", f"{len(filtered_results)} candidates out")
+    trace.stage_start(3, "RE-RANKING", "MiniLM cross-encoder → Groq LLM semantic")
+    trace.step("3.1  Neural cross-encoder (ms-marco MiniLM-L-6-v2)",
+               f"top-{min(len(filtered_results), 20)} scored")
     print(f"  [catalog_search] Neural cross-encoder scoring top-{min(len(filtered_results), 20)} candidates...")
     neural_reranked = cross_encoder_reranker.rerank(
         query=base_search_text,
@@ -950,6 +972,7 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
     if kb_rerank_context:
         enriched_soft_constraints["kb_psychology"] = kb_rerank_context
 
+    trace.step("3.2  LLM semantic re-rank (Groq)", "top-8 from neural stage")
     print("  [catalog_search] LLM semantic re-ranking top-8 from neural stage...")
     reranked_results = llm_generator.rerank_candidates(
         user_message=user_message,
@@ -972,13 +995,17 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
     # Derive implicit feedback signals from session context:
     #   exclude_ids      → rejected items → more diversity → β increases
     #   items_in_context → kept items     → more relevance → α increases
+    trace.stage_start(4, "SELECTION", "Thompson-sampling bandit + MMR")
     items_ctx      = retrieval_input.get("items_in_context") or {}
     retained_count = sum(1 for k in ("item_a", "item_b") if items_ctx.get(k))
+    trace.step("4.1  Implicit feedback signals",
+               f"{len(exclude_ids)} rejected, {retained_count} retained")
 
     adaptive_lambda = diversity_bandit.sample_lambda(
         exclude_count=len(exclude_ids),
         retained_count=retained_count,
     )
+    trace.step("4.2  Thompson sampling", f"λ={adaptive_lambda:.3f}")
     print(f"  [catalog_search] MMR with Thompson Sampling λ={adaptive_lambda:.3f}...")
 
     # --- Outfit completion (Colour Harmony KB) ---
@@ -1032,7 +1059,12 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
     def _verify_item(result: dict) -> dict:
         aid  = result["article_id"]
         meta = result["metadata"]
+        # Buffers this thread's guard output so the parallel items' logs can be
+        # replayed grouped per item instead of interleaved (see pipeline_trace).
+        with trace.capture_item(aid, meta.get("prod_name", "")):
+            return _verify_item_inner(result, aid, meta)
 
+    def _verify_item_inner(result: dict, aid: str, meta: dict) -> dict:
         # Wait for this item's background image prefetch (started after
         # Phase 3) so the guard never downloads the same file concurrently.
         _fut = _img_futures.get(aid)
@@ -1068,12 +1100,21 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         item_response["verification_trail"]  = verification_trail
         return item_response
 
+    trace.stage_start(5, "HALLUCINATION GUARD",
+                      "pre-filter → L1 self-reflect → L2 CoVe → L3 CLIPScore/ViLT")
     if len(top_results) > 1:
         print(f"  [catalog_search] Phase 6: verifying {len(top_results)} items in parallel...")
         with ThreadPoolExecutor(max_workers=min(len(top_results), 3)) as pool:
             response_items = list(pool.map(_verify_item, top_results))
     else:
         response_items = [_verify_item(r) for r in top_results]
+    # Replay the buffered per-item guard traces in MMR order.
+    trace.flush_items([r["article_id"] for r in top_results])
+    trace.stage_start(6, "FAITHFUL RECOMMENDATION OUTPUT", "verified items + image URLs")
+    for _it in response_items:
+        trace.step(f"{_it.get('article_id', '?')}  {_it.get('prod_name', '')}",
+                   f"{_it.get('colour_group_name', '')} · {_it.get('product_type_name', '')}")
+    trace.end(len(response_items))
     _img_pool.shutdown(wait=False)
 
     # Natural language summary — handles any number of items
