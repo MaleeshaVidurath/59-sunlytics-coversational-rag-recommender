@@ -229,6 +229,40 @@ _EXTRA_COLOUR_TERMS = (
 )
 
 
+def _resolve_articles_csv() -> str:
+    """
+    Locates the articles CSV robustly.
+
+    The configured path is assembled from module `__file__`s, and every entry
+    modules add to sys.path is relative, so the value can arrive carrying a long
+    chain of '..' segments. One such chain failed to open even though it pointed
+    at a real file, and because the loader below swallowed the error the
+    vocabulary silently came back EMPTY — which quietly disables colour and
+    product-type extraction altogether. Normalising first, then falling back to
+    a search rooted at this module, removes a failure mode that is otherwise
+    invisible until results look inexplicably poor.
+    """
+    candidates = []
+    try:
+        from text_rag.config import ARTICLES_CSV
+        candidates.append(os.path.normpath(os.path.abspath(ARTICLES_CSV)))
+    except Exception:
+        pass
+
+    # m3_implementation/text_rag/core/ → walk up looking for the shared data dir.
+    here = os.path.dirname(os.path.normpath(os.path.abspath(__file__)))
+    for _ in range(5):
+        here = os.path.dirname(here)
+        for tail in (("shared", "main_data_set", "sample_articles.csv"),
+                     ("shared", "DataFilterProject", "data", "sample_articles.csv")):
+            candidates.append(os.path.join(here, *tail))
+
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return candidates[0] if candidates else ""
+
+
 def _load_vocabularies() -> dict:
     """
     Reads the articles CSV once and returns the value vocabularies the
@@ -237,18 +271,19 @@ def _load_vocabularies() -> dict:
         colours — colour_group_name     (case-insensitive, word-boundary)
         types   — product_type_name     (case-insensitive, word-boundary)
 
-    Returns empty sets if the CSV is unavailable; extraction then falls back to
-    evidence-local values only, which still covers the common case.
+    A failure here is loud on purpose: without these lists the extractor can
+    still read names and prices but goes blind to colour and product type, and
+    a silent degradation of that size is worse than a crash.
     """
     global _vocab_cache
     if _vocab_cache:
         return _vocab_cache
 
     names, colours, types = set(), set(), set()
+    csv_path = _resolve_articles_csv()
     try:
         import csv
-        from text_rag.config import ARTICLES_CSV
-        with open(ARTICLES_CSV, newline='', encoding='utf-8') as f:
+        with open(csv_path, newline='', encoding='utf-8') as f:
             for row in csv.DictReader(f):
                 n = norm_ws(row.get('prod_name') or '')
                 if len(n) >= 5:
@@ -262,7 +297,10 @@ def _load_vocabularies() -> dict:
         print(f"[AssertionExtractor] vocab loaded: {len(names)} names, "
               f"{len(colours)} colours, {len(types)} types")
     except Exception as e:
-        print(f"[AssertionExtractor] vocabularies unavailable: {e}")
+        print("[AssertionExtractor] *** WARNING *** could not read the articles "
+              f"CSV at {csv_path!r}: {e}")
+        print("[AssertionExtractor] *** colour and product-type extraction are "
+              "DISABLED until this is fixed ***")
 
     colours.update(_EXTRA_COLOUR_TERMS)
 
@@ -278,6 +316,23 @@ def _load_vocabularies() -> dict:
 def get_catalog_names() -> frozenset:
     """All prod_name values from the articles CSV (original casing)."""
     return _load_vocabularies()["names"]
+
+
+def _strip_names(text: str, names: list) -> str:
+    """
+    Blanks out product names before a vocabulary scan.
+
+    Catalogue names very often embed the very attribute being looked for —
+    "London dress", "Skirt Mini", "Black Denim Jacket". Left in place, the name
+    itself satisfies the match and hides what the reply actually said about the
+    attribute. Longest name first, so a shorter name that is a substring of a
+    longer one cannot leave a fragment behind.
+    """
+    out = text or ""
+    for name in sorted({n for n in names if n and len(n) >= 3},
+                       key=len, reverse=True):
+        out = re.sub(re.escape(name), " ", out, flags=re.IGNORECASE)
+    return out
 
 
 def _find_vocab_value(text: str, vocabulary: list, prefer: str = "") -> str:
@@ -428,13 +483,25 @@ def extract_assertions(
 
         other_names = [n for i, n in enumerate(all_names) if i != idx and n]
 
+        # Product names routinely CONTAIN a colour or a garment type — "London
+        # dress", "Black Denim Jacket", "Skirt Mini". Scanning the raw text for
+        # those attributes lets the name satisfy the match and mask whatever the
+        # reply actually stated: for an item named "London dress", a sentence
+        # reading "This Jacket has a V-neck" still resolved to type=Dress,
+        # because "dress" was sitting in the name two words earlier.
+        #
+        # Names are therefore blanked out before the vocabulary scan. A name is
+        # an identifier, not a claim about colour or type. Name and price are
+        # read from the untouched text, since those ARE the name.
+        scan = _strip_names(text, [item.get("name", "")] + other_names)
+
         found = {
             "name":         _find_name(text, item.get("name", ""), other_names),
             "price":        _find_price(text, item.get("price", "")),
-            "colour":       _find_vocab_value(text, vocab["colours"],
+            "colour":       _find_vocab_value(scan, vocab["colours"],
                                               prefer=item.get("colour", "")),
             "product_type": _find_vocab_value(
-                text, vocab["types"],
+                scan, vocab["types"],
                 prefer=item.get("product_type", "") or item.get("type", "")),
         }
 
