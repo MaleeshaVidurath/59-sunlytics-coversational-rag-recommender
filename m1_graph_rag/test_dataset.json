@@ -1,0 +1,987 @@
+[
+    {
+        "customer_id": "d656aff527a119a1c1f23e09281ad13305e11584b977b48c3a35f048d2a713eb",
+        "user_message": "I am looking for a off white sweater.",
+        "ground_truth_articles": [
+            "909802002",
+            "893141002",
+            "936622001",
+            "802153004",
+            "935892001",
+            "892643001",
+            "892643002"
+        ],
+        "metadata_used": {
+            "color": "off white",
+            "type": "sweater"
+        }
+    },
+    {
+        "customer_id": "2df54f0d0653811fe06479c93905f3e6ecc6d07edf39d8b56e5b66c86182bedf",
+        "user_message": "I am looking for a black sweater.",
+        "ground_truth_articles": [
+            "927225001",
+            "803757004",
+            "803757015",
+            "828116003",
+            "870999004",
+            "683001021",
+            "803757005",
+            "579541001",
+            "683001019",
+            "870442004",
+            "878800001",
+            "237347063",
+            "908292002",
+            "547780001",
+            "622969005",
+            "622969001",
+            "859416011",
+            "878800002",
+            "901811001",
+            "894780001",
+            "894780001",
+            "778064038",
+            "888473002",
+            "888473002",
+            "896169005",
+            "863583002",
+            "870999005",
+            "870999005",
+            "797988005",
+            "907399001",
+            "907399001",
+            "797710001",
+            "797988002",
+            "574109042",
+            "778064001",
+            "870999004",
+            "870999004",
+            "800691031",
+            "868038001",
+            "868038001",
+            "803757001",
+            "778064045",
+            "906258005",
+            "803757019",
+            "735600010",
+            "673677024",
+            "673677002",
+            "852535001",
+            "778064041",
+            "869473003",
+            "923037003",
+            "904584003",
+            "904584007",
+            "920529001",
+            "920529001",
+            "902528007",
+            "902413001",
+            "852535001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "sweater"
+        }
+    },
+    {
+        "customer_id": "9dbc055471e6893cb38124538ae0b6eb09d218ad698b904ec3e0c1866b96027c",
+        "user_message": "Show me some options for a sweater, preferably light grey.",
+        "ground_truth_articles": [
+            "889753004",
+            "685816037",
+            "685816037",
+            "598755046",
+            "598755046"
+        ],
+        "metadata_used": {
+            "color": "light grey",
+            "type": "sweater"
+        }
+    },
+    {
+        "customer_id": "aceca8dedf9706e3a9a51adcfd1969e2a0c0c68f123c9b7681dea8eadf45d6b4",
+        "user_message": "Do you have any dark grey trouserss?",
+        "ground_truth_articles": [
+            "904571001",
+            "904999002",
+            "904571001",
+            "809961004",
+            "923569006"
+        ],
+        "metadata_used": {
+            "color": "dark grey",
+            "type": "trousers"
+        }
+    },
+    {
+        "customer_id": "71986b564f1a81551a73d67e8b63df9d82a68bf1ebad24ae588e9794c8a39391",
+        "user_message": "Do you have any black belts?",
+        "ground_truth_articles": [
+            "673396002",
+            "673396002",
+            "856440007",
+            "856440007",
+            "931720001",
+            "931720001",
+            "573085057",
+            "573085057",
+            "871517007",
+            "871517007",
+            "907418001",
+            "907418001",
+            "845610006",
+            "845610006",
+            "845610006",
+            "856440001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "belt"
+        }
+    },
+    {
+        "customer_id": "157eee38676eebb003bf97407f26e369de192997ab3902c194ce2690f060ff50",
+        "user_message": "Do you have any dark blue trouserss?",
+        "ground_truth_articles": [
+            "399136061",
+            "732842014",
+            "901318001",
+            "909588006",
+            "882900004",
+            "762846027",
+            "882900008"
+        ],
+        "metadata_used": {
+            "color": "dark blue",
+            "type": "trousers"
+        }
+    },
+    {
+        "customer_id": "e7c0ff2f724293c09bf3ba498c8c49b001040374fab1cdf2d6fe6017de089eba",
+        "user_message": "I am looking for a light turquoise bodysuit.",
+        "ground_truth_articles": [
+            "533022042"
+        ],
+        "metadata_used": {
+            "color": "light turquoise",
+            "type": "bodysuit"
+        }
+    },
+    {
+        "customer_id": "86088b6c51b12af9a00ef5ddfae37870f6604f8a8626a177f20f0fb880ac747a",
+        "user_message": "Could you recommend a off white bra?",
+        "ground_truth_articles": [
+            "849886001",
+            "934835001",
+            "889550002",
+            "911696002",
+            "740519006",
+            "868213002",
+            "804996003",
+            "902507001",
+            "909721002",
+            "909721002",
+            "871527004",
+            "794575017",
+            "857163002",
+            "790368009",
+            "790368009",
+            "790368009",
+            "903840002",
+            "903840002",
+            "909721003",
+            "909721003"
+        ],
+        "metadata_used": {
+            "color": "off white",
+            "type": "bra"
+        }
+    },
+    {
+        "customer_id": "863f0e03da282ae32a76775ce55d8a4605a85c84a26066e1ad0e9469e8c40e68",
+        "user_message": "I am looking for a light blue blouse.",
+        "ground_truth_articles": [
+            "930239001"
+        ],
+        "metadata_used": {
+            "color": "light blue",
+            "type": "blouse"
+        }
+    },
+    {
+        "customer_id": "2399cf8a4ac08644be5df6bc31de4364bfbcf235f65d0f08539f277a92872310",
+        "user_message": "Could you recommend a dark red hoodie?",
+        "ground_truth_articles": [
+            "890985002",
+            "910132001",
+            "805000008",
+            "805000007",
+            "706837006",
+            "803685001",
+            "730683062",
+            "863595006",
+            "902388001",
+            "868823008",
+            "868680001",
+            "882902001",
+            "874819003",
+            "905518001",
+            "730683054",
+            "767834002",
+            "882146002",
+            "730683050",
+            "822888002",
+            "849886012",
+            "769748014"
+        ],
+        "metadata_used": {
+            "color": "dark red",
+            "type": "hoodie"
+        }
+    },
+    {
+        "customer_id": "6cc121e5cc202d2bf344ffe795002bdbf87178054bcda2e57161f0ef810a4b55",
+        "user_message": "I need a new shirt. I like grey.",
+        "ground_truth_articles": [
+            "871710012",
+            "871710012",
+            "750423012",
+            "825195008",
+            "845729002",
+            "908894001",
+            "878754001",
+            "906977001",
+            "921671001",
+            "927336001",
+            "898713001",
+            "874819002",
+            "874819002",
+            "836130006",
+            "914805006",
+            "908729002",
+            "933032002",
+            "933032002",
+            "650534001"
+        ],
+        "metadata_used": {
+            "color": "grey",
+            "type": "shirt"
+        }
+    },
+    {
+        "customer_id": "95f9365a9294512718a2f21082b3829ab555b9bb3c5c4a5239f584dd6f4a8ecd",
+        "user_message": "I am looking for a dark green shirt.",
+        "ground_truth_articles": [
+            "871517012",
+            "856440001",
+            "882992005",
+            "873279005",
+            "856440002",
+            "856440002",
+            "886566001",
+            "870328003",
+            "902528006",
+            "870328002",
+            "889036004",
+            "788575002",
+            "845446001",
+            "876148004",
+            "876148001",
+            "882992001"
+        ],
+        "metadata_used": {
+            "color": "dark green",
+            "type": "shirt"
+        }
+    },
+    {
+        "customer_id": "aa5d58330818c507141333ef2f4874481921a07fde38f3139e5842c9783e2a27",
+        "user_message": "I am looking for a black trousers.",
+        "ground_truth_articles": [
+            "910922001",
+            "924243002",
+            "924243002",
+            "904625001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "trousers"
+        }
+    },
+    {
+        "customer_id": "e859b098e894e21ed385aa3d740970437220f8474788a82a088aa56240a82445",
+        "user_message": "I am looking for a white swimsuit.",
+        "ground_truth_articles": [
+            "801452003",
+            "801452003",
+            "563204001",
+            "698276006",
+            "811925002",
+            "832309007",
+            "832330004",
+            "861471001",
+            "744394002",
+            "933990001",
+            "933989001",
+            "832331004",
+            "811927002",
+            "811927002",
+            "530544002",
+            "759326008"
+        ],
+        "metadata_used": {
+            "color": "white",
+            "type": "swimsuit"
+        }
+    },
+    {
+        "customer_id": "afca0bdfe88b260ffce703979fd58c845983d91f4d99f299bb96c4af2c71a2d4",
+        "user_message": "Do you have any pink dresss?",
+        "ground_truth_articles": [
+            "936862001",
+            "909357001"
+        ],
+        "metadata_used": {
+            "color": "pink",
+            "type": "dress"
+        }
+    },
+    {
+        "customer_id": "851a88d56941fd5c43795a0f8bc1d2d04d66821e740930ae1aa6ca00f3a1b9c6",
+        "user_message": "Do you have any blue trouserss?",
+        "ground_truth_articles": [
+            "871997002",
+            "909059002",
+            "871997001",
+            "844135004",
+            "928206001",
+            "874754002",
+            "929165002",
+            "837939001",
+            "892378003"
+        ],
+        "metadata_used": {
+            "color": "blue",
+            "type": "trousers"
+        }
+    },
+    {
+        "customer_id": "3f9497a28e50b193fdf58fb97b2229d1eb23b75bff08a27e38b5bfa7e16ac37c",
+        "user_message": "Could you recommend a dark orange blouse?",
+        "ground_truth_articles": [
+            "884319008",
+            "894687002"
+        ],
+        "metadata_used": {
+            "color": "dark orange",
+            "type": "blouse"
+        }
+    },
+    {
+        "customer_id": "8e469168c1e6e1adc89a3d1ccb456ec7449aaf22810c3ef6fe1b09821aac643c",
+        "user_message": "Could you recommend a black cardigan?",
+        "ground_truth_articles": [
+            "579541001",
+            "906226001",
+            "842000001",
+            "913341001",
+            "893432005",
+            "911195004",
+            "903420001",
+            "871889001",
+            "871889001",
+            "903926001",
+            "923037001",
+            "923037001",
+            "868641002",
+            "913220001",
+            "913220001",
+            "456163086",
+            "818754001",
+            "928210002",
+            "928210002"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "cardigan"
+        }
+    },
+    {
+        "customer_id": "e238725cbff3774b711407cc000f42c0ddabf6b07eb0e311ffb5fc72e862a34b",
+        "user_message": "I am looking for a black blouse.",
+        "ground_truth_articles": [
+            "926436001",
+            "926436001",
+            "911748001",
+            "911748001",
+            "867260002",
+            "918649001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "blouse"
+        }
+    },
+    {
+        "customer_id": "92838b6470bf09ea2247a7f244a059e13eec4224cfe93d716482cfe0936d3f60",
+        "user_message": "Could you recommend a dark turquoise top?",
+        "ground_truth_articles": [
+            "923534004"
+        ],
+        "metadata_used": {
+            "color": "dark turquoise",
+            "type": "top"
+        }
+    },
+    {
+        "customer_id": "1320d4b3dd6481cde05bb80fb7ca37397f70470b9afb96aeca5d41175acaf836",
+        "user_message": "Do you have any dark grey sweaters?",
+        "ground_truth_articles": [
+            "873279002",
+            "911981001"
+        ],
+        "metadata_used": {
+            "color": "dark grey",
+            "type": "sweater"
+        }
+    },
+    {
+        "customer_id": "d7ccd94737524e3138287b27dc457b1dacd3737820e27f98019b8ba84d7ffcac",
+        "user_message": "Could you recommend a black boots?",
+        "ground_truth_articles": [
+            "904415001",
+            "863646005",
+            "863646005",
+            "863646005",
+            "914805002",
+            "914805002",
+            "903926001",
+            "903926001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "boots"
+        }
+    },
+    {
+        "customer_id": "cc5484960f95517ca58794e20b4f71733672528db43941fd7000275ccb6ac7ee",
+        "user_message": "I need a new hoodie. I like black.",
+        "ground_truth_articles": [
+            "862105001",
+            "862105001",
+            "913785001",
+            "862105009",
+            "862105009",
+            "543548001",
+            "543548001",
+            "543548008",
+            "909370001",
+            "909370001",
+            "794321007",
+            "794321007",
+            "906100002"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "hoodie"
+        }
+    },
+    {
+        "customer_id": "cfe3088e558017962bea0427207a7319ce247f47fbbf99dc29621b0ef411ae23",
+        "user_message": "Do you have any black bodysuits?",
+        "ground_truth_articles": [
+            "824178001",
+            "934135001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "bodysuit"
+        }
+    },
+    {
+        "customer_id": "702ae6f3f3d19e1ca226127f032474aead6247fdd63fe252e5ab02d38de8517f",
+        "user_message": "I need a new trousers. I like dark blue.",
+        "ground_truth_articles": [
+            "904017002",
+            "903320001",
+            "884448001",
+            "728156028",
+            "886966002",
+            "886966002",
+            "486639003",
+            "903004003",
+            "903004003",
+            "815808005",
+            "815808005"
+        ],
+        "metadata_used": {
+            "color": "dark blue",
+            "type": "trousers"
+        }
+    },
+    {
+        "customer_id": "675491ba050dd7094274989e7d081e96240b4624088bf4555596e930426e20e4",
+        "user_message": "Could you recommend a light beige jacket?",
+        "ground_truth_articles": [
+            "899122001"
+        ],
+        "metadata_used": {
+            "color": "light beige",
+            "type": "jacket"
+        }
+    },
+    {
+        "customer_id": "0bf4c6fd4e9d33f9bfb807bb78348cbf5c565846ff4006acf5c1b9aea77b0e54",
+        "user_message": "Show me some options for a blouse, preferably light orange.",
+        "ground_truth_articles": [
+            "930380001",
+            "915611004",
+            "915611004"
+        ],
+        "metadata_used": {
+            "color": "light orange",
+            "type": "blouse"
+        }
+    },
+    {
+        "customer_id": "048962db9aca38ca4b98c70880a44b60f12562c8d4df5e34457401c14ec0dcbe",
+        "user_message": "I am looking for a black trousers.",
+        "ground_truth_articles": [
+            "920972002",
+            "572998007",
+            "572998007",
+            "714790028",
+            "714790028",
+            "714790024",
+            "714790008",
+            "714790028",
+            "714790028",
+            "714790024",
+            "448509031",
+            "697564057",
+            "697564057",
+            "906639004",
+            "714790024",
+            "864014001",
+            "697564010",
+            "714790030",
+            "714790030"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "trousers"
+        }
+    },
+    {
+        "customer_id": "3e8272741c39b3579424da34b2c8b752d2cce5010774d52eb0eee7ce81f6103e",
+        "user_message": "Do you have any black dresss?",
+        "ground_truth_articles": [
+            "928171001",
+            "885315001",
+            "902980003",
+            "914118001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "dress"
+        }
+    },
+    {
+        "customer_id": "e0c18188150a1b6cf8b54f407c50a63989d7183d3c2ef8cc86acd4ddde5b06bd",
+        "user_message": "I need a new leggings/tights. I like black.",
+        "ground_truth_articles": [
+            "305931001",
+            "875948001",
+            "552716001",
+            "786542001",
+            "776179001",
+            "825600002",
+            "908584001",
+            "889000002",
+            "902163001",
+            "921298001",
+            "736049001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "leggings/tights"
+        }
+    },
+    {
+        "customer_id": "47275783ff84445cf7e257c73031f31813c0c8e8e17e18351661d5136dcd0863",
+        "user_message": "Show me some options for a blouse, preferably black.",
+        "ground_truth_articles": [
+            "936012003",
+            "871527004",
+            "904820004",
+            "865929002",
+            "844135004",
+            "760296001",
+            "824526001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "blouse"
+        }
+    },
+    {
+        "customer_id": "ae414fa70eb3c2ae0ec1640bbdf588531c8d034dfc5c06000e19601be6cd34fd",
+        "user_message": "Show me some options for a dress, preferably off white.",
+        "ground_truth_articles": [
+            "909370001",
+            "889616001",
+            "573085057",
+            "573085057",
+            "573085057",
+            "889616001",
+            "889616001",
+            "673396015",
+            "673396015",
+            "759465001",
+            "759465001"
+        ],
+        "metadata_used": {
+            "color": "off white",
+            "type": "dress"
+        }
+    },
+    {
+        "customer_id": "4f87d704f19950321715b90f5c41bcee9b19a8a6c4f31fa52970aaea75e3c57e",
+        "user_message": "Do you have any white blouses?",
+        "ground_truth_articles": [
+            "871527002",
+            "874891001",
+            "924243002",
+            "924243002",
+            "784001001",
+            "784001005",
+            "784001005"
+        ],
+        "metadata_used": {
+            "color": "white",
+            "type": "blouse"
+        }
+    },
+    {
+        "customer_id": "1f09f1593c106b2b171e201a79e922f83ddacfdb690a0d8d382c2b7d03d0a5cb",
+        "user_message": "Do you have any beige bras?",
+        "ground_truth_articles": [
+            "924040001",
+            "892318001"
+        ],
+        "metadata_used": {
+            "color": "beige",
+            "type": "bra"
+        }
+    },
+    {
+        "customer_id": "0d4fb6fb46dfe2759bcf7bc80340e8915b207aa2f74b5b3c76f74d3ce28359e8",
+        "user_message": "Show me some options for a dress, preferably black.",
+        "ground_truth_articles": [
+            "935541001",
+            "918645001",
+            "939492001",
+            "889550002",
+            "888571002",
+            "932798002",
+            "939503001",
+            "857896001",
+            "918645001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "dress"
+        }
+    },
+    {
+        "customer_id": "a8d14751a68b4cab69fed60b169c03c5d62f1c8b73fb1c039f7a256e54fd2377",
+        "user_message": "I am looking for a black leggings/tights.",
+        "ground_truth_articles": [
+            "864562001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "leggings/tights"
+        }
+    },
+    {
+        "customer_id": "cd04ec2726dd58a8c753e0d6423e57716fd9ebcf2f14ed6012e7e5bea016b4d6",
+        "user_message": "I am looking for a gold ring.",
+        "ground_truth_articles": [
+            "928995001",
+            "911700001",
+            "748853001",
+            "931070001",
+            "888455003",
+            "918591001",
+            "922309001",
+            "861498002",
+            "905852001",
+            "897464003",
+            "906258005",
+            "924142001",
+            "923340001",
+            "936990001"
+        ],
+        "metadata_used": {
+            "color": "gold",
+            "type": "ring"
+        }
+    },
+    {
+        "customer_id": "5b9162256d6e071146a9ce951991e707272f9f97ffe0e41912318c86667952d3",
+        "user_message": "I need a new leggings/tights. I like black.",
+        "ground_truth_articles": [
+            "864562001",
+            "913033002",
+            "913033002",
+            "719530014",
+            "870328003",
+            "870328003",
+            "912100001",
+            "912100001",
+            "733803001",
+            "733803001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "leggings/tights"
+        }
+    },
+    {
+        "customer_id": "d693e4e0a283d849c93a4a1e1df223369bcb2952e23f396f07818ab21325c08e",
+        "user_message": "I am looking for a light blue trousers.",
+        "ground_truth_articles": [
+            "714790008",
+            "826701001",
+            "448509014",
+            "448509014",
+            "870528005",
+            "919365003",
+            "919365003",
+            "448509035",
+            "448509035"
+        ],
+        "metadata_used": {
+            "color": "light blue",
+            "type": "trousers"
+        }
+    },
+    {
+        "customer_id": "e34f8aa5e7c8c258523ea3e5f5f13168b6c21a9e8bffccd515dd5cef56126efb",
+        "user_message": "Show me some options for a trousers, preferably dark beige.",
+        "ground_truth_articles": [
+            "816521004",
+            "865624003",
+            "865624003",
+            "906909001",
+            "906909001",
+            "844116001",
+            "876296001",
+            "816521004"
+        ],
+        "metadata_used": {
+            "color": "dark beige",
+            "type": "trousers"
+        }
+    },
+    {
+        "customer_id": "aca6da799b537fe4c951a32d815243e51bf9c106b522720dbde8aabb3ba441da",
+        "user_message": "Show me some options for a sweater, preferably dark blue.",
+        "ground_truth_articles": [
+            "685813018",
+            "715255013",
+            "669091003",
+            "624684008",
+            "742258028",
+            "715255012",
+            "751994007",
+            "898045001",
+            "906653001",
+            "685813042",
+            "685813039",
+            "578626020",
+            "742258037",
+            "685813001",
+            "751994014"
+        ],
+        "metadata_used": {
+            "color": "dark blue",
+            "type": "sweater"
+        }
+    },
+    {
+        "customer_id": "7a859c4f0a3aeea904d8436153f3f6c4eebf2e99b485c6c6f89877d6797eec98",
+        "user_message": "Could you recommend a black sweater?",
+        "ground_truth_articles": [
+            "870578003",
+            "929165002",
+            "918525001",
+            "850917001",
+            "850917001",
+            "850917001",
+            "850917001",
+            "850917001",
+            "850917001",
+            "915453002",
+            "889036004",
+            "889036004",
+            "903096002"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "sweater"
+        }
+    },
+    {
+        "customer_id": "01a4717d38b651e46dda7f1ab8d1494af2682a847fa9a52a8f9ab1a09acd0294",
+        "user_message": "Show me some options for a bra, preferably light purple.",
+        "ground_truth_articles": [
+            "835704008",
+            "835704008",
+            "888570001",
+            "888570001",
+            "888570001",
+            "614854005",
+            "841185005",
+            "841185005"
+        ],
+        "metadata_used": {
+            "color": "light purple",
+            "type": "bra"
+        }
+    },
+    {
+        "customer_id": "9f12a01e2982f70a820b5dd61528bf769b94c5c5e43b23704f1f654784bcda58",
+        "user_message": "I am looking for a yellowish brown hat/brim.",
+        "ground_truth_articles": [
+            "883719001",
+            "858731001",
+            "858731001",
+            "636505001",
+            "636505001",
+            "188183001",
+            "837278001",
+            "837278001",
+            "593049001"
+        ],
+        "metadata_used": {
+            "color": "yellowish brown",
+            "type": "hat/brim"
+        }
+    },
+    {
+        "customer_id": "4043fdbe22eb397206dabf520d2d88651179724ac19ccf6e69efadfd3da530b6",
+        "user_message": "I need a new shorts. I like black.",
+        "ground_truth_articles": [
+            "895346001",
+            "895346005",
+            "794971001"
+        ],
+        "metadata_used": {
+            "color": "black",
+            "type": "shorts"
+        }
+    },
+    {
+        "customer_id": "58388c01c7fded48c321e36282daf9c1e02da9f44ee9ca842e38205b1bd9097b",
+        "user_message": "Could you recommend a gold hair clip?",
+        "ground_truth_articles": [
+            "897818001"
+        ],
+        "metadata_used": {
+            "color": "gold",
+            "type": "hair clip"
+        }
+    },
+    {
+        "customer_id": "9facc7e5247374694a2cffe333d373abcb00545564326c3f78812d7d2e214e5c",
+        "user_message": "I am looking for a pink shirt.",
+        "ground_truth_articles": [
+            "898107001",
+            "897189002",
+            "935694002",
+            "921906005",
+            "867969003",
+            "884319009",
+            "935694003",
+            "872537006",
+            "904999001",
+            "570189002",
+            "908728003",
+            "867966009",
+            "867966009",
+            "897189003",
+            "871519008",
+            "828912004",
+            "909081001",
+            "932383001",
+            "728156028"
+        ],
+        "metadata_used": {
+            "color": "pink",
+            "type": "shirt"
+        }
+    },
+    {
+        "customer_id": "3407a4913c66700644a6ab93df65fff6f22cffc39e569eac501ff87957f4f8ec",
+        "user_message": "I need a new sweater. I like dark grey.",
+        "ground_truth_articles": [
+            "873279002",
+            "934053001",
+            "866731001",
+            "866731001",
+            "866731001",
+            "866731001",
+            "873279005",
+            "909592001",
+            "909592002",
+            "893432002",
+            "852584001",
+            "852584001",
+            "715099007",
+            "816598018"
+        ],
+        "metadata_used": {
+            "color": "dark grey",
+            "type": "sweater"
+        }
+    },
+    {
+        "customer_id": "3ad1936f7d8867a9c7c447400c0db5f294fdf262f719af2bd5801dacb5424a67",
+        "user_message": "I am looking for a dark grey trousers.",
+        "ground_truth_articles": [
+            "909059001",
+            "909059002",
+            "873132004",
+            "921679001",
+            "924926003",
+            "909059001",
+            "897108001",
+            "861469002",
+            "864562005",
+            "918835003"
+        ],
+        "metadata_used": {
+            "color": "dark grey",
+            "type": "trousers"
+        }
+    },
+    {
+        "customer_id": "326b5dc3f8ec5d55994ec948dcd3438b89a7ad14821e08d07faf26551201d417",
+        "user_message": "Could you recommend a green skirt?",
+        "ground_truth_articles": [
+            "876740002",
+            "809238001",
+            "881942001",
+            "766495009",
+            "880481001",
+            "863980001"
+        ],
+        "metadata_used": {
+            "color": "green",
+            "type": "skirt"
+        }
+    }
+]
