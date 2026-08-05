@@ -1,0 +1,205 @@
+{
+  "n_cases": 598,
+  "n_contradiction": 449,
+  "note": "v2_reported = verdicts that change the shipped response. v2_detected = every mismatch identified, including those deferred to the hallucination guard.",
+  "v2_reported": {
+    "metrics": {
+      "tp": 4,
+      "fp": 2,
+      "fn": 445,
+      "tn": 147,
+      "precision": 0.6667,
+      "recall": 0.0089,
+      "f1": 0.0176,
+      "specificity": 0.9866,
+      "balanced_accuracy": 0.4977,
+      "accuracy": 0.2525,
+      "precision_ci95": [
+        0.3,
+        0.9032
+      ],
+      "recall_ci95": [
+        0.0035,
+        0.0227
+      ],
+      "specificity_ci95": [
+        0.9524,
+        0.9963
+      ],
+      "f1_ci95": [
+        0.0043,
+        0.0358
+      ],
+      "balanced_accuracy_ci95": [
+        0.4862,
+        0.5067
+      ]
+    },
+    "recall_by_corruption": {
+      "colour_drift": {
+        "detected": 2,
+        "total": 96,
+        "recall": 0.0208
+      },
+      "cross_item_swap": {
+        "detected": 0,
+        "total": 62,
+        "recall": 0.0
+      },
+      "name_drift": {
+        "detected": 0,
+        "total": 106,
+        "recall": 0.0
+      },
+      "price_drift": {
+        "detected": 0,
+        "total": 101,
+        "recall": 0.0
+      },
+      "type_drift": {
+        "detected": 2,
+        "total": 84,
+        "recall": 0.0238
+      }
+    },
+    "recall_by_distance": {
+      "0": {
+        "detected": 0,
+        "total": 202,
+        "recall": 0.0
+      },
+      "1": {
+        "detected": 0,
+        "total": 76,
+        "recall": 0.0
+      },
+      "2": {
+        "detected": 2,
+        "total": 50,
+        "recall": 0.04
+      },
+      "3+": {
+        "detected": 2,
+        "total": 121,
+        "recall": 0.0165
+      }
+    },
+    "false_alarms": {
+      "clean": {
+        "fp": 1,
+        "total": 84
+      },
+      "hard_negative": {
+        "fp": 1,
+        "total": 65
+      }
+    }
+  },
+  "v2_detected": {
+    "metrics": {
+      "tp": 411,
+      "fp": 10,
+      "fn": 38,
+      "tn": 139,
+      "precision": 0.9762,
+      "recall": 0.9154,
+      "f1": 0.9448,
+      "specificity": 0.9329,
+      "balanced_accuracy": 0.9241,
+      "accuracy": 0.9197,
+      "precision_ci95": [
+        0.9568,
+        0.987
+      ],
+      "recall_ci95": [
+        0.886,
+        0.9377
+      ],
+      "specificity_ci95": [
+        0.8809,
+        0.9631
+      ],
+      "f1_ci95": [
+        0.928,
+        0.9592
+      ],
+      "balanced_accuracy_ci95": [
+        0.8993,
+        0.9464
+      ]
+    },
+    "recall_by_corruption": {
+      "colour_drift": {
+        "detected": 93,
+        "total": 96,
+        "recall": 0.9688
+      },
+      "cross_item_swap": {
+        "detected": 50,
+        "total": 62,
+        "recall": 0.8065
+      },
+      "name_drift": {
+        "detected": 95,
+        "total": 106,
+        "recall": 0.8962
+      },
+      "price_drift": {
+        "detected": 98,
+        "total": 101,
+        "recall": 0.9703
+      },
+      "type_drift": {
+        "detected": 75,
+        "total": 84,
+        "recall": 0.8929
+      }
+    },
+    "recall_by_distance": {
+      "0": {
+        "detected": 185,
+        "total": 202,
+        "recall": 0.9158
+      },
+      "1": {
+        "detected": 63,
+        "total": 76,
+        "recall": 0.8289
+      },
+      "2": {
+        "detected": 47,
+        "total": 50,
+        "recall": 0.94
+      },
+      "3+": {
+        "detected": 116,
+        "total": 121,
+        "recall": 0.9587
+      }
+    },
+    "false_alarms": {
+      "clean": {
+        "fp": 6,
+        "total": 84
+      },
+      "hard_negative": {
+        "fp": 4,
+        "total": 65
+      }
+    }
+  },
+  "ownership": {
+    "contradiction_cases": 449,
+    "detected": 411,
+    "deferred_to_guard": 407,
+    "reported_by_v2": 4,
+    "share_deferred": 0.9903
+  },
+  "correction": {
+    "user_facing_contradiction_rate_off": 1.0,
+    "user_facing_contradiction_rate_on": 0.9978,
+    "reported_rate": 0.0089,
+    "p_fix_given_reported": 0.25,
+    "collateral_damage_rate": 0.0134
+  }
+}

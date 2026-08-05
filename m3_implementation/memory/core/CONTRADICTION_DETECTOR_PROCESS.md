@@ -712,20 +712,418 @@ after:  [AssertionExtractor] vocab loaded: 21717 names, 49 colours, 115 types
 
 ---
 
-## 14. Note on the evaluation numbers
+## 14. Evaluation — how this is tested
 
-The submitted report's Tables 15/16 describe the **old** detector, whose
-comparison was `response vs current evidence`. On the existing labelled test set
-the new detector will score **lower**, because every case in that set is a
-same-turn evidence mismatch that the new design deliberately hands to the
-hallucination guard.
+Results live in `test_result/contradiction_result_v2/`.
+The v1 results reported in the final report are in
+`test_result/contradiction_result/` and are **never written to** — the v2 runner
+only reads its test set.
 
-To compare fairly, `test_result/contradiction_result/corrupt_sessions.py` needs
-two additional corruption types:
+### 14.1 The question being answered
 
-- **`stale_carry`** — evidence silent this turn; the response repeats a value
-  that has since changed
-- **`db_revision`** — the catalogue value changed between turns
+> **"When the assistant says something that conflicts with what it already told
+> this user, does the detector catch it — and is it better than the obvious
+> alternatives?"**
 
-That produces a v1 → v2 progression slide, the same pattern the report already
-uses for the hallucination checker in Table 14.
+Both halves matter: *catch it* is measured as a classification problem, *better
+than the alternatives* is measured against four baselines on identical cases.
+
+### 14.2 Why we built our own test set
+
+No public benchmark provides what this component consumes.
+
+| Dataset | Why it doesn't fit |
+|---|---|
+| HaluEval | QA and summarisation — no product evidence, no multi-turn state |
+| DECODE | human dialogue contradictions — what *users* say, not what a *system* claims about catalogue items |
+| ReDial / SIMMC | conversational recommendation, but no annotated contradictions |
+
+The detector needs **(structured catalogue evidence, generated response)** pairs
+across turns of one session. Nothing off the shelf has that, so the test set is
+built from our own system's real output by deliberately damaging correct answers
+— the standard method in this literature (FactCC, HaluEval), extended to the
+multi-turn setting.
+
+### 14.3 Three stages
+
+```
+  STAGE 1                 STAGE 2                    STAGE 3
+  Collect                 Corrupt                    Score
+  ────────                ────────                   ────────
+  run real                break exactly one          run every detector
+  conversations     →     fact per copy        →     over every case,
+  through the live                                   compare to the
+  pipeline                                           known answer
+
+  captured_sessions       labeled_test_set           results + figures
+  .jsonl                  .jsonl  (1,346 cases)
+```
+
+### 14.4 Stage 1 — collecting real conversations
+
+`../../test_result/contradiction_result/collect_sessions.py` → `captured_sessions.jsonl`
+
+Scripted multi-turn conversations are pushed through the **complete live
+pipeline** — memory → CSE → evidence assembler → LLM → hallucination guard →
+contradiction detector — exactly as if a person had typed them. Full stack
+running: MongoDB, Redis, PostgreSQL, Qdrant, LLM.
+
+These are **not** hand-written examples. They are genuine system outputs, so the
+phrasing, formatting quirks and evidence bundles are all real.
+
+Conversations run 5–7 turns and keep **returning to products introduced in turn
+1**. That is deliberate: the same product gets re-mentioned 1, 2, 3, 4+ turns
+after its facts entered the session. Without it every case would be same-turn and
+the cross-turn axis would not exist. Some sessions also run a mid-session second
+search, so the session holds products introduced at different times.
+
+Each captured record stores:
+
+| Field | What it is | Why it is needed |
+|---|---|---|
+| `response_text` | what the assistant actually said | the thing to be corrupted |
+| `product_refs` | that turn's evidence bundle — the **ground truth** | gives the true values |
+| `graph_before` | products established on **earlier** turns | lets turn distance be computed |
+| `turn_ordinal` | this turn's position in the session | ditto |
+| `action`, `session_id`, `turn_id` | context | grouping and replay |
+
+Capture is done by a hook inside the detector itself, switched on with
+`CONTRA_EVAL_CAPTURE=1`, and is a no-op otherwise.
+
+### 14.5 Stage 2 — building the labelled test set
+
+`../../test_result/contradiction_result/corrupt_sessions.py` → `labeled_test_set.jsonl`
+
+The idea in one line:
+
+> Take a response that was **correct**, change **exactly one fact**, leave the
+> evidence untouched. The copy is now wrong *by construction* — so the right
+> answer is known without anyone labelling by hand.
+
+**The three labels** — 1,346 cases total:
+
+| Label | Count | Detector should |
+|---|---|---|
+| `contradiction` | **1,013** | flag it |
+| `clean` | **188** | stay silent (untouched original response) |
+| `hard_negative` | **145** | stay silent (benign rewording) |
+
+`clean` + `hard_negative` form the negative class. They produce the false-alarm
+and precision numbers — without them, a detector that flags everything would
+score perfectly.
+
+**The five corruption types:**
+
+**1. `colour_drift`** — colour swapped for a different one.
+```
+before:  Option 1: London dress, Black, £11.08, ...
+after:   Option 1: London dress, Grey,  £11.08, ...
+```
+The replacement is chosen so it is not a near-synonym and is not a colour already
+used elsewhere in that session.
+
+**2. `price_drift`** — the £ amount is changed.
+```
+before:  ... £11.08 ...        after:  ... £13.58 ...
+```
+
+**3. `name_drift`** — renamed to a *different real catalogue product*.
+```
+before:  Option 2: Charlotte lowback bra, Black, £17.78, ...
+after:   Option 2: Cardigan Butler,       Black, £17.78, ...
+```
+Using a real catalogue name matters — an invented one would be too easy.
+
+**4. `type_drift`** — garment type changed to a genuinely different one, never a
+subtype.
+```
+before:  This Dress has a patterned viscose weave ...
+after:   This Jacket has a patterned viscose weave ...
+```
+
+**5. `cross_item_swap`** — two products **exchange** a value.
+```
+before:  Option 1: London dress, Black, ...   Option 2: Sonoma shorts, Red,   ...
+after:   Option 1: London dress, Red,   ...   Option 2: Sonoma shorts, Black, ...
+```
+The hardest and most interesting case: **both values are still correct values in
+the evidence** — only the *association* is wrong. A detector that merely asks
+"does this value exist somewhere?" cannot see it at all.
+
+**Hard negatives — the trap.** A catalogue term is replaced by a legitimate, more
+specific rendering of the same thing:
+
+```
+"Dress" → "maxi dress"      "Bra"  → "sports bra"
+"Skirt" → "a-line skirt"    "Coat" → "winter coat"
+```
+
+These are **not** contradictions — the assistant is allowed to say them. They
+exist to punish any detector that flags on surface difference alone, which is
+exactly what the `string_only` ablation does, and it shows in its score.
+
+**Turn distance — the cross-turn axis:**
+
+```
+d = this turn's ordinal − the turn where that product first entered the session
+```
+
+| d | Meaning |
+|---|---|
+| **0** | product introduced this same turn — a same-turn error |
+| **1, 2, 3+** | truth set 1, 2, 3+ turns ago — only session memory can catch it |
+
+Distribution in the evaluated sample: `d=0: 202 · d=1: 76 · d=2: 50 · d≥3: 121`.
+
+**Reproducible.** Fixed seed (`SEED = 42`); the same captured input always
+produces byte-identical output.
+
+### 14.6 Stage 3 — running the detectors
+
+Every system reads the same case and answers one yes/no question:
+
+> *"Does this response contradict what is established about these products?"*
+
+That boolean is compared with the label. Same cases, same labels, same scoring
+code for everyone.
+
+**On sampling.** v1 was scored on a **stratified sample of 599 cases**, not all
+1,346, because it made one Groq call per case and could not cover the full set
+within the free tier's daily budget. The sample preserves label × corruption type
+× distance-bucket proportions, seed 123.
+
+v2 needs no LLM call and can run everything — but a number from 1,346 cases must
+not be printed beside one from 599. So v2 runs twice:
+
+| Run | Cases | Purpose |
+|---|---|---|
+| `sample599/` | 598 | like-for-like comparison against v1 |
+| folder root | 1,346 | v2's own numbers on the complete set |
+
+598 vs 599 is a one-case rounding difference in the per-stratum allocation, not a
+different procedure.
+
+### 14.7 The baselines — what they are and why each exists
+
+Four comparison systems, each closing off a specific objection.
+
+---
+
+**Baseline 1 — `string_only` (our own ablation)**
+
+*What:* our detector with the DeBERTa gate **removed**; value comparison decides
+alone.
+*How:* extract the stated value, compare to the known value, flag if the strings
+differ.
+*Objection it answers:* **"Do you actually need an NLI model?"**
+*Result:* precision 0.844, balanced accuracy 0.690 — it flags **71 of 149**
+negatives, because `"Dress" ≠ "maxi dress"` as a string. This is the clearest
+single justification for the NLI gate.
+
+---
+
+**Baseline 2 — `history_nli` (unstructured NLI)**
+
+*What:* the obvious approach from summarisation-consistency work (SummaC, DECODE
+family).
+*How:*
+1. serialise everything known about the session into fact sentences —
+   *"The London dress is Black in colour."*
+2. split the response into sentences
+3. run DeBERTa on **every (fact, sentence) pair**
+4. flag if **any** pair scores contradiction
+
+*Objection it answers:* **"Why not just point an NLI model at the whole history?"**
+*Result:* recall 0.958 — the highest of any system — but balanced accuracy
+**0.533**, barely above chance. It flags **133 of 149** negatives. It catches
+almost everything because it flags almost everything; in production that means
+firing a correction on nearly every turn.
+
+---
+
+**Baseline 3 — `uttr_pair_nli` (structured NLI, Nie et al. 2021)**
+
+*What:* the published DECODE utterance-pair method for dialogue contradiction.
+*How:* as above, but a fact is paired **only** with sentences in which that
+product's name appears — far fewer, more targeted comparisons.
+*Objection it answers:* **"Isn't this already solved by DECODE?"**
+*Result:* more disciplined than unstructured NLI (121 false alarms vs 133) but
+balanced accuracy still 0.548. Pairing on the product name is not enough
+structure when several products are discussed together.
+
+---
+
+**Baseline 4 — `llm_judge` (just ask an LLM)**
+
+*What:* hand the whole problem to Groq.
+*How:* the prompt receives the established facts and the response and returns
+`{"contradiction": true/false}`. Nothing else.
+*Objection it answers:* **"Why build any of this — why not just ask GPT?"**
+*Result:* the strongest baseline — precision 0.957, recall 0.850, balanced
+accuracy 0.867. Genuinely good. But it costs an LLM call per turn, is
+non-deterministic, gives no auditable reason, and cannot say *which* earlier turn
+was contradicted.
+
+---
+
+> **The baselines were computed once, during v1's evaluation, and are reused
+> verbatim.** They do not depend on our detector, so re-running them could only
+> perturb numbers already printed in the report. v2's runner reads them straight
+> out of v1's results file.
+
+### 14.8 How scoring works
+
+Each system produces one boolean per case, which lands in one of four boxes:
+
+| | label = contradiction | label = clean/benign |
+|---|---|---|
+| **flagged** | **TP** correct catch | **FP** false alarm |
+| **silent** | **FN** missed | **TN** correctly silent |
+
+| Metric | Formula | In plain words |
+|---|---|---|
+| **Precision** | TP/(TP+FP) | *of everything it flagged, how much was really wrong* |
+| **Recall** | TP/(TP+FN) | *of everything really wrong, how much did it find* |
+| **F1** | harmonic mean | one number balancing the two |
+| **Specificity** | TN/(TN+FP) | *how well it leaves correct answers alone* |
+| **Balanced accuracy** | (Recall+Specificity)/2 | the honest headline |
+
+**Why balanced accuracy is the number to read.** 75% of cases are
+contradictions, so a system that flags **everything** scores recall 1.00 and is
+useless. Balanced accuracy averages performance on both classes:
+
+| System | Recall | Bal. acc. | What really happened |
+|---|---|---|---|
+| history_nli | **0.958** | **0.533** | flags 133/149 negatives — near chance once both sides count |
+| v2 detected | 0.915 | **0.924** | high recall *and* leaves correct answers alone |
+
+Recall alone would have ranked the worst system first.
+
+**Confidence intervals.** `compute_metrics` also returns 95% intervals — Wilson
+for the proportion metrics, bootstrap (2,000 seeded resamples) for F1 and
+balanced accuracy — so extreme values on small samples are never reported bare.
+
+**Two extra breakdowns:** recall by corruption type (is it weak on one kind of
+error?) and recall by turn distance (the signature cross-turn view — if recall
+collapsed at `d≥1`, the memory would not be doing anything).
+
+### 14.9 Results
+
+Like-for-like, v1's stratified sample, same metric code:
+
+| System | Precision | Recall | F1 | Bal. acc. |
+|---|---|---|---|---|
+| **v2 detected** | 0.976 | **0.915** | **0.945** | **0.924** |
+| v1 ours (graph+NLI) | 0.983 | 0.773 | 0.866 | 0.867 |
+| v1 llm_judge | 0.957 | 0.850 | 0.900 | 0.867 |
+| v1 string_only | 0.844 | 0.856 | 0.850 | 0.690 |
+| v1 history_nli | 0.764 | 0.958 | 0.850 | 0.533 |
+| v1 uttr_pair_nli | 0.772 | 0.909 | 0.835 | 0.548 |
+
+**Two measured quantities, because v2 splits ownership:**
+
+| | Meaning | On this test set |
+|---|---|---|
+| `v2 detected` | every mismatch identified, including deferred ones | 411 / 449 |
+| `v2 reported` | only verdicts that change what the user sees | 4 |
+| deferred to the guard | | **407 — 99.0% of detections** |
+
+`v2 reported` is deliberately **not** in the table above: every row there answers
+*"did the system find the mismatch?"*, whereas reporting answers *"did it rewrite
+the text?"*. Placed beside detection bars it reads as failure rather than as the
+deliberate hand-off it is. Both metrics are kept in full in
+`results_v2_eval.json`.
+
+**Reading it:** detection improved (+14.2 pts recall, +7.9 pts F1 over v1, for
+−0.7 pts precision) **with no LLM call at all**, where v1 needed one paced Groq
+request per case. And 99% of what v2 detects it hands to the hallucination guard
+— that figure is the double-counting v1's recall contained, quantified.
+
+Recall by turn distance (v2 detected): `d=0: 0.92 · d=1: 0.83 · d=2: 0.94 ·
+d≥3: 0.96` — detection does not decay with distance.
+
+**Where DeBERTa actually participates.** On this test set, barely. Every case
+leaves the evidence correct, so `is_guarded` is true and the verdict is `defer`
+— reached *before* NLI. The 0.915 recall comes overwhelmingly from deterministic
+value comparison, not from DeBERTa. v1's row was legitimately "graph + NLI";
+v2's is closer to "ledger + deterministic comparison", with NLI held for the
+categorical drift path. Worth stating plainly, because it cuts both ways: the
+recall improvement is **not** attributable to better NLI use — it comes from
+better extraction and attribution.
+
+### 14.10 What this test set cannot test
+
+**Catalogue revisions are not covered.** Every case corrupts the *response* while
+leaving evidence and database correct. Nothing here ever changes a price or
+colour mid-session, so the capability with no baseline in the literature review
+scores nothing — because the test set never exercises it. Demonstrated live
+(§6, §10), not yet quantified.
+
+Closing that gap needs two more corruption types, both constructible from the
+existing captured records:
+
+| New type | What it would simulate |
+|---|---|
+| `stale_carry` | evidence silent this turn; the response repeats a value that has since changed |
+| `db_revision` | the catalogue value changes between two turns |
+
+**Synthetic corruption is not identical to real model drift.** A genuine LLM
+mistake may look different from a scripted find-and-replace. That is the standard
+FactCC/HaluEval trade-off: perfect labels in exchange for slightly artificial
+errors. The `clean` cases are real, unmodified system output, which partly
+offsets it.
+
+**No live database read during scoring.** Offline, `truth_is_live` is False
+throughout, so the anchor falls to the prior assertion or session context, never
+to `live_evidence`. That matches behaviour when re-verification is unavailable
+and keeps scoring deterministic.
+
+### 14.11 Running it
+
+```bash
+# from m3_implementation/
+
+# Stage 1 — collect (needs the full stack; slow)
+python test_result/contradiction_result/collect_sessions.py
+
+# Stage 2 — build the labelled test set (seeded, instant)
+python test_result/contradiction_result/corrupt_sessions.py
+
+# Stage 3 — score v2 like-for-like with v1
+python test_result/contradiction_result_v2/run_v2_eval.py \
+       --sample 599 --out-dir test_result/contradiction_result_v2/sample599
+
+# Stage 3b — score v2 on the complete set
+python test_result/contradiction_result_v2/run_v2_eval.py
+
+# Figures
+python test_result/contradiction_result_v2/make_v2_figures.py
+
+# Inspect one case in detail
+python test_result/contradiction_result_v2/run_v2_eval.py --debug-case ccase_0008
+```
+
+Stages 1 and 2 are **already done** — their outputs are committed. Only Stage 3
+is needed unless the data is being rebuilt from scratch. v2's scoring needs no
+Groq key, no MongoDB, no PostgreSQL, and finishes in a couple of minutes.
+
+### 14.12 A production bug this evaluation found
+
+The first full run scored badly for reasons unrelated to the detector.
+`_load_vocabularies()` in `assertion_extractor.py` resolved the articles CSV from
+a path assembled out of module `__file__`s; under the evaluation's import chain
+it accumulated enough `..` segments to fail to open. The loader caught the error,
+printed a quiet note, and returned **empty** vocabularies — silently disabling
+colour and product-type extraction while everything appeared to run normally.
+
+Fixed by normalising the path, falling back to a search rooted at the module, and
+making the failure a loud warning instead of a footnote. The same loader backs
+the hallucination guard's name gate, so the fix protects both.
+
+### 14.13 Note on the report's printed numbers
+
+Tables 15/16 in the submitted report describe the **v1** detector, whose
+comparison was `response vs current evidence`. Those numbers are not restated as
+v2's — v2 is measured separately, on the same data, and reported alongside. The
+v1 files are untouched: `labeled_test_set.jsonl` was written 2026-07-12 14:17 and
+v1's results at 21:45 the same day, and nothing since has modified either.
