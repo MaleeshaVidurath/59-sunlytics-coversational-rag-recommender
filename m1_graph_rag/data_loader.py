@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 
-# 1. Define the path to your shared data folder
+# 1. Define the path to the shared data folder
 # Step UP one level from m1_graph_rag to the root, then DOWN into shared/main_data_set
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "../shared/main_data_set")

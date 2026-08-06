@@ -1,0 +1,242 @@
+[
+    {
+        "test_id": "hallucination_13",
+        "premise": "Item_101 \u2794 HAS_COLOUR \u2794 blue.",
+        "hypothesis": "This yellow top will look great on you.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_19",
+        "premise": "Item_202 \u2794 HAS_PATTERN \u2794 striped.",
+        "hypothesis": "I found this striped option for you.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "clean_13",
+        "premise": "Item_101 \u2794 HAS_COLOUR \u2794 red. Item_101 \u2794 BELONGS_TO_TYPE \u2794 dress.",
+        "hypothesis": "This red dress is exactly what you asked for.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_11",
+        "premise": "Item_456 \u2794 BELONGS_TO_TYPE \u2794 trousers.",
+        "hypothesis": "This is a wonderful summer dress.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_16",
+        "premise": "Item_456 \u2794 BELONGS_TO_TYPE \u2794 sweater.",
+        "hypothesis": "This item is a cozy sweater.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_14",
+        "premise": "User \u2794 HAS_PREFERENCE \u2794 cotton.",
+        "hypothesis": "I selected this because it is made of 100% pure silk.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "hallucination_15",
+        "premise": "Item_123 \u2794 HAS_COLOUR \u2794 black.",
+        "hypothesis": "I recommend Item_123 because it is a beautiful bright red color.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_18",
+        "premise": "Item_101 \u2794 HAS_COLOUR \u2794 red. Item_101 \u2794 BELONGS_TO_TYPE \u2794 dress.",
+        "hypothesis": "This red dress is exactly what you asked for.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_5",
+        "premise": "Item_123 \u2794 HAS_COLOUR \u2794 black.",
+        "hypothesis": "I recommend Item_123 because it is a beautiful bright red color.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_14",
+        "premise": "Item_202 \u2794 HAS_PATTERN \u2794 striped.",
+        "hypothesis": "I found this striped option for you.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_0",
+        "premise": "Item_123 \u2794 HAS_COLOUR \u2794 black.",
+        "hypothesis": "I recommend Item_123 because it is a beautiful bright red color.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_6",
+        "premise": "Item_456 \u2794 BELONGS_TO_TYPE \u2794 sweater.",
+        "hypothesis": "This item is a cozy sweater.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "clean_2",
+        "premise": "User \u2794 BOUGHT \u2794 Item_789 (shirt).",
+        "hypothesis": "Based on your previous purchase of a shirt, you might like this.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_1",
+        "premise": "Item_456 \u2794 BELONGS_TO_TYPE \u2794 trousers.",
+        "hypothesis": "This is a wonderful summer dress.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "hallucination_16",
+        "premise": "Item_456 \u2794 BELONGS_TO_TYPE \u2794 trousers.",
+        "hypothesis": "This is a wonderful summer dress.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_0",
+        "premise": "User \u2794 HAS_PREFERENCE \u2794 black. Item_123 \u2794 HAS_COLOUR \u2794 black.",
+        "hypothesis": "I recommend Item_123 because it matches your preference for black.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "clean_17",
+        "premise": "User \u2794 BOUGHT \u2794 Item_789 (shirt).",
+        "hypothesis": "Based on your previous purchase of a shirt, you might like this.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_18",
+        "premise": "Item_101 \u2794 HAS_COLOUR \u2794 blue.",
+        "hypothesis": "This yellow top will look great on you.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_10",
+        "premise": "User \u2794 HAS_PREFERENCE \u2794 black. Item_123 \u2794 HAS_COLOUR \u2794 black.",
+        "hypothesis": "I recommend Item_123 because it matches your preference for black.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "clean_15",
+        "premise": "User \u2794 HAS_PREFERENCE \u2794 black. Item_123 \u2794 HAS_COLOUR \u2794 black.",
+        "hypothesis": "I recommend Item_123 because it matches your preference for black.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "clean_1",
+        "premise": "Item_456 \u2794 BELONGS_TO_TYPE \u2794 sweater.",
+        "hypothesis": "This item is a cozy sweater.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_6",
+        "premise": "Item_456 \u2794 BELONGS_TO_TYPE \u2794 trousers.",
+        "hypothesis": "This is a wonderful summer dress.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_7",
+        "premise": "User \u2794 BOUGHT \u2794 Item_789 (shirt).",
+        "hypothesis": "Based on your previous purchase of a shirt, you might like this.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_12",
+        "premise": "Item_789 \u2794 HAS_PRICE \u2794 50.00.",
+        "hypothesis": "You should buy this because it is currently on sale for 10.00!",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "hallucination_9",
+        "premise": "User \u2794 HAS_PREFERENCE \u2794 cotton.",
+        "hypothesis": "I selected this because it is made of 100% pure silk.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "hallucination_10",
+        "premise": "Item_123 \u2794 HAS_COLOUR \u2794 black.",
+        "hypothesis": "I recommend Item_123 because it is a beautiful bright red color.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_5",
+        "premise": "User \u2794 HAS_PREFERENCE \u2794 black. Item_123 \u2794 HAS_COLOUR \u2794 black.",
+        "hypothesis": "I recommend Item_123 because it matches your preference for black.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_2",
+        "premise": "Item_789 \u2794 HAS_PRICE \u2794 50.00.",
+        "hypothesis": "You should buy this because it is currently on sale for 10.00!",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_8",
+        "premise": "Item_101 \u2794 HAS_COLOUR \u2794 red. Item_101 \u2794 BELONGS_TO_TYPE \u2794 dress.",
+        "hypothesis": "This red dress is exactly what you asked for.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_8",
+        "premise": "Item_101 \u2794 HAS_COLOUR \u2794 blue.",
+        "hypothesis": "This yellow top will look great on you.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "hallucination_17",
+        "premise": "Item_789 \u2794 HAS_PRICE \u2794 50.00.",
+        "hypothesis": "You should buy this because it is currently on sale for 10.00!",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "hallucination_19",
+        "premise": "User \u2794 HAS_PREFERENCE \u2794 cotton.",
+        "hypothesis": "I selected this because it is made of 100% pure silk.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_12",
+        "premise": "User \u2794 BOUGHT \u2794 Item_789 (shirt).",
+        "hypothesis": "Based on your previous purchase of a shirt, you might like this.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_3",
+        "premise": "Item_101 \u2794 HAS_COLOUR \u2794 blue.",
+        "hypothesis": "This yellow top will look great on you.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_9",
+        "premise": "Item_202 \u2794 HAS_PATTERN \u2794 striped.",
+        "hypothesis": "I found this striped option for you.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "clean_4",
+        "premise": "Item_202 \u2794 HAS_PATTERN \u2794 striped.",
+        "hypothesis": "I found this striped option for you.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_7",
+        "premise": "Item_789 \u2794 HAS_PRICE \u2794 50.00.",
+        "hypothesis": "You should buy this because it is currently on sale for 10.00!",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_3",
+        "premise": "Item_101 \u2794 HAS_COLOUR \u2794 red. Item_101 \u2794 BELONGS_TO_TYPE \u2794 dress.",
+        "hypothesis": "This red dress is exactly what you asked for.",
+        "ground_truth_label": "entailment"
+    },
+    {
+        "test_id": "hallucination_4",
+        "premise": "User \u2794 HAS_PREFERENCE \u2794 cotton.",
+        "hypothesis": "I selected this because it is made of 100% pure silk.",
+        "ground_truth_label": "contradiction"
+    },
+    {
+        "test_id": "clean_11",
+        "premise": "Item_456 \u2794 BELONGS_TO_TYPE \u2794 sweater.",
+        "hypothesis": "This item is a cozy sweater.",
+        "ground_truth_label": "entailment"
+    }
+]
