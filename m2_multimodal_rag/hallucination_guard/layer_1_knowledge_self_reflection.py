@@ -1,52 +1,25 @@
-"""
-Layer 1 — Knowledge-Grounded Self-Reflection.
-
-Reference: Ji et al. (2023), "Towards Mitigating LLM Hallucination via
-Self Reflection", Findings of ACL: EMNLP 2023 (2023.findings-emnlp.123).
-
-Three sub-loops from the paper, adapted to fashion product explanations:
-
-  Loop 1 — Factual Knowledge Acquisition
-    Generate background product knowledge from verified metadata.
-    Score it for factual consistency (1-10). Refine once if score < 6.
-    This anchors all downstream generation to verified facts.
-
-  Loop 2 — Knowledge-Consistent Answering
-    Score the LLM-generated explanation against the verified knowledge.
-    If score < 6, proactively regenerate before the visual guard sees it.
-
-  Loop 3 — Entailment Check
-    The self_evaluate score acts as a proxy entailment check:
-    a low score signals the explanation does not entail the product facts.
-"""
+import re
 
 from m2_multimodal_rag.llm_generator import llm_generator
 
+_SCORE_RE = re.compile(r"SCORE\s*:\s*(\d+)", re.IGNORECASE)
 
+
+# Implements Ji et al. (2023), "Towards Mitigating LLM Hallucination via
+# Self Reflection" (ACL Findings EMNLP 2023, 2023.findings-emnlp.123).
 class KnowledgeSelfReflector:
-    """
-    Implements the EMNLP 2023 three-loop self-reflection strategy for
-    fashion product explanations.
-
-    - generate_product_knowledge() → Loop 1: produce & validate factual knowledge
-    - self_evaluate()              → Loop 2 + 3: score explanation consistency
-                                     and entailment against verified knowledge
-    """
-
     # ------------------------------------------------------------------ #
     # Loop 1 — Factual Knowledge Acquisition
     # ------------------------------------------------------------------ #
     def generate_product_knowledge(self, metadata: dict) -> str:
-        """
-        Generates and validates factual background knowledge about the product.
-        Follows the generate → score → refine cycle from Ji et al. (2023).
-
-        Returns a verified knowledge string injected into the explanation
-        prompt as grounding context (Loop 1 output feeds into Loop 2 input).
-        """
+        # No LLM configured -> nothing to verify with. Fail open: the caller
+        # falls back to the pre-filter draft untouched.
         if not llm_generator.is_available:
             return ""
 
+        # Step 1: pull only catalog-verified fields (never model output) —
+        # this is the ground truth every later score in this file is
+        # measured against.
         colour      = metadata.get("colour_group_name", "")
         product_type = metadata.get("product_type_name", "")
         department  = metadata.get("department_name", "")
@@ -58,7 +31,12 @@ class KnowledgeSelfReflector:
             f"Department: {department} | Appearance: {appearance} | "
             f"Description: {detail_desc}"
         )
+        print(f"   [Layer 1 | Knowledge Loop] Verified facts: {meta_facts}")
 
+        # Step 2: generate — ask the LLM to restate the facts as prose.
+        # temperature=0.1 and "No recommendations yet" deliberately keep
+        # this factual/boring rather than persuasive, since persuasive
+        # writing is where models tend to invent unsupported detail.
         def _generate(facts: str) -> str:
             prompt = (
                 f"You are a fashion expert. Based on the verified product metadata "
@@ -70,6 +48,10 @@ class KnowledgeSelfReflector:
             )
             return llm_generator._call_llm(prompt, max_tokens=100, temperature=0.1) or ""
 
+        # Step 3: score — a SEPARATE LLM call fact-checks the generated
+        # knowledge against meta_facts (not the same call that wrote it).
+        # Any parse/API failure defaults to 7 (a pass) but logs it as
+        # UNVERIFIED so a genuine 7/10 isn't confused with "couldn't check".
         def _score(knowledge: str, facts: str) -> int:
             prompt = (
                 f"Score this product knowledge for factual consistency with the "
@@ -81,22 +63,28 @@ class KnowledgeSelfReflector:
             )
             result = llm_generator._call_llm(prompt, max_tokens=10, temperature=0.0)
             if not result:
+                print("   [Layer 1 | Knowledge Loop] Score UNVERIFIED (empty LLM "
+                      "response) — defaulting to pass (7/10).")
                 return 7
-            try:
-                line = next(
-                    (l for l in result.split("\n") if "SCORE" in l.upper()), "SCORE: 7"
-                )
-                return int(line.split(":", 1)[1].strip())
-            except Exception:
-                return 7
+            match = _SCORE_RE.search(result)
+            if match:
+                return int(match.group(1))
+            print(f"   [Layer 1 | Knowledge Loop] Score UNVERIFIED (could not parse "
+                  f"\"{result}\") — defaulting to pass (7/10).")
+            return 7
 
         knowledge = _generate(meta_facts)
         if not knowledge:
             return ""
+        print(f"   [Layer 1 | Knowledge Loop] Generated knowledge: \"{knowledge}\"")
 
         score = _score(knowledge, meta_facts)
         print(f"   [Layer 1 | Knowledge Loop] Factuality score: {score}/10")
 
+        # Step 4: refine — one corrective rewrite if the score fails the
+        # bar (6/10, same threshold used in self_evaluate() below). The
+        # rewrite is NOT re-scored, so this is a best-effort correction,
+        # not a guaranteed fix.
         if score < 6:
             print(f"   [Layer 1 | Knowledge Loop] Below threshold — refining...")
             refine_prompt = (
@@ -111,6 +99,9 @@ class KnowledgeSelfReflector:
                 knowledge = refined
                 print(f"   [Layer 1 | Knowledge Loop] Knowledge refined successfully.")
 
+        # This "knowledge" string is the deliverable of Loop 1: it becomes
+        # the grounding context the real explanation is generated from,
+        # and the self_evaluate() checks that explanation against.
         return knowledge
 
     # ------------------------------------------------------------------ #
@@ -120,15 +111,20 @@ class KnowledgeSelfReflector:
         self, explanation: str, metadata: dict, product_knowledge: str = ""
     ) -> tuple[bool, str]:
         """
-        Scores the explanation against verified product knowledge (Loop 2)
-        and checks entailment of product facts (Loop 3 proxy).
+        Scores the explanation for factual consistency with verified knowledge
+        (Loop 2) as a proxy entailment check (Loop 3).
 
-        Returns (passes: bool, feedback: str).
-        Score >= 6 → PASS. Score < 6 → FAIL → caller triggers regeneration.
+        Grounds against `product_knowledge` (Loop 1 output) when available,
+        else falls back to raw colour/type metadata.
         """
+        # Fail open: no LLM available means nothing can be checked, so this
+        # is treated as a pass rather than blocking the pipeline.
         if not llm_generator.is_available:
             return True, "Layer 1 self-evaluation skipped (LLM unavailable)."
 
+        # Ground truth for this check: prefer the Loop 1 knowledge string
+        # (richer), fall back to raw colour/type metadata if Loop 1 never
+        # ran (e.g. it returned "").
         grounding = (
             f"Verified product knowledge:\n{product_knowledge}"
             if product_knowledge
@@ -139,6 +135,8 @@ class KnowledgeSelfReflector:
             )
         )
 
+        # Loop 2 — Knowledge-Consistent Answering: score the explanation
+        # against `grounding` (the verified knowledge/facts above).
         prompt = (
             f"Evaluate this fashion recommendation explanation for quality.\n\n"
             f"{grounding}\n"
@@ -151,6 +149,9 @@ class KnowledgeSelfReflector:
             f"FEEDBACK: <one sentence>"
         )
 
+        # This is the actual gate: score the EXPLANATION (not the knowledge
+        # string) against grounding. Same fail-open pattern as _score()
+        # above — any failure here defaults to a pass, never a crash.
         result = llm_generator._call_llm(prompt, max_tokens=60, temperature=0.0)
         if not result:
             return True, "Layer 1 self-evaluation inconclusive. Passing."
@@ -163,6 +164,12 @@ class KnowledgeSelfReflector:
             score    = int(score_line.split(":", 1)[1].strip()) if score_line else 7
             feedback = feedback_line.split(":", 1)[1].strip() if feedback_line else "Quality acceptable."
 
+            # Loop 3 — Entailment Check (proxy): the same score doubles as
+            # the entailment signal — low score means the explanation does
+            # not entail the verified facts, not just that it scored poorly.
+            # >= 6 passes -> continues to Layer 2 (CoVe). < 6 fails -> the
+            # orchestrator (_stage_layer1 in regeneration_loop.py) does ONE
+            # regenerate call with `feedback`, and does not re-run this check.
             passes = score >= 6
             status = "PASS" if passes else "FAIL → proactive regeneration"
             print(f"   [Layer 1 | Self-Reflect] Score: {score}/10 — {status}")

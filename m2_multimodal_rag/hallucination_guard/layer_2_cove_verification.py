@@ -34,6 +34,11 @@ from m2_multimodal_rag.llm_generator import llm_generator
 _nli_model = None
 
 def _get_nli():
+    """
+    Lazily loads the DeBERTa NLI cross-encoder once and caches it in the
+    module-level singleton. If loading fails (e.g. model unavailable),
+    _nli_model stays None and callers fall back to a default PASS.
+    """
     global _nli_model
     if _nli_model is None:
         try:
@@ -90,6 +95,8 @@ class CoVeVerifier:
         if not result:
             return []
 
+        # Strip leading bullet/numbering characters (e.g. "1.", "-", "•")
+        # the LLM may prepend to each line, keeping only the question text.
         questions = [
             ln.strip("•-– 1234567890.").strip()
             for ln in result.strip().split("\n")
