@@ -4,6 +4,160 @@ from memory.db.mongo import get_db, get_collection_name
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
+# Attribute name → the wording used in the in-chat correction note.
+_ATTR_LABEL = {
+    "price":        "price",
+    "colour":       "colour",
+    "product_type": "product type",
+    "name":         "name",
+}
+
+
+async def _current_values(session_id: str) -> dict:
+    """
+    {(article_id, attribute): the value the catalogue holds NOW}, read from the
+    session's assertion ledger.
+
+    The ledger is the right source here rather than the notice history: its
+    `evidence_value` is updated on every factual turn, including revisions that
+    produced no notice because no earlier message had quoted the old value.
+    """
+    from memory.core.assertion_ledger import AssertionLedger, TRACKED_ATTRIBUTES
+
+    for prefix in ("m3", "m2", "m1"):
+        try:
+            ledger = await AssertionLedger.load(session_id, prefix)
+        except Exception:
+            continue
+        products = ledger.known_products()
+        if not products:
+            continue
+        out = {}
+        for product in products:
+            aid = str(product.get("article_id", ""))
+            for attribute in TRACKED_ATTRIBUTES:
+                value = product.get(attribute, "")
+                if value:
+                    out[(aid, attribute)] = value
+        return out
+    return {}
+
+
+async def _corrections_by_turn(db, session_id: str) -> dict:
+    """
+    Groups this session's revision notices by the assistant turn they affect.
+
+    A revision notice is raised when the catalogue value of an article changes
+    after the assistant has already quoted it. The earlier message was correct
+    when it was sent, so it is annotated rather than rewritten — the user sees
+    what changed and when, and the transcript stays an honest record of what was
+    actually said.
+
+    A NOTE IS NOT A REPLAY OF THE EVENT — IT IS A STATEMENT ABOUT NOW.
+      Each notice records one hop (Black → Green). Rendering hops verbatim goes
+      wrong as soon as a value moves more than once: change Black → Green, then
+      Green → Black, and the first message would still carry "changed to Green"
+      even though it is showing the correct value again.
+
+      So the note is rebuilt on every read from two things: what THAT turn
+      stated (the superseded value the notice was raised against) and what the
+      catalogue says NOW. When those agree the value has come back and the note
+      is dropped entirely — the message needs no annotation, because what it
+      said is true again.
+
+    Notices are searched across every member prefix because a session's model
+    lock decides which collection its memory was written to.
+    """
+    from memory.core.assertion_ledger import values_differ
+
+    current = await _current_values(session_id)
+    grouped: dict = {}
+
+    for prefix in ("m3", "m2", "m1"):
+        try:
+            coll = get_collection_name("revision_notices", prefix)
+            cursor = db[coll].find({"session_id": session_id}).sort("detected_at", 1)
+            async for notice in cursor:
+                attribute = notice.get("attribute", "")
+                article_id = str(notice.get("article_id", ""))
+
+                # What the affected turns actually said. The notice was raised
+                # against exactly this value, so it is what those messages show.
+                stated = notice.get("old_value", "")
+                # Fall back to the notice's own new_value only when the ledger
+                # could not be read at all.
+                now = current.get((article_id, attribute)) or notice.get("new_value", "")
+
+                if not values_differ(stated, now):
+                    continue   # back to what was said — nothing to annotate
+
+                entry = {
+                    "attribute":    attribute,
+                    "label":        _ATTR_LABEL.get(attribute, attribute),
+                    "product_name": notice.get("product_name", ""),
+                    "article_id":   article_id,
+                    "old_value":    stated,
+                    "new_value":    now,
+                    "detected_at":  str(notice.get("detected_at", "")),
+                }
+                for turn_id in notice.get("affected_turn_ids", []) or []:
+                    if turn_id:
+                        _merge_correction(grouped.setdefault(turn_id, []), entry)
+        except Exception as e:
+            print(f"[Sessions] revision notice lookup ({prefix}) skipped: {e}")
+    return grouped
+
+
+def _shift_to_assistant_turns(turns: list, grouped: dict) -> dict:
+    """
+    Moves each correction forward onto the assistant reply it belongs to.
+
+    The pipeline carries the USER turn id through every stage, so that is the id
+    the ledger stores against an assertion. But the value the user actually read
+    was printed by the assistant's reply to that message, and the reply bubble is
+    the only place the UI renders a note. Without this shift the notice is keyed
+    to a user message and silently never appears.
+    """
+    if not grouped:
+        return grouped
+
+    shifted: dict = {}
+    for idx, turn in enumerate(turns):
+        tid = turn.get("turn_id")
+        if not tid or tid not in grouped:
+            continue
+
+        target = tid
+        if turn.get("role") != "assistant":
+            for later in turns[idx + 1:]:
+                if later.get("role") == "assistant":
+                    target = later.get("turn_id") or tid
+                    break
+
+        bucket = shifted.setdefault(target, [])
+        for entry in grouped[tid]:
+            _merge_correction(bucket, entry)
+    return shifted
+
+
+def _merge_correction(bucket: list, entry: dict) -> None:
+    """
+    Keeps one correction per (article, attribute) in a turn's bucket.
+    A value revised several times should read as a single correction to the
+    latest value, not as a stack of intermediate steps.
+
+    `old_value` is deliberately NOT overwritten. Notices arrive oldest-first, so
+    the first one carries what this message actually said; later ones carry
+    intermediate values the message never showed.
+    """
+    for existing in bucket:
+        if (existing["article_id"] == entry["article_id"]
+                and existing["attribute"] == entry["attribute"]):
+            existing["new_value"]   = entry["new_value"]
+            existing["detected_at"] = entry["detected_at"]
+            return
+    bucket.append(dict(entry))
+
 
 @router.get("")
 async def list_sessions(user_id: str = Query(...)):
@@ -142,19 +296,29 @@ async def get_session_history(session_id: str, user_id: str = Query(...)):
             "match_percent": item.get("match_percent"),
         }
 
+    # Catalogue values that changed after they were quoted. Each notice names
+    # the earlier assistant turns that stated the old value, so the correction
+    # can be shown under the message it actually applies to rather than being
+    # dumped at the end of the conversation.
+    corrections_by_turn = _shift_to_assistant_turns(
+        turns, await _corrections_by_turn(db, session_id)
+    )
+
     messages = []
     for t in turns:
         classification = t.get("classification") or {}
-        rec_id = t.get("recommendation_id")
-        rec    = recs_by_id.get(rec_id) if rec_id else None
+        rec_id  = t.get("recommendation_id")
+        rec     = recs_by_id.get(rec_id) if rec_id else None
+        turn_id = t.get("turn_id", "")
         messages.append({
-            "turn_id":           t.get("turn_id", ""),
+            "turn_id":           turn_id,
             "role":              t.get("role", ""),
             "content":           t.get("content", ""),
             "timestamp":         str(t.get("timestamp", t.get("created_at", ""))),
             "label":             classification.get("label", "") if classification else "",
             "recommendation_id": rec_id,
             "items_recommended": [_to_card(i) for i in (rec.get("items", []) if rec else [])],
+            "corrections":       corrections_by_turn.get(turn_id, []),
         })
 
     return {
@@ -197,10 +361,20 @@ async def delete_session(session_id: str, user_id: str = Query(...)):
     except Exception as _rl_err:
         print(f"[Sessions] RL session outcome warning (non-fatal): {_rl_err}")
 
-    # Delete from all MongoDB collections
+    # Delete from all MongoDB collections. The per-member prefixes are all
+    # cleared because a session's model lock may have routed its memory to any
+    # of them, and a stale Assertion Ledger left behind would be re-loaded if
+    # the session_id were ever reused.
     await db.sessions.delete_one({"session_id": session_id})
     await db.explanations.delete_many({"session_id": session_id})
-    await db.contradiction_log.delete_many({"session_id": session_id})
+    for prefix in ("m3", "m2", "m1"):
+        for base in ("contradiction_log", "revision_notices", "session_graphs"):
+            try:
+                await db[get_collection_name(base, prefix)].delete_many(
+                    {"session_id": session_id}
+                )
+            except Exception as e:
+                print(f"[Sessions] cleanup of {base} ({prefix}) skipped: {e}")
 
     # Clear Redis cache
     try:

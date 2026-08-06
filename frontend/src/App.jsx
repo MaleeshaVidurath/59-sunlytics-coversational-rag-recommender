@@ -78,6 +78,10 @@ const C = {
   textDim: "#8a8078", textMuted: "#555",
   flag: "#7c2d2d", flagText: "#fca5a5",
   contra: "#2d4a1e", contraText: "#86efac", tag: "#222",
+  // Catalogue revisions are not errors — the message was true when sent — so
+  // they read as an informational amber note, distinct from the red
+  // hallucination flag and the green contradiction badge.
+  revise: "#3a2f16", reviseText: "#e0c079", reviseBorder: "#5c4a22",
 };
 
 function timeAgo(ts) {
@@ -239,6 +243,34 @@ function MetaBadge({ label, confidence, hallucination, contradiction }) {
   );
 }
 
+/**
+ * In-chat notice that a value quoted in THIS message has since changed in the
+ * catalogue. The message itself is never rewritten: it was accurate when sent,
+ * and silently editing history would be the dishonest fix. The note sits under
+ * the bubble it applies to so the user can see exactly which statement aged.
+ */
+function CorrectionNotes({ corrections }) {
+  if (!corrections || corrections.length === 0) return null;
+  return (
+    <div style={{ marginTop:6, display:"flex", flexDirection:"column", gap:4 }}>
+      {corrections.map((c, i) => (
+        <div key={i} style={{ background:C.revise,
+          border:`1px solid ${C.reviseBorder}`, borderRadius:8,
+          padding:"6px 10px", fontSize:11.5, color:C.reviseText,
+          lineHeight:1.5 }}>
+          <strong>Update:</strong>{" "}
+          {c.product_name ? `the ${c.label} of ${c.product_name}` : `the ${c.label}`}
+          {" "}changed from{" "}
+          <span style={{ textDecoration:"line-through", opacity:0.75 }}>
+            {c.old_value}
+          </span>{" "}
+          to <strong>{c.new_value}</strong> after this message.
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ConsentButtons({ onYes, onNo }) {
   return (
     <div style={{ display:"flex", gap:8, marginTop:10 }}>
@@ -342,6 +374,7 @@ function Message({ msg, onFeedback, model, awaitingConsent, onConsentYes, onCons
             ))}
           </div>
         )}
+        {!isUser && <CorrectionNotes corrections={msg.corrections} />}
         {!isUser && msg.label && (
           <MetaBadge label={msg.label} confidence={msg.confidence||0}
             hallucination={msg.hallucination_flag}
@@ -616,26 +649,49 @@ function ChatPage({ user, onLogout, selectedModel, onResetModel }) {
     } catch(e) { console.error("loadSessions failed", e); }
   }
 
+  function mapHistoryMessages(data, sessionId) {
+    return (data.messages || []).map(m => ({
+      id: m.turn_id || Math.random(),
+      role: m.role,
+      content: m.content,
+      timestamp: m.timestamp,
+      label: m.label,
+      // Restore the product cards and their "why this for you" reasons so a
+      // reopened chat looks the same as when it was live.
+      items: m.items_recommended || [],
+      // Catalogue values that changed after this message quoted them.
+      corrections: m.corrections || [],
+      recommendation_id: m.recommendation_id || null,
+      turn_id: m.turn_id || null,
+      session_id: sessionId,
+      isConsentQuestion: m.role === "assistant"
+        && (m.content || "").includes(CONSENT_TRIGGER),
+    }));
+  }
+
   async function selectSession(session) {
     setAwaitingConsent(false);
     setActive(session.session_id);
     try {
       const data = await apiGetHistory(session.session_id, user.user_id);
-      const msgs = (data.messages || []).map(m => ({
-        id: m.turn_id || Math.random(),
-        role: m.role,
-        content: m.content,
-        timestamp: m.timestamp,
-        label: m.label,
-        // Restore the product cards and their "why this for you" reasons so a
-        // reopened chat looks the same as when it was live.
-        items: m.items_recommended || [],
-        recommendation_id: m.recommendation_id || null,
-        turn_id: m.turn_id || null,
-        session_id: session.session_id,
-      }));
-      setMessages(msgs);
+      setMessages(mapHistoryMessages(data, session.session_id));
     } catch(e) { console.error("selectSession failed", e); }
+  }
+
+  /**
+   * Re-reads the transcript from the server after a catalogue revision.
+   *
+   * A revision annotates messages sent EARLIER in this conversation, and only
+   * the server knows which assistant turns quoted the old value. Re-reading is
+   * cheaper to reason about than trying to locate those messages client-side,
+   * and it happens only on the rare turn where a value actually changed.
+   */
+  async function refreshTranscript(sessionId) {
+    if (!sessionId) return;
+    try {
+      const data = await apiGetHistory(sessionId, user.user_id);
+      setMessages(mapHistoryMessages(data, sessionId));
+    } catch(e) { console.error("transcript refresh failed", e); }
   }
 
   async function newChat() {
@@ -698,6 +754,9 @@ function ChatPage({ user, onLogout, selectedModel, onResetModel }) {
       };
       setMessages(prev => [...prev, botMsg]);
       if (botMsg.isConsentQuestion) setAwaitingConsent(true);
+      if ((res.revisions || []).length > 0) {
+        await refreshTranscript(res.session_id || activeSession);
+      }
     } catch(e) {
       setMessages(prev => [...prev, {
         id:Date.now()+1, role:"assistant",
@@ -768,6 +827,13 @@ function ChatPage({ user, onLogout, selectedModel, onResetModel }) {
       };
       setMessages(prev => [...prev, botMsg]);
       if (botMsg.isConsentQuestion) setAwaitingConsent(true);
+
+      // A catalogue value changed mid-conversation: pull the transcript back
+      // from the server so the correction note appears under the earlier
+      // message that quoted the old value.
+      if ((res.revisions || []).length > 0) {
+        await refreshTranscript(newSessionId || activeSession);
+      }
 
       // Reload sessions — retry up to 3 times to handle MongoDB write delay
       const reloadWithRetry = async (retries = 3, delay = 600) => {
