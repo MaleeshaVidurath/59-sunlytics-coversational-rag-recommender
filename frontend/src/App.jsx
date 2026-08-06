@@ -101,8 +101,19 @@ function labelColor(label) {
   return m[label] || "#666";
 }
 
-function ProductCard({ item }) {
+// Heading for the justification block. The two models justify a pick on
+// different grounds, so one shared label would misdescribe one of them:
+// M3's lines come from this user's own purchase statistics, while M2's come
+// from the item's visual/style reasoning and are user-independent.
+const WHY_HEADING = {
+  m3: "Why this for you",
+  m2: "Why this item",
+  m1: "Why this item",
+};
+
+function ProductCard({ item, model }) {
   const why = item.why || [];
+  const whyHeading = WHY_HEADING[model] || "Why this for you";
   const [imgFailed, setImgFailed] = useState(false);
   const [preview, setPreview]     = useState(false);
   const imgSrc = `${M2_IMAGE_BASE}/api/images/${item.article_id}`;
@@ -161,14 +172,16 @@ function ProductCard({ item }) {
             {item.description}
           </div>
         )}
-        {/* Why this item was picked for this user. Generated from real
-            statistics by the ranker, so it is safe to render verbatim. */}
+        {/* Why this item was picked. M3 generates these from real purchase
+            statistics; M2 from its hallucination-guard-verified explanation.
+            Both are safe to render verbatim — see WHY_HEADING for why the
+            label differs between them. */}
         {why.length > 0 && (
           <div style={{ marginTop:6, paddingTop:6,
             borderTop:`1px solid ${C.border}` }}>
             <div style={{ color:C.textMuted, fontSize:9, letterSpacing:0.5,
               textTransform:"uppercase", marginBottom:3 }}>
-              Why this for you
+              {whyHeading}
             </div>
             {why.map((reason, i) => (
               <div key={i} style={{ color:C.textDim, fontSize:10, marginTop:2,
@@ -334,7 +347,7 @@ function FeedbackButtons({ msg, onFeedback }) {
 
 const CONSENT_TRIGGER = "Would you like to see new recommendations for this?";
 
-function Message({ msg, onFeedback, awaitingConsent, onConsentYes, onConsentNo }) {
+function Message({ msg, onFeedback, model, awaitingConsent, onConsentYes, onConsentNo }) {
   const isUser = msg.role === "user";
   const showConsent = !isUser && awaitingConsent && msg.isConsentQuestion;
   return (
@@ -356,7 +369,9 @@ function Message({ msg, onFeedback, awaitingConsent, onConsentYes, onConsentNo }
         </div>
         {msg.items && msg.items.length > 0 && (
           <div style={{ marginTop:6 }}>
-            {msg.items.map((item, i) => <ProductCard key={i} item={item} />)}
+            {msg.items.map((item, i) => (
+              <ProductCard key={i} item={item} model={model} />
+            ))}
           </div>
         )}
         {!isUser && <CorrectionNotes corrections={msg.corrections} />}
@@ -960,6 +975,7 @@ function ChatPage({ user, onLogout, selectedModel, onResetModel }) {
             <>
               {messages.map(msg => (
               <Message key={msg.id} msg={msg} onFeedback={handleFeedback}
+                model={selectedModel}
                 awaitingConsent={awaitingConsent}
                 onConsentYes={handleConsentYes}
                 onConsentNo={handleConsentNo} />
