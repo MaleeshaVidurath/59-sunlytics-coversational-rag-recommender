@@ -1,0 +1,4 @@
+policy,total_s,source
+B1 non-adaptive (always FULL),1349.3,COMPASS / RA-Rec / ChatCRS
+B2 binary gate (2-way),1206.9,RAGate
+Ours (3-way NO/PARTIAL/FULL),1100.5,this work
