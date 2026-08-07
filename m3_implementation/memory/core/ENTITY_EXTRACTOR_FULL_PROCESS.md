@@ -125,7 +125,7 @@ message before either could run.
 Stage 2e checks whether any of ~21,600 catalog product names appears anywhere
 in the message, as a plain substring with no word-boundary check. The catalog
 contains names as short as one character, so this matches almost any text:
-
+   
 ```
 [FashionGuard] Stage2e-product-name: matched 's' in 'i need 3 shorts'
 [FashionGuard] Stage2e-product-name: matched 'mo' in 'good morning'
