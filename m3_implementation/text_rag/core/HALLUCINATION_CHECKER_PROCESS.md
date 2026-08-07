@@ -514,3 +514,186 @@ checker itself.
 - Es et al. (2023) — "RAGAS: Automated Evaluation of Retrieval Augmented Generation" — LLM-judge faithfulness baseline
 - Yan et al. (2024) — "Corrective Retrieval Augmented Generation" (CRAG) — system on/off mitigation evaluation
 - Ji et al. (2023) — "Survey of Hallucination in Natural Language Generation" — hallucination taxonomy
+
+---
+
+## Threshold Calibration — how `NLI_CONTRADICTION_THRESHOLD` was derived
+
+Added 2026-08-07. Full artifacts, data and figure:
+`test_result/hallucination_result/threshold_calibration/`
+
+**Result: `NLI_CONTRADICTION_THRESHOLD = 0.80`**, derived by ROC analysis on the
+score distribution. Previously the value was inherited (`config.py` default
+`0.65`, overridden to `0.70` in `.env`) with no derivation on record.
+
+### 1. Why the earlier sweep was not a derivation
+
+`test_result/hallucination_result/original_eval_238/` contains **fig5
+"Threshold sensitivity"**, which swept `[0.25, 0.5, 0.65, 1.0, 2.0, 3.0, 4.0,
+5.0]` and found results flat across 0.25–0.65.
+
+That is a **sensitivity** check — *"if I move the threshold, does the answer
+change?"* — not a **selection** — *"what value should it be?"*. It marked the
+value already in use; it did not choose it. Two structural reasons it could not
+have:
+
+- It swept the **full** decision rule, which is invariant below 1.0 (§2). **A
+  flat curve has no argmax**, so no point can be preferred.
+- It started at 0.25, so the lower boundary was never located.
+
+fig5 remains valid and is deliberately left untouched — it backs numbers printed
+in the submitted report.
+
+### 2. Why the deployed rule cannot identify the threshold
+
+Gate 9's rule has two conditions:
+
+```python
+is_hallucination = (
+    contradiction > NLI_CONTRADICTION_THRESHOLD   # (1) absolute bar
+    and contradiction > entailment                # (2) relative test
+)
+```
+
+Sweeping the full rule over 27 points from −5.0 to +5.0 on the 238-case set:
+
+| threshold | P | R | F1 | Bal. acc. |
+|---|---|---|---|---|
+| −5.00 … 0.95 | 1.000 | 0.951 | 0.975 | 0.976 |
+| 1.00 | 1.000 | 0.288 | 0.447 | 0.644 |
+
+**Every value below 1.0 is byte-identical.** Of 1,582 checks:
+
+| | count |
+|---|---|
+| entailment won → never flagged | 1,292 |
+| contradiction beat entailment → flagged | 290 |
+| …of those, with contradiction **below 1.0** | **0** |
+
+The lowest score among flagged checks is exactly **1.000**, because 195 are
+*containment flags* (Gates 6/7 — wrong name/price caught by string matching,
+which bypass NLI and receive a synthetic score of 1.0). Genuine NLI
+contradictions start at **1.092**.
+
+Condition (1) is therefore slid through an empty region. Meanwhile 12 checks
+exceeded 0.70 and were rejected anyway — by condition (2). **The relative test
+carries the decision; the absolute bar is inert.**
+
+### 3. The derivation — ablate the relative test
+
+To make the threshold identifiable, remove condition (2) so it decides alone:
+
+```
+flag case  IF  max(contradiction over its checks) > t
+```
+
+Swept −6.0 to +8.0 in steps of 0.05 (281 points), case-level, scored with the
+same `compute_metrics` used by the reported evaluation.
+
+**Three regimes, two hard boundaries:**
+
+| t | P | R | Spec | Bal. acc. | Youden J | FP | FN |
+|---|---|---|---|---|---|---|---|
+| −0.60 … −0.05 | 0.871 | 0.985 | **0.091** | 0.538 | 0.076 | 30 | 3 |
+| 0.00 … 0.75 | 0.980 | 0.961 | 0.879 | 0.920 | 0.840 | 4 | 8 |
+| **0.80 … 0.95** | **0.985** | **0.961** | **0.909** | **0.935** | **0.870** | **3** | **8** |
+| 1.00 … 1.05 | 0.969 | 0.302 | 0.939 | 0.621 | 0.242 | 2 | 143 |
+| >= 1.20 | 1.000 | 0.298 | 1.000 | 0.649 | 0.298 | 0 | 144 |
+
+- **Lower boundary — `t < 0` destroys specificity** (0.091: 30 of 33 clean cases
+  flagged). DeBERTa assigns negative contradiction logits to most clean
+  material, so a negative threshold admits nearly everything.
+- **Upper boundary — `t >= 1.0` destroys recall** (0.302). The 195 containment
+  flags score exactly 1.0 and the rule is strictly `>`, so all of them vanish —
+  143 true positives lost.
+- **Optimum:** Youden's J and F1 both peak on **[0.80, 0.95]** (four tied grid
+  points).
+
+**Choice: t = 0.80**, the lower edge of the tied band, because:
+
+1. All of [0.80, 0.95] score identically — no metric separates them.
+2. Risk is **asymmetric**: crossing 1.0 costs 143 true positives; moving down
+   costs at most one false positive. The lower edge is farthest from the cliff.
+3. It is a round number at a measured boundary, **not** a fine-grained argmax —
+   so it is not fitted to the evaluation set.
+
+### 4. The relative test is separately validated
+
+Same method applied to `flag if (contradiction − entailment) > t`:
+
+| | P | R | Bal. acc. | Youden J |
+|---|---|---|---|---|
+| optimum (t = −1.0) | 1.000 | 0.956 | 0.978 | 0.956 |
+| **deployed (t = 0)** | **1.000** | **0.951** | **0.976** | **0.951** |
+
+Condition (2) sits 0.002 balanced accuracy from its own optimum. It is doing the
+discriminating work, and it is near-optimally placed.
+
+### 5. Honest limits
+
+**Magnitude.** Moving 0.70 to 0.80 changes **one case**: FP 4 → 3, specificity
+0.879 → 0.909 on 33 clean cases. That is within sampling noise. The defensible
+claim is *"we identified the valid interval and took the optimum within it"*,
+**not** *"0.80 beats 0.70"*.
+
+**Zero production impact.** Under the full rule the value is inert across
+[0, 1.0), so adopting 0.80 changes behaviour on no cases at all.
+
+**Untriggered, not validated.** No case in the test set has a contradiction
+score between 0 and 1 that also beats entailment. If a future model produced a
+weak contradiction in that band, this data cannot say whether flagging it would
+be correct.
+
+**Where detection power actually comes from.** 143 of 205 true positives (70%)
+depend on the containment flags of Gates 6/7 rather than on Gate 9's NLI
+scoring — visible as the size of the drop at t = 1.0. A property of the checker,
+not of this experiment, but likely to be asked about.
+
+### 6. Method — how to re-run it
+
+One checker pass over `original_eval_238/labeled_test_set.jsonl` (238 cases,
+205 hallucinated / 33 clean), capturing **contradiction, neutral and entailment
+logits plus softmax probabilities** for all 1,582 comparisons. No regeneration
+loop, no LLM call, no network — the loop needs Groq and is irrelevant to
+detection thresholds.
+
+Because the gate pipeline (Gates 1–8: which checks run at all) does not consult
+the threshold, recomputing the decision from stored logits is **exact**, not an
+approximation. Any future sweep is pure arithmetic against
+`check_scores_full.jsonl`.
+
+```bash
+# from m3_implementation/
+python test_result/hallucination_result/threshold_calibration/derive_threshold.py
+python test_result/hallucination_result/threshold_calibration/run_threshold_sweep.py
+python test_result/hallucination_result/threshold_calibration/make_sweep_figures.py
+```
+
+~7 min on CPU for both passes.
+
+### 7. Files
+
+| File | Contents |
+|---|---|
+| `derive_threshold.py` | the derivation — one checker pass, then ROC on three rules |
+| `run_threshold_sweep.py` | the invariance experiment (§2) |
+| `results_threshold_derivation.json` | 281-point ROC per rule, optima, tie ranges |
+| `results_threshold_sweep.json` | 27-point sweep of the full deployed rule |
+| `check_scores_full.jsonl` | 1,582 checks — contradiction / neutral / entailment logits, softmax probabilities, containment flag, case label |
+| `figures/fig_threshold_derivation.png` | the result — three regimes, optimum shaded |
+
+### 8. What to say if asked
+
+> *"The threshold cannot be identified from the deployed rule, because the
+> relative test — contradiction must outscore entailment — carries the decision.
+> We verified that with a 27-point sweep showing byte-identical output from −5.0
+> to 0.95. To derive a value we ablated the relative test so the threshold
+> decides alone, and swept 281 points. That gives two hard boundaries: below 0
+> specificity collapses to 0.09, and at 1.0 recall collapses to 0.30 because
+> containment flags carry a fixed score of 1.0. Youden's J and F1 both peak on
+> [0.80, 0.95], and we take 0.80 — the lower edge, farthest from the recall
+> cliff. Under the full rule the value sits inside the invariant band, so it is
+> simultaneously optimal in isolation and provably harmless in combination."*
+
+Then volunteer the limit: *"the gain over the previous value is one false
+positive in 238, within noise — the content is the boundaries, not that number."*

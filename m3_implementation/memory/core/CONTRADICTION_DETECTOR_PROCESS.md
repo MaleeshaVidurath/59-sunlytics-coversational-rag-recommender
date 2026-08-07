@@ -216,12 +216,12 @@ and Navy's card is stamped:  status: active → CORRECTED
 
 ### 4.5 "Won't cards pile up forever?"
 
-Cards accumulate, but **only one is `active` at a time**. The status stamp does
-that work. After the turn-4 correction:
+They do accumulate, and the status stamp is what keeps that harmless. After the
+turn-4 correction:
 
 ```
 attr:111:colour
-   ├── "Black"  active      ← still the one true answer
+   ├── "Black"  active      ← still stands
    └── "Navy"   corrected   ← kept as an audit record, never used again
 ```
 
@@ -229,12 +229,66 @@ The Navy card stays on the board **on purpose** — it is the evidence that a
 correction happened, and it is what feeds `contradiction_log` and the
 *"✓ contradiction corrected"* badge.
 
+**But "active" is not a single slot.** Several assertions can be `active` at the
+same moment, in two distinct ways, and both are intended:
+
+```
+Same value, several turns          Different values, both benign
+attr:111:colour                    attr:111:product_type
+   └── "Black"                        ├── "Dress"       active   (turn 1)
+        ├── turn_1 active             └── "maxi dress"  active   (turn 3)
+        ├── turn_4 active
+        └── turn_7 active
+```
+
+- **Same value, several turns** — the bot correctly repeated itself. One value
+  node, three records on its edge.
+- **Different values, both benign** — `Dress` → `maxi dress` passed the
+  refinement check, so it was never retired.
+
+**The invariant is compatibility, not uniqueness:**
+
+> Every `active` value in a slot is compatible with every other one. A value
+> stays `active` only if, when it was said, it either matched the standing
+> statement or was a benign refinement of it. Anything judged a real conflict is
+> stamped `corrected`, `deferred` or `superseded` in the same pass — and
+> `prior_assertion()` ignores all three.
+
+Two *incompatible* values therefore cannot both be active. Same setup, but turn 3
+says `Trousers`:
+
+```
+val:Dress      ordinal 1   status=active
+val:Trousers   ordinal 2   status=corrected     ← retired the moment drift fired (0.999)
+```
+
+What *is* single-valued is the **reading rule**, not the storage:
+
+> `prior_assertion()` returns the `active`, response-sourced record with the
+> highest `turn_ordinal` strictly below the current turn.
+
+So "what do we currently stand behind?" always has exactly one answer, however
+many cards are pinned up.
+
+**Keeping every active record is load-bearing, not incidental.** When the
+catalogue moves, `_supersede()` retires and reports *every* response record of
+the old value, not just the newest:
+
+```
+turns 1, 4 and 7 all quoted £11.08 → all three are superseded
+                                   → all three messages get a correction note
+```
+
+Collapse them into one record and two of those messages would silently keep
+showing a value the catalogue has abandoned. This is why the same value is
+allowed to be active many times over.
+
 ### 4.6 Summary of the change
 
 | | Old | New |
 |---|---|---|
 | A value is | a **field you overwrite** | a **node you add** |
-| Detection is | comparing two strings | *"does this hook have two active cards?"* |
+| Detection is | comparing two strings | *"does this disagree with the last thing we stood behind?"* |
 | History | destroyed every turn | kept, with status |
 
 That last row is the answer to *"why does this need a graph?"* — the question the
@@ -1200,3 +1254,119 @@ comparison was `response vs current evidence`. Those numbers are not restated as
 v2's — v2 is measured separately, on the same data, and reported alongside. The
 v1 files are untouched: `labeled_test_set.jsonl` was written 2026-07-12 14:17 and
 v1's results at 21:45 the same day, and nothing since has modified either.
+
+---
+
+## 15. Diagrams (Mermaid source, for the poster)
+
+Paste any block below into [mermaid.live](https://mermaid.live) and export PNG or
+SVG. **Export SVG for print** — a poster is viewed close up and PNG will look
+soft at A0.
+
+Four diagrams. Figure 1 is the poster centrepiece and deliberately matches the
+shape of the hallucination-checker chart, so the two read as a pair. Figure 2 is
+the same decision in full, for when there is space. Figure 3 is the ledger
+itself. Figure 4 places both components in the request path — worth including if
+the poster must make clear that the guard and the detector are *different
+checks*, which is the single most common misreading.
+
+### Figure 1 — Contradiction detection, poster version
+
+```mermaid
+flowchart LR
+    A["Evidence bundle<br/>+ session context"] --> C["Candidate products<br/>evidence / context / ledger"]
+    B[("Assertion Ledger<br/>session history")] --> C
+    C --> D[("Live PostgreSQL<br/>re-verification")]
+    D --> E{"Catalogue value<br/>changed?"}
+    E -->|Yes| F["REVISION<br/>supersede old statements<br/>annotate earlier messages"]
+    E -->|No| G["Read the reply<br/>name / colour / price / type"]
+    F --> G
+    G --> H{"Did THIS turn's evidence<br/>cover this attribute?"}
+    H -->|Yes| H2{"Does the reply<br/>match it?"}
+    H2 -->|Yes| L(["OK"])
+    H2 -->|No| I(["DEFER<br/>hallucination guard owns it"])
+    H -->|No| J["Compare with what we<br/>told the user earlier"]
+    J --> K{"Genuine<br/>contradiction?"}
+    K -->|No| L
+    K -->|Yes| M(["DRIFT<br/>rewrite that sentence"])
+    I --> N[("Save ledger")]
+    L --> N
+    M --> N
+```
+
+> **The `H2` node is not optional.** Evidence *covering* an attribute is not by
+> itself a problem — that is the normal, healthy case. `DEFER` requires evidence
+> to cover it **and** the reply to disagree with it. Collapsing `H` and `H2` into
+> one decision reads as “whenever the guard looked, we defer”, which would make
+> the component look like it does nothing on ordinary turns.
+
+### Figure 2 — The decision in full
+
+```mermaid
+flowchart TD
+    S["One value the reply stated<br/>e.g. colour = Navy"] --> Q1{"Q1 · Catalogue changed AND<br/>bot quoted the OLD value?"}
+    Q1 -->|Yes| STALE(["STALE<br/>fix to the new value<br/>raise a revision notice"])
+    Q1 -->|No| Q2{"Q2 · Did THIS turn's evidence<br/>carry this attribute?"}
+    Q2 -->|Yes| Q2M{"matches the evidence?"}
+    Q2M -->|Yes| OK1(["OK"])
+    Q2M -->|No| DEFER(["DEFER<br/>hallucination guard owns it"])
+    Q2 -->|No| Q3["Q3 · Pick the strongest reference<br/>1 prior_assertion — what we told this user<br/>2 live_evidence — the catalogue now<br/>3 session_context — session memory"]
+    Q3 --> Q3D{"reference exists,<br/>and the values differ?"}
+    Q3D -->|"no reference, or same"| OK2(["OK"])
+    Q3D -->|differs| REF{"Q4a · Is one value inside the other?<br/>Dress / maxi dress"}
+    REF -->|Yes| OK3(["OK — benign refinement"])
+    REF -->|No| TYPE{"Q4b · Which attribute?"}
+    TYPE -->|"price / name"| DRIFT(["DRIFT<br/>rewrite that sentence"])
+    TYPE -->|"colour / product_type"| NLI{"DeBERTa NLI<br/>contradiction p greater than 0.5?"}
+    NLI -->|Yes| DRIFT
+    NLI -->|No| OK4(["OK — benign rewording"])
+```
+
+### Figure 3 — The Assertion Ledger, with every stored attribute
+
+```mermaid
+flowchart TD
+    P["PRODUCT — prod:108775015<br/>article_id · name<br/>first_seen_turn · first_seen_ordinal<br/>last_seen_turn · last_seen_ordinal"]
+    AC["ATTRIBUTE — attr:108775015:colour<br/>article_id · attribute<br/>evidence_value = Black<br/>evidence_version = 1<br/>evidence_first_turn · evidence_last_turn"]
+    AP["ATTRIBUTE — attr:108775015:price<br/>evidence_value = 12.40<br/>evidence_version = 2"]
+    VB["VALUE — val:...:colour:black<br/>value = Black · norm = black"]
+    VN["VALUE — val:...:colour:navy<br/>value = Navy · norm = navy"]
+    V1["VALUE — val:...:price:11.08"]
+    V2["VALUE — val:...:price:12.40"]
+    T["TURN — turn:t3<br/>turn_id · turn_ordinal<br/>action · strategy · ts"]
+
+    P -->|HAS_ATTR| AC
+    P -->|HAS_ATTR| AP
+    AC -->|ASSERTED_AS| VB
+    AC -->|ASSERTED_AS| VN
+    AP -->|ASSERTED_AS| V1
+    AP -->|ASSERTED_AS| V2
+    VN -.->|"CONTRADICTS<br/>turn_id · nli_score · resolved_to · ts"| VB
+    V1 -.->|"SUPERSEDED_BY<br/>turn_id · turn_ordinal · ts"| V2
+    T -.->|"STATED · source"| VN
+
+    REC["Every ASSERTED_AS edge carries a list of assertion records<br/>· · ·<br/>turn_id · turn_ordinal<br/>source — evidence / response<br/>status — active / deferred / corrected / superseded<br/>sentence_idx · evidence_version · ts"]
+    AC -.- REC
+```
+
+### Figure 4 — Where the two checks sit
+
+```mermaid
+flowchart LR
+    U["User message"] --> R["Router<br/>decide the action"]
+    R --> RET["Retrieval<br/>Qdrant + PostgreSQL"]
+    RET --> LLM["Groq LLM<br/>generate the reply"]
+    LLM --> HG["HALLUCINATION GUARD<br/>reply vs THIS turn's evidence"]
+    HG -->|"fails — regenerate, max 3"| LLM
+    HG --> CD["CONTRADICTION DETECTOR<br/>reply vs the whole session<br/>and the live catalogue"]
+    CD --> OUT["Reply to the user<br/>+ correction notes on earlier messages"]
+```
+
+### Talking to the poster
+
+| If asked | Say |
+|---|---|
+| “Isn’t this the same as the hallucination check?” | Figure 4 — the guard looks **sideways** at this turn’s evidence; this looks **backwards** across the session and at the live catalogue. Figure 1’s DEFER branch is where we hand a case back rather than count it twice. |
+| “Why a graph?” | Figure 3 — the question *“did we already tell this user something different?”* needs stored history. The previous design overwrote the value each turn, so that question had no answer. |
+| “What are the four statuses?” | `active` stands · `deferred` the guard owns it · `corrected` we were wrong and fixed it · `superseded` we were **right** and the catalogue changed. |
+| “Where does DeBERTa come in?” | Figure 2, Q4b only — and only for `colour` and `product_type`. Price and name are decided by string logic, because DeBERTa scores two different prices as *neutral*. |
