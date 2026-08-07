@@ -1,0 +1,430 @@
+{
+  "meta": {
+    "purpose": "Locate both edges of the operating plateau for NLI_CONTRADICTION_THRESHOLD, including negative logits.",
+    "test_set": "labeled_test_set.jsonl",
+    "n_cases": 238,
+    "n_hallucinated": 205,
+    "n_clean": 33,
+    "scale": "raw cross-encoder logits (CrossEncoder.predict), NOT probabilities",
+    "decision_rule": "contradiction > threshold AND contradiction > entailment",
+    "deployed_value": 0.7,
+    "config_default_value": 0.65,
+    "scoring_code": "imported from run_detector_eval.compute_metrics",
+    "note": "Thresholds >= 1.0 remain partly an artifact: containment flags carry a synthetic contradiction score of 1.0 and drop out of the decision at t >= 1.0."
+  },
+  "grid": [
+    -5.0,
+    -4.0,
+    -3.0,
+    -2.0,
+    -1.5,
+    -1.0,
+    -0.75,
+    -0.5,
+    -0.25,
+    0.0,
+    0.25,
+    0.4,
+    0.5,
+    0.6,
+    0.65,
+    0.7,
+    0.75,
+    0.8,
+    0.9,
+    0.95,
+    1.0,
+    1.25,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    5.0
+  ],
+  "sweep": [
+    {
+      "threshold": -5.0,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": -4.0,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": -3.0,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": -2.0,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": -1.5,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": -1.0,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": -0.75,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": -0.5,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": -0.25,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": 0.0,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": 0.25,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": 0.4,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": 0.5,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": 0.6,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": 0.65,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": 0.7,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": 0.75,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": 0.8,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": 0.9,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": 0.95,
+      "precision": 1.0,
+      "recall": 0.9512,
+      "f1": 0.975,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.9756,
+      "tp": 195,
+      "fp": 0,
+      "fn": 10,
+      "tn": 33
+    },
+    {
+      "threshold": 1.0,
+      "precision": 1.0,
+      "recall": 0.2878,
+      "f1": 0.447,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.6439,
+      "tp": 59,
+      "fp": 0,
+      "fn": 146,
+      "tn": 33
+    },
+    {
+      "threshold": 1.25,
+      "precision": 1.0,
+      "recall": 0.2829,
+      "f1": 0.4411,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.6415,
+      "tp": 58,
+      "fp": 0,
+      "fn": 147,
+      "tn": 33
+    },
+    {
+      "threshold": 1.5,
+      "precision": 1.0,
+      "recall": 0.2829,
+      "f1": 0.4411,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.6415,
+      "tp": 58,
+      "fp": 0,
+      "fn": 147,
+      "tn": 33
+    },
+    {
+      "threshold": 2.0,
+      "precision": 1.0,
+      "recall": 0.278,
+      "f1": 0.4351,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.639,
+      "tp": 57,
+      "fp": 0,
+      "fn": 148,
+      "tn": 33
+    },
+    {
+      "threshold": 3.0,
+      "precision": 1.0,
+      "recall": 0.2683,
+      "f1": 0.4231,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.6341,
+      "tp": 55,
+      "fp": 0,
+      "fn": 150,
+      "tn": 33
+    },
+    {
+      "threshold": 4.0,
+      "precision": 1.0,
+      "recall": 0.2537,
+      "f1": 0.4047,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.6268,
+      "tp": 52,
+      "fp": 0,
+      "fn": 153,
+      "tn": 33
+    },
+    {
+      "threshold": 5.0,
+      "precision": 1.0,
+      "recall": 0.1951,
+      "f1": 0.3265,
+      "specificity": 1.0,
+      "balanced_accuracy": 0.5976,
+      "tp": 40,
+      "fp": 0,
+      "fn": 165,
+      "tn": 33
+    }
+  ],
+  "plateau_balanced_accuracy": {
+    "metric": "balanced_accuracy",
+    "value": 0.9756,
+    "from": -5.0,
+    "to": 0.95,
+    "n_thresholds": 20
+  },
+  "plateau_f1": {
+    "metric": "f1",
+    "value": 0.975,
+    "from": -5.0,
+    "to": 0.95,
+    "n_thresholds": 20
+  },
+  "deployed_equals_reported": true,
+  "precision_breaks_at": [],
+  "recall_by_corruption_at_deployed": {
+    "colour_swap": {
+      "detected": 43,
+      "total": 48,
+      "recall": 0.8958
+    },
+    "cross_item_swap": {
+      "detected": 42,
+      "total": 43,
+      "recall": 0.9767
+    },
+    "name_swap": {
+      "detected": 55,
+      "total": 58,
+      "recall": 0.9483
+    },
+    "price_change": {
+      "detected": 55,
+      "total": 56,
+      "recall": 0.9821
+    }
+  },
+  "recall_by_corruption_at_default": {
+    "colour_swap": {
+      "detected": 43,
+      "total": 48,
+      "recall": 0.8958
+    },
+    "cross_item_swap": {
+      "detected": 42,
+      "total": 43,
+      "recall": 0.9767
+    },
+    "name_swap": {
+      "detected": 55,
+      "total": 58,
+      "recall": 0.9483
+    },
+    "price_change": {
+      "detected": 55,
+      "total": 56,
+      "recall": 0.9821
+    }
+  }
+}
