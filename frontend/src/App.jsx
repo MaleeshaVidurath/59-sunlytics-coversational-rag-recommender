@@ -801,7 +801,11 @@ function ChatPage({ user, onLogout, selectedModel, onResetModel }) {
         customerId: user.customer_id,
         message: text,
         sessionId: activeSession,
-        forceNew: forceNewSession,
+        // No session open in the UI means the model was just picked, so this
+        // is the first message of a fresh chat. Without force_new the backend
+        // resumes whatever session its Redis pointer still holds, and that
+        // session's model lock overrides the model the user just selected.
+        forceNew: forceNewSession || !activeSession,
         selectedModel,
       });
       setForceNew(false);  // reset after first message of new chat
