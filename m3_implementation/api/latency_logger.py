@@ -11,6 +11,7 @@ _HEADERS  = [
     "timestamp", "session_id", "turn_id", "label",
     "tier", "sub_tier", "user_message",
     "memory_ms", "rag_ms", "total_ms", "response_status",
+    "has_context", "context_source",
 ]
 
 
@@ -64,6 +65,33 @@ def compute_response_status(rag_result: dict) -> str:
     return "OK"
 
 
+def context_available(pipeline_output: dict) -> bool:
+    """
+    Was there anything in the session context window when this turn was routed?
+
+    WHY THIS IS LOGGED
+      The routing evaluation (E2) scores the chosen tier against a table keyed
+      on the intent label alone. That table cannot be right on its own, because
+      the correct tier also depends on conversation state:
+
+          "tell me more about the first one"
+              items in context  -> PARTIAL is correct (reuse them)
+              context empty     -> PARTIAL is IMPOSSIBLE; escalating to FULL is
+                                   the correct recovery, yet the label-only
+                                   table still says PARTIAL and marks it a
+                                   misroute.
+
+      Recording this flag lets the expected tier be state-aware, so the context
+      evaluator stops being penalised for the very overrides it exists to make.
+
+    `items_in_context` is built by enrichment._items_dict() from the dialogue
+    state's context window (up to 12 item slots), so a non-empty dict means the
+    session genuinely had items available to reuse.
+    """
+    ri = (pipeline_output or {}).get("retrieval_input") or {}
+    return bool(ri.get("items_in_context") or {})
+
+
 def log_turn(
     session_id:      str,
     turn_id:         str,
@@ -75,6 +103,7 @@ def log_turn(
     rag_ms:          float,
     total_ms:        float,
     response_status: str,
+    has_context:     bool = None,
 ) -> None:
     _ensure_header()
     row = [
@@ -86,6 +115,11 @@ def log_turn(
         round(rag_ms, 1),
         round(total_ms, 1),
         response_status,
+        "" if has_context is None else bool(has_context),
+        # Rows written by this function observed the state directly. Rows
+        # backfilled by the migration script are marked "derived" so the two
+        # are never silently mixed in an analysis.
+        "logged" if has_context is not None else "",
     ]
     with open(_LOG_PATH, "a", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(row)
@@ -94,5 +128,6 @@ def log_turn(
         f"memory={round(memory_ms):>5}ms  "
         f"rag={round(rag_ms):>5}ms  "
         f"total={round(total_ms):>5}ms  "
-        f"status={response_status}"
+        f"status={response_status}  "
+        f"ctx={'yes' if has_context else 'no'}"
     )
