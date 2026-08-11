@@ -123,7 +123,7 @@ def test_handler_takes_fast_path(articles_df):
         "get_image":          mh.data_loader.get_image,
     }
     mh.faiss_db.search_multi           = counting_search_multi
-    mh.llm_generator.expand_query      = lambda q: [q]
+    mh.llm_generator.expand_query      = lambda q, requested_type="": [q]
     mh.llm_generator.rerank_candidates = lambda **kw: kw["candidates"]
     mh.cross_encoder_reranker.rerank   = lambda **kw: kw["candidates"][:kw.get("top_k", 20)]
     mh.generator_loop.generate_faithful_explanation = (
