@@ -1,0 +1,152 @@
+[
+  {
+    "style": "elegant",
+    "query": "an elegant dress for a formal evening",
+    "winner": "kb_off"
+  },
+  {
+    "style": "elegant",
+    "query": "something elegant for a gala",
+    "winner": "kb_on"
+  },
+  {
+    "style": "elegant",
+    "query": "an elegant blouse for a dinner party",
+    "winner": "kb_on"
+  },
+  {
+    "style": "elegant",
+    "query": "elegant trousers for an event",
+    "winner": "kb_off"
+  },
+  {
+    "style": "elegant",
+    "query": "an elegant outfit top for the opera",
+    "winner": "kb_off"
+  },
+  {
+    "style": "casual",
+    "query": "a casual top for the weekend",
+    "winner": "kb_on"
+  },
+  {
+    "style": "casual",
+    "query": "something casual for everyday wear",
+    "winner": "kb_off"
+  },
+  {
+    "style": "casual",
+    "query": "casual trousers for relaxing",
+    "winner": "kb_on"
+  },
+  {
+    "style": "casual",
+    "query": "a casual sweater for home",
+    "winner": "kb_on"
+  },
+  {
+    "style": "casual",
+    "query": "a casual t-shirt for errands",
+    "winner": "kb_off"
+  },
+  {
+    "style": "sporty",
+    "query": "a sporty top for the gym",
+    "winner": "kb_on"
+  },
+  {
+    "style": "sporty",
+    "query": "something sporty for running",
+    "winner": "kb_off"
+  },
+  {
+    "style": "sporty",
+    "query": "sporty shorts for training",
+    "winner": "kb_on"
+  },
+  {
+    "style": "sporty",
+    "query": "a sporty jacket for outdoor exercise",
+    "winner": "kb_on"
+  },
+  {
+    "style": "sporty",
+    "query": "sporty leggings for a workout",
+    "winner": "kb_on"
+  },
+  {
+    "style": "romantic",
+    "query": "a romantic dress for a date night",
+    "winner": "kb_on"
+  },
+  {
+    "style": "romantic",
+    "query": "something romantic for valentine's dinner",
+    "winner": "kb_on"
+  },
+  {
+    "style": "romantic",
+    "query": "a romantic blouse for an anniversary",
+    "winner": "kb_on"
+  },
+  {
+    "style": "romantic",
+    "query": "a romantic skirt for a picnic date",
+    "winner": "kb_on"
+  },
+  {
+    "style": "romantic",
+    "query": "a romantic top for a candlelit dinner",
+    "winner": "kb_on"
+  },
+  {
+    "style": "professional",
+    "query": "a professional blazer for the office",
+    "winner": "kb_on"
+  },
+  {
+    "style": "professional",
+    "query": "something professional for a job interview",
+    "winner": "kb_on"
+  },
+  {
+    "style": "professional",
+    "query": "professional trousers for work",
+    "winner": "kb_on"
+  },
+  {
+    "style": "professional",
+    "query": "a professional shirt for a client meeting",
+    "winner": "kb_on"
+  },
+  {
+    "style": "professional",
+    "query": "a professional dress for a conference",
+    "winner": "kb_on"
+  },
+  {
+    "style": "bold",
+    "query": "a bold statement top for a party",
+    "winner": "kb_on"
+  },
+  {
+    "style": "bold",
+    "query": "something bold for a night out",
+    "winner": "kb_on"
+  },
+  {
+    "style": "bold",
+    "query": "a bold dress that stands out",
+    "winner": "kb_on"
+  },
+  {
+    "style": "bold",
+    "query": "a bold jacket to draw attention",
+    "winner": "kb_on"
+  },
+  {
+    "style": "bold",
+    "query": "a bold outfit piece for a festival",
+    "winner": "kb_off"
+  }
+]

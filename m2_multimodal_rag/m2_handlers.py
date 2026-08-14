@@ -6,6 +6,7 @@ response dict with: action, success, response_text, items, error.
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,9 +22,27 @@ from m2_multimodal_rag.cross_encoder_reranker import cross_encoder_reranker
 from m2_multimodal_rag.diversity_bandit import diversity_bandit
 from m2_multimodal_rag.knowledge_base.kb_retriever import kb_retriever
 from m2_multimodal_rag.collaborative_filtering.cf_scorer import cf_scorer
+from m2_multimodal_rag.vlm_kansei import visual_psychology_fact
 
 # Attempt to load CF model at import time (silent if files not present)
 cf_scorer.load()
+
+# =====================================================================
+# Ablation switches (evaluation only — all default OFF)
+# =====================================================================
+# Environment variables that disable one novelty at a time so evaluation
+# scripts (m2_multimodal_rag/evaluation/) can measure ON-vs-OFF baselines:
+#   M2_ABLATE_ENSEMBLE=1        → single query vector (no LLM expansion)
+#   M2_ABLATE_CF=1              → rule-based purchase score instead of NCF
+#   M2_ABLATE_KB=1              → Kansei KB off (score, CLIP terms, facts)
+#   M2_ABLATE_BANDIT=<λ>       → fixed MMR λ (read in diversity_bandit.py)
+#   M2_ABLATE_GUARD=none|l1|l12 → guard stage gating (read in regeneration_loop.py)
+_ABLATE_ENSEMBLE = os.getenv("M2_ABLATE_ENSEMBLE") == "1"
+_ABLATE_CF       = os.getenv("M2_ABLATE_CF") == "1"
+_ABLATE_KB       = os.getenv("M2_ABLATE_KB") == "1"
+if _ABLATE_ENSEMBLE or _ABLATE_CF or _ABLATE_KB:
+    print(f"M2 ABLATION ACTIVE: ensemble_off={_ABLATE_ENSEMBLE} "
+          f"cf_off={_ABLATE_CF} kb_off={_ABLATE_KB}")
 
 # =====================================================================
 # Article prices (M2-local, in-memory only — shared/ files untouched)
@@ -52,6 +71,273 @@ def _load_articles_priced():
     data_loader.articles_df = df   # cache in the loader so the merge runs only once
     print(f"  [prices] Attached avg £ prices to {df['price'].notna().sum()}/{len(df)} articles.")
     return df
+
+
+# =====================================================================
+# Filtered FAISS helper (hard filters at index level — pool 50 → 15)
+# =====================================================================
+
+def _hard_filter_allowed_ids(articles_df, filters: dict, exclude_ids: list) -> list:
+    """Vectorised hard-filter pass over the full article catalogue.
+    Returns article_ids (zero-padded 10-char strings) satisfying every hard
+    filter — same semantics as the per-candidate Phase 2 checks:
+    case-insensitive equality for attributes, price_min/price_max range with
+    unknown (NaN) prices never excluding an item. An unknown filter column
+    yields [] so the caller falls back to unfiltered search."""
+    import pandas as pd
+    mask = pd.Series(True, index=articles_df.index)
+    for key, value in filters.items():
+        if key in ("price_max", "price_min"):
+            if "price" not in articles_df.columns:
+                continue
+            price = articles_df["price"]
+            if key == "price_max":
+                mask &= price.isna() | (price <= value)
+            else:
+                mask &= price.isna() | (price >= value)
+        else:
+            if key not in articles_df.columns:
+                return []
+            mask &= (articles_df[key].astype(str).str.strip().str.lower()
+                     == str(value).strip().lower())
+    ids = articles_df.loc[mask, "article_id"].astype(str).str.zfill(10)
+    if exclude_ids:
+        excl = {str(e).zfill(10) for e in exclude_ids}
+        ids = ids[~ids.isin(excl)]
+    return ids.tolist()
+
+
+# =====================================================================
+# Session candidate-pool cache (follow-up handling via M3 session memory)
+# =====================================================================
+# After every full catalog_search, the scored candidate pool is cached per
+# session. A REFINEMENT follow-up ("cheaper ones", "not that one") is then
+# resolved by re-filtering the cached pool — no query-expansion LLM call,
+# no CLIP ensemble, no FAISS re-retrieval.
+
+from collections import OrderedDict as _OrderedDict
+import time as _time
+
+_SESSION_POOL_TTL_S = 1800   # cached pools expire after 30 minutes
+_SESSION_POOL_MAX   = 50     # max concurrent sessions kept in memory
+
+_session_pool_cache: "_OrderedDict[str, dict]" = _OrderedDict()
+
+
+def _session_pool_put(session_id: str, pool: list) -> None:
+    """Caches the session's scored candidate pool as (article_id, faiss_score)
+    pairs. Evicts oldest sessions beyond _SESSION_POOL_MAX."""
+    if not session_id or not pool:
+        return
+    _session_pool_cache.pop(session_id, None)
+    _session_pool_cache[session_id] = {"pool": pool, "ts": _time.time()}
+    while len(_session_pool_cache) > _SESSION_POOL_MAX:
+        _session_pool_cache.popitem(last=False)
+
+
+def _session_pool_get(session_id: str) -> list | None:
+    """Returns the cached pool for a session, or None if absent/expired."""
+    entry = _session_pool_cache.get(session_id)
+    if not entry:
+        return None
+    if _time.time() - entry["ts"] > _SESSION_POOL_TTL_S:
+        _session_pool_cache.pop(session_id, None)
+        return None
+    return entry["pool"]
+
+
+def _followup_pool_from_cache(session_id: str, articles_df, filters: dict,
+                              exclude_ids: list, min_needed: int) -> list | None:
+    """
+    Follow-up fast path: re-applies the (merged) hard filters and exclusions
+    to the session's cached candidate pool. Returns surviving
+    (article_id, faiss_score) pairs in original relevance order, or None when
+    the fast path can't be used (no/expired cache, or too few survivors —
+    e.g. a refinement that genuinely needs fresh retrieval, like a new colour
+    against a colour-filtered pool).
+    """
+    cached = _session_pool_get(session_id)
+    if not cached:
+        return None
+
+    if filters:
+        allowed = set(_hard_filter_allowed_ids(articles_df, filters, exclude_ids))
+        survivors = [(aid, score) for aid, score in cached if aid in allowed]
+    else:
+        excl = {str(e).zfill(10) for e in (exclude_ids or [])}
+        survivors = [(aid, score) for aid, score in cached if aid not in excl]
+
+    if len(survivors) < min_needed:
+        print(f"  [follow-up] Cached pool too narrow after re-filtering "
+              f"({len(survivors)} < {min_needed}) — full retrieval needed.")
+        return None
+    return survivors
+
+
+# =====================================================================
+# Session recommended-items cache (ordinal reference resolution)
+# =====================================================================
+# Remembers the ordered item list of each session's last recommendation,
+# so ordinal follow-ups ("the second one") resolve correctly even when
+# M3's dialogue state has been narrowed to a single item by intervening
+# single-item follow-ups. Same TTL/eviction pattern as the pool cache.
+
+_session_items_cache: "_OrderedDict[str, dict]" = _OrderedDict()
+
+
+def _session_items_put(session_id: str, items: list) -> None:
+    """Caches the ordered (article_id, prod_name) list of a recommendation."""
+    if not session_id or not items:
+        return
+    _session_items_cache.pop(session_id, None)
+    _session_items_cache[session_id] = {"items": items, "ts": _time.time()}
+    while len(_session_items_cache) > _SESSION_POOL_MAX:
+        _session_items_cache.popitem(last=False)
+
+
+def _session_items_get(session_id: str) -> list | None:
+    entry = _session_items_cache.get(session_id)
+    if not entry:
+        return None
+    if _time.time() - entry["ts"] > _SESSION_POOL_TTL_S:
+        _session_items_cache.pop(session_id, None)
+        return None
+    return entry["items"]
+
+
+_ORDINAL_MAP = [
+    (("first", "1st", "option 1", "number one", "number 1", "item 1"), 0),
+    (("second", "2nd", "option 2", "number two", "number 2", "item 2"), 1),
+    (("third", "3rd", "option 3", "number three", "number 3", "item 3"), 2),
+    (("fourth", "4th"), 3),
+    (("fifth", "5th"), 4),
+    (("sixth", "6th"), 5),
+    (("last one", "last item"), -1),
+]
+
+
+def _session_reference_hits(user_message: str, session_id: str) -> list:
+    """
+    Resolves explicit item references in the message (ordinals like "the
+    second one", or product names) against this session's last cached
+    recommendation. Returns matching item dicts in mention order (ordinals
+    first). Empty list when nothing explicit is referenced or no cache.
+    """
+    items = _session_items_get(session_id) if session_id else None
+    if not items:
+        return []
+    msg = (user_message or "").lower()
+    hits = []
+    for words, idx in _ORDINAL_MAP:
+        if any(w in msg for w in words):
+            i = len(items) - 1 if idx == -1 else idx
+            if i < len(items) and items[i] not in hits:
+                hits.append(items[i])
+    for it in items:
+        name = str(it.get("prod_name", "")).lower()
+        if len(name) >= 4 and name in msg and it not in hits:
+            hits.append(it)
+    return hits
+
+
+def _override_from_session(article_id: str, user_message: str,
+                           memory_context: dict | None, tag: str) -> str:
+    """
+    If the user's message explicitly references a session-recommended item
+    (ordinal or name) that differs from the article M3 resolved, trust the
+    explicit reference. Otherwise returns article_id unchanged.
+    """
+    session_id = (memory_context or {}).get("session_id")
+    hits = _session_reference_hits(user_message, session_id)
+    if not hits:
+        return article_id
+    hit = hits[0]
+    hid = str(hit.get("article_id", ""))
+    if hid and hid.lstrip("0") != str(article_id or "").lstrip("0"):
+        print(f"  [{tag}] session-memory override: M3 resolved '{article_id or 'None'}' "
+              f"but message references '{hit.get('prod_name')}' ({hid}).")
+        return hid
+    return article_id
+
+
+# =====================================================================
+# Outfit completion via Colour Harmony KB
+# =====================================================================
+# "show me an outfit with a black top" → primary item by relevance + a
+# companion from the complementary garment group, selected by the Colour
+# Harmony KB (complementary/analogous colour tables) instead of MMR.
+
+_OUTFIT_KEYWORDS = (
+    "outfit", "complete look", "complete the look", "goes with", "go with",
+    "wear with", "pair with", "pair it", "to match", "matching set",
+    "full look", "whole look",
+)
+
+_COMPANION_GROUP = {
+    "Garment Upper body": "Garment Lower body",
+    "Garment Lower body": "Garment Upper body",
+    "Garment Full body":  "Garment Upper body",   # dress → layering piece
+    "Shoes":              "Garment Lower body",
+}
+
+
+def _detect_outfit_intent(user_message: str) -> bool:
+    msg = (user_message or "").lower()
+    return any(kw in msg for kw in _OUTFIT_KEYWORDS)
+
+
+def _find_outfit_companion(primary: dict, articles_df, exclude_ids: list) -> dict | None:
+    """
+    Picks a companion item for the primary result: different garment group,
+    colour chosen from the primary colour's harmony partners. Candidates are
+    ranked by filtered-FAISS relevance + harmony_score. Returns a result dict
+    shaped like a Phase-5 selection (article_id/metadata/final_score) plus
+    the KB harmony_note, or None when no companion is available.
+    """
+    meta   = primary["metadata"]
+    colour = str(meta.get("colour_group_name", "")).strip()
+    group  = str(meta.get("product_group_name", "")).strip()
+    target_group   = _COMPANION_GROUP.get(group, "Garment Upper body")
+    partners, note = kb_retriever.harmony_partners(colour)
+
+    mask = articles_df["product_group_name"].astype(str).str.strip() == target_group
+    if partners:
+        pmask = mask & articles_df["colour_group_name"].astype(str).str.strip().isin(partners)
+        if pmask.sum() >= 5:   # keep the colour restriction only if enough choice remains
+            mask = pmask
+    ids  = articles_df.loc[mask, "article_id"].astype(str).str.zfill(10)
+    excl = {str(e).zfill(10) for e in (exclude_ids or [])}
+    excl.add(str(primary["article_id"]).zfill(10))
+    allowed = [i for i in ids.tolist() if i not in excl]
+    if not allowed:
+        return None
+
+    qtext = (f"{' '.join(partners[:3])} {target_group.replace('Garment ', '').lower()} "
+             f"to wear with a {colour} {meta.get('product_type_name', '')}").strip()
+    vec      = clip_encoder.encode_text(qtext)
+    selector = faiss_db.build_id_selector(allowed)
+    cands = (faiss_db.search_multi([vec], top_k=10, selector=selector)
+             if (vec is not None and selector is not None) else [])
+    if not cands:
+        cands = [(allowed[0], 0.0)]
+
+    best = None
+    for aid, score in cands:
+        cmeta = _fetch_article(aid)
+        if not cmeta:
+            continue
+        h = kb_retriever.harmony_score(colour, str(cmeta.get("colour_group_name", "")))
+        total = score + h
+        if best is None or total > best[0]:
+            best = (total, aid, cmeta)
+    if best is None:
+        return None
+    return {
+        "article_id":   best[1],
+        "metadata":     best[2],
+        "final_score":  round(best[0], 4),
+        "harmony_note": note,
+    }
 
 
 # =====================================================================
@@ -168,6 +454,12 @@ def _fetch_article(article_id: str) -> dict | None:
 
 def _format_article_for_response(metadata: dict) -> dict:
     """Formats raw CSV metadata into a clean response dict for the API."""
+    price = metadata.get("price")
+    try:
+        # NaN (never-purchased articles) and non-numeric values become None
+        price = round(float(price), 2) if price == price and price is not None else None
+    except (TypeError, ValueError):
+        price = None
     return {
         "article_id":               str(metadata.get("article_id", "")).zfill(10),
         "prod_name":                metadata.get("prod_name", "Unknown"),
@@ -178,6 +470,7 @@ def _format_article_for_response(metadata: dict) -> dict:
         "index_group_name":         metadata.get("index_group_name", "Unknown"),
         "detail_desc":              metadata.get("detail_desc", ""),
         "graphical_appearance_name":metadata.get("graphical_appearance_name", "Unknown"),
+        "price":                    price,
     }
 
 
@@ -286,17 +579,36 @@ def _vlm_verified_response(
 _NON_VISUAL_TOPICS = {"material_and_care", "price", "availability", "sizing_and_fit"}
 
 
+def _cached_image_path(article_id: str):
+    """Local image path if already downloaded, else None (never downloads)."""
+    aid = str(article_id).zfill(10)
+    p = data_loader.image_cache_dir / aid[:3] / f"{aid}.jpg"
+    return p if p.exists() else None
+
+
 def _kb_fact(metadata: dict, user_message: str) -> str:
     """
-    Fashion-KB grounding fact for lookup prompts (colour psychology /
-    occasion fit / Kansei), mirroring what Phase 6 does for catalog search.
-    Empty string when no KB rule applies.
+    Grounding fact for lookup prompts. VLM-first (NOVELTY 5 evolution): when
+    the product image is cached, the vision model captures the item's visual
+    psychology automatically; otherwise falls back to the manual Fashion KB
+    tables (colour psychology / occasion fit / Kansei).
+    Empty string when neither source applies.
     """
+    if _ABLATE_KB:
+        return ""
     kansei = kb_retriever.detect_kansei_from_message(user_message or "")
+    style  = kansei[0] if kansei else None
+    aid    = str(metadata.get("article_id", "")).zfill(10)
+
+    fact = visual_psychology_fact(
+        aid, _cached_image_path(aid), metadata, style_word=style
+    )
+    if fact:
+        return fact
     return kb_retriever.get_explanation(
         item_colour=metadata.get("colour_group_name", ""),
         item_type=metadata.get("product_type_name", ""),
-        style_word=kansei[0] if kansei else None,
+        style_word=style,
     )
 
 
@@ -393,14 +705,18 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
     soft_terms   = " ".join(str(v) for v in soft_constraints.values() if v)
 
     # NOVELTY 5: inject psychology KB context into CLIP search text
-    kb_query_context = kb_retriever.get_context(
-        occasion=soft_constraints.get("occasion"),
-        style_word=inferred_style,
-    )
-    clip_terms = kb_retriever.get_clip_terms(
-        occasion=soft_constraints.get("occasion"),
-        style_word=inferred_style,
-    )
+    if _ABLATE_KB:
+        kb_query_context = ""
+        clip_terms = ""
+    else:
+        kb_query_context = kb_retriever.get_context(
+            occasion=soft_constraints.get("occasion"),
+            style_word=inferred_style,
+        )
+        clip_terms = kb_retriever.get_clip_terms(
+            occasion=soft_constraints.get("occasion"),
+            style_word=inferred_style,
+        )
     if kb_query_context:
         print(f"  [KB] Query context injected: {kb_query_context[:80]}...")
     if clip_terms:
@@ -412,24 +728,75 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
     )
     print(f"  [catalog_search] Base search text: '{base_search_text}'")
 
-    expanded_queries = llm_generator.expand_query(base_search_text)
-    query_vectors    = [clip_encoder.encode_text(q) for q in expanded_queries if q]
+    articles_df = _load_articles_priced()
 
-    if not query_vectors:
-        return {"action": "catalog_search", "success": False,
-                "response_text": "I couldn't process your search request.",
-                "items": [], "error": "CLIP encoding failed"}
+    # --- Follow-up fast path (M3 session memory) ---
+    # M3 marks REFINEMENT turns by putting "new_changes" into memory_context
+    # and sends session_id alongside. When the session's cached candidate
+    # pool still satisfies the merged filters, the follow-up is resolved from
+    # it directly — skipping query expansion (LLM), CLIP ensemble and FAISS.
+    session_id  = (memory_context or {}).get("session_id")
+    is_followup = bool((memory_context or {}).get("new_changes")) or bool(
+        (memory_context or {}).get("previous_constraints"))
+    prefiltered = False
+    from_cache  = False
+    candidates  = []
 
-    candidates = faiss_db.search_multi(query_vectors, top_k=50)
-    if not candidates:
-        return {"action": "catalog_search", "success": False,
-                "response_text": "I couldn't find any items matching your search.",
-                "items": [], "error": "No FAISS results"}
+    if session_id and is_followup:
+        survivors = _followup_pool_from_cache(
+            session_id, articles_df, filters, exclude_ids,
+            min_needed=max(num_items, 3),
+        )
+        if survivors is not None:
+            candidates  = survivors
+            from_cache  = True
+            prefiltered = bool(filters)   # filters re-applied inside the helper
+            print(f"  [follow-up] Resolved from session cache: {len(candidates)} "
+                  f"candidates — skipping query expansion + FAISS re-retrieval.")
+
+    if from_cache:
+        # One local CLIP vector is still needed for MMR similarity in Phase 5
+        _vec = clip_encoder.encode_text(base_search_text)
+        query_vectors = [_vec] if _vec is not None else []
+    else:
+        if _ABLATE_ENSEMBLE:
+            expanded_queries = [base_search_text]   # ablation: single-vector baseline
+        else:
+            expanded_queries = llm_generator.expand_query(base_search_text)
+        query_vectors    = [clip_encoder.encode_text(q) for q in expanded_queries if q]
+
+        if not query_vectors:
+            return {"action": "catalog_search", "success": False,
+                    "response_text": "I couldn't process your search request.",
+                    "items": [], "error": "CLIP encoding failed"}
+
+        # --- Filtered FAISS: hard filters applied at index level (pool 50 → 15) ---
+        # Allowed ids are computed vectorised over the full catalogue, then FAISS
+        # only scans those rows via an IDSelector. Every candidate is already
+        # filter-valid, so the pool shrinks to 15 without losing valid items.
+        if filters:
+            allowed_ids = _hard_filter_allowed_ids(articles_df, filters, exclude_ids)
+            selector    = faiss_db.build_id_selector(allowed_ids)
+            if selector is not None:
+                candidates  = faiss_db.search_multi(query_vectors, top_k=15, selector=selector)
+                prefiltered = bool(candidates)
+                print(f"  [catalog_search] Filtered FAISS: {len(allowed_ids):,} "
+                      f"filter-valid articles → {len(candidates)} candidates")
+
+        if not candidates:
+            if filters:
+                print("  [catalog_search] Filtered FAISS empty/unavailable — "
+                      "falling back to unfiltered top-50 search.")
+            candidates = faiss_db.search_multi(query_vectors, top_k=50)
+        if not candidates:
+            return {"action": "catalog_search", "success": False,
+                    "response_text": "I couldn't find any items matching your search.",
+                    "items": [], "error": "No FAISS results"}
 
     # ---------------------------------------------------------------
     # PHASE 2 — Hard filter + boost / penalty / purchase history scoring
+    # (hard-filter checks skipped when the pool was pre-filtered at index level)
     # ---------------------------------------------------------------
-    articles_df     = _load_articles_priced()
     filtered_results = []
 
     for article_id, faiss_score in candidates:
@@ -446,23 +813,25 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
 
         metadata = article_row.iloc[0].to_dict()
 
-        # Hard filters — all must pass
-        passes_filters = True
-        for filter_key, filter_value in filters.items():
-            if filter_key in ("price_max", "price_min"):
-                item_price = metadata.get("price")
-                if item_price is None or item_price != item_price:  # NaN check
-                    continue  # unknown price — don't exclude the item
-                if filter_key == "price_max" and item_price > filter_value:
-                    passes_filters = False; break
-                if filter_key == "price_min" and item_price < filter_value:
-                    passes_filters = False; break
-            else:
-                if str(metadata.get(filter_key, "")).strip().lower() != str(filter_value).strip().lower():
-                    passes_filters = False; break
+        # Hard filters — all must pass (already guaranteed when the FAISS
+        # pool was pre-filtered at index level)
+        if not prefiltered:
+            passes_filters = True
+            for filter_key, filter_value in filters.items():
+                if filter_key in ("price_max", "price_min"):
+                    item_price = metadata.get("price")
+                    if item_price is None or item_price != item_price:  # NaN check
+                        continue  # unknown price — don't exclude the item
+                    if filter_key == "price_max" and item_price > filter_value:
+                        passes_filters = False; break
+                    if filter_key == "price_min" and item_price < filter_value:
+                        passes_filters = False; break
+                else:
+                    if str(metadata.get(filter_key, "")).strip().lower() != str(filter_value).strip().lower():
+                        passes_filters = False; break
 
-        if not passes_filters:
-            continue
+            if not passes_filters:
+                continue
 
         # Penalty score
         penalty_score = sum(
@@ -483,7 +852,7 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         # Purchase history collaborative score
         # CF model (trained on 185,037 transactions) scores at item level.
         # Falls back to rule-based scoring if model files are not yet loaded.
-        if cf_scorer._loaded:
+        if cf_scorer._loaded and not _ABLATE_CF:
             history_score = cf_scorer.score(article_id, purchase_hints, articles_df)
         else:
             history_score = 0.0
@@ -504,7 +873,7 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
                     history_score += 0.08
 
         # Psychology KB score (NOVELTY 5)
-        kb_score = kb_retriever.score(
+        kb_score = 0.0 if _ABLATE_KB else kb_retriever.score(
             item_colour=metadata.get("colour_group_name", ""),
             item_type=metadata.get("product_type_name", ""),
             item_appearance=metadata.get("graphical_appearance_name", ""),
@@ -536,6 +905,17 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
                         "final_score": faiss_score,
                     })
 
+    # Cache the scored pool for follow-up turns. Full runs only — a cache-
+    # answered follow-up keeps the original pool's breadth so consecutive
+    # refinements don't progressively shrink it.
+    if session_id and not from_cache and filtered_results:
+        _session_pool_put(
+            session_id,
+            [(r["article_id"], r["faiss_score"]) for r in filtered_results],
+        )
+        print(f"  [follow-up] Cached {len(filtered_results)} scored candidates "
+              f"for session {str(session_id)[:12]}")
+
     # ---------------------------------------------------------------
     # PHASE 3 — Cross-Encoder Neural Re-ranking (MiniLM-BERT)
     # ---------------------------------------------------------------
@@ -545,6 +925,18 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         candidates=filtered_results,
         top_k=20,
     )
+
+    # Prefetch product images for the top candidates in the background.
+    # The Kaggle per-file download costs seconds each; starting it now
+    # overlaps the download with Phases 4-5 so it's off the guard's
+    # critical path. get_image() is a no-op for already-cached images.
+    # 8 workers so every candidate starts immediately — otherwise the two
+    # items MMR eventually picks can sit queued behind unneeded downloads.
+    _img_pool = ThreadPoolExecutor(max_workers=8)
+    _img_futures = {
+        r["article_id"]: _img_pool.submit(data_loader.get_image, r["article_id"])
+        for r in neural_reranked[:8]
+    }
 
     # ---------------------------------------------------------------
     # PHASE 4 — LLM Semantic Re-ranking (NOVELTY 2)
@@ -566,6 +958,14 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         purchase_hints=purchase_hints,
     )
 
+    # Ensure prefetch covers every candidate MMR can pick from — the LLM
+    # rerank may promote items outside the Phase-3 top-8.
+    for r in reranked_results[:8]:
+        if r["article_id"] not in _img_futures:
+            _img_futures[r["article_id"]] = _img_pool.submit(
+                data_loader.get_image, r["article_id"]
+            )
+
     # ---------------------------------------------------------------
     # PHASE 5 — Thompson Sampling Diversity Bandit + MMR (NOVELTY 3)
     # ---------------------------------------------------------------
@@ -581,12 +981,38 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
     )
     print(f"  [catalog_search] MMR with Thompson Sampling λ={adaptive_lambda:.3f}...")
 
-    top_results = faiss_db.mmr_select(
-        candidates=reranked_results,
-        query_vector= query_vectors[0],
-        top_k=num_items,
-        lambda_param=adaptive_lambda,
-    ) or reranked_results[:num_items]
+    # --- Outfit completion (Colour Harmony KB) ---
+    # Outfit intent → primary item by relevance + a colour-harmonious
+    # companion from the complementary garment group, instead of two
+    # same-category alternatives via MMR.
+    outfit_mode = _detect_outfit_intent(user_message)
+    companion   = None
+    if outfit_mode and reranked_results:
+        primary   = reranked_results[0]
+        companion = _find_outfit_companion(primary, articles_df, exclude_ids)
+        if companion:
+            top_results = [primary, companion]
+            print(f"  [outfit] Pairing '{primary['metadata'].get('prod_name')}' "
+                  f"({primary['metadata'].get('colour_group_name')}) with "
+                  f"'{companion['metadata'].get('prod_name')}' "
+                  f"({companion['metadata'].get('colour_group_name')}) — colour-harmony KB")
+        else:
+            print("  [outfit] No harmonious companion found — standard selection.")
+
+    if not (outfit_mode and companion):
+        top_results = faiss_db.mmr_select(
+            candidates=reranked_results,
+            query_vector=query_vectors[0] if query_vectors else None,
+            top_k=num_items,
+            lambda_param=adaptive_lambda,
+        ) or reranked_results[:num_items]
+
+    # Selected items are known now — cancel any not-yet-started prefetch
+    # downloads for candidates that didn't make the final cut.
+    _selected_ids = {r["article_id"] for r in top_results}
+    for _aid, _f in _img_futures.items():
+        if _aid not in _selected_ids:
+            _f.cancel()
 
     # Colour harmony diagnostic for the selected pair (NOVELTY 5 — Improvement 4)
     if len(top_results) >= 2:
@@ -597,15 +1023,32 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         print(f"  [KB] Colour harmony: {c1} × {c2} = {h:+.2f} ({label})")
 
     # ---------------------------------------------------------------
-    # PHASE 6 — Verified explanation generation
+    # PHASE 6 — Verified explanation generation (parallel per item)
     # ---------------------------------------------------------------
-    response_items = []
-    for result in top_results:
+    # Each item's guard is a chain of sequential LLM/model calls, so items
+    # are independent of each other — verifying them in parallel threads
+    # divides Phase 6 latency by roughly the item count. Output preserves
+    # MMR order. Note: guard log lines from different items may interleave.
+    def _verify_item(result: dict) -> dict:
         aid  = result["article_id"]
         meta = result["metadata"]
 
-        # NOVELTY 5: KB-grounded explanation fact injected into the prompt
-        kb_explanation_fact = kb_retriever.get_explanation(
+        # Wait for this item's background image prefetch (started after
+        # Phase 3) so the guard never downloads the same file concurrently.
+        _fut = _img_futures.get(aid)
+        if _fut is not None:
+            try:
+                _fut.result(timeout=180)
+            except Exception:
+                pass  # guard handles a missing image gracefully (Layer 3 skip)
+
+        # NOVELTY 5 evolution: VLM-first explanation fact — the vision model
+        # captures the item's visual psychology from the (just-prefetched)
+        # image; the manual Kansei KB remains the fallback.
+        kb_explanation_fact = "" if _ABLATE_KB else visual_psychology_fact(
+            str(aid).zfill(10), _cached_image_path(aid), meta,
+            style_word=inferred_style,
+        ) or kb_retriever.get_explanation(
             item_colour=meta.get("colour_group_name", ""),
             item_type=meta.get("product_type_name", ""),
             occasion=soft_constraints.get("occasion"),
@@ -623,11 +1066,29 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         item_response["explanation"]         = explanation
         item_response["score"]               = result["final_score"]
         item_response["verification_trail"]  = verification_trail
-        response_items.append(item_response)
+        return item_response
+
+    if len(top_results) > 1:
+        print(f"  [catalog_search] Phase 6: verifying {len(top_results)} items in parallel...")
+        with ThreadPoolExecutor(max_workers=min(len(top_results), 3)) as pool:
+            response_items = list(pool.map(_verify_item, top_results))
+    else:
+        response_items = [_verify_item(r) for r in top_results]
+    _img_pool.shutdown(wait=False)
 
     # Natural language summary — handles any number of items
     n = len(response_items)
-    if n == 0:
+    if outfit_mode and companion and n == 2:
+        _a, _b = response_items
+        _pair_note = companion.get("harmony_note") or (
+            f"{_a['colour_group_name']} and {_b['colour_group_name']} pair well together"
+        )
+        summary = (
+            f"Here's a complete outfit for you: the {_a['prod_name']} in "
+            f"{_a['colour_group_name']}, paired with the {_b['prod_name']} in "
+            f"{_b['colour_group_name']}. {_pair_note}."
+        )
+    elif n == 0:
         summary = "I couldn't find any items matching all your criteria."
     elif n == 1:
         summary = (
@@ -650,6 +1111,14 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
 
     _print_accuracy(response_items, filters)
 
+    # Remember this recommendation's ordered items so later ordinal/name
+    # follow-ups resolve correctly even if M3's dialogue state narrows.
+    if session_id and response_items:
+        _session_items_put(session_id, [
+            {"article_id": it["article_id"], "prod_name": it["prod_name"]}
+            for it in response_items
+        ])
+
     return {
         "action":        "catalog_search",
         "success":       len(response_items) > 0,
@@ -671,6 +1140,7 @@ def handle_attribute_lookup(retrieval_input: dict, memory_context: dict | None =
     article_id       = payload.get("article_id", "")
     attribute_topic  = payload.get("attribute_topic", "general_details")
 
+    article_id = _override_from_session(article_id, user_message, memory_context, "attribute_lookup")
     print(f"  [attribute_lookup] Article: {article_id}, Topic: {attribute_topic}")
 
     metadata = _resolve_article_metadata(article_id, retrieval_input)
@@ -746,6 +1216,24 @@ def handle_item_compare(retrieval_input: dict, memory_context: dict | None = Non
     article_id_b         = payload.get("article_id_b") or ""
     comparison_dimension = payload.get("comparison_dimension", "overall")
     preference_weights   = payload.get("preference_weights", {})
+
+    # Session-memory resolution: explicit ordinals/names in the message win
+    # over (or fill in for) M3's resolution — fixes "compare the first and
+    # second one" after M3's dialogue state narrowed to a single item.
+    _hits = _session_reference_hits(user_message, (memory_context or {}).get("session_id"))
+    if len(_hits) >= 2:
+        _ha, _hb = str(_hits[0]["article_id"]), str(_hits[1]["article_id"])
+        if {_ha.lstrip("0"), _hb.lstrip("0")} != {str(article_id_a).lstrip("0"),
+                                                  str(article_id_b).lstrip("0")}:
+            print(f"  [item_compare] session-memory resolution: comparing "
+                  f"'{_hits[0]['prod_name']}' vs '{_hits[1]['prod_name']}'")
+            article_id_a, article_id_b = _ha, _hb
+    elif len(_hits) == 1 and article_id_a and not article_id_b:
+        _hb = str(_hits[0]["article_id"])
+        if _hb.lstrip("0") != str(article_id_a).lstrip("0"):
+            print(f"  [item_compare] session-memory resolution: item_b filled "
+                  f"with '{_hits[0]['prod_name']}'")
+            article_id_b = _hb
 
     if not article_id_a or not article_id_b:
         return _clarification_response(
@@ -873,6 +1361,7 @@ def handle_explanation_generate(retrieval_input: dict, memory_context: dict | No
     prior_claims   = payload.get("prior_claims", [])
     matched_prefs  = payload.get("matched_prefs", [])
 
+    article_id = _override_from_session(article_id, user_message, memory_context, "explanation_generate")
     print(f"  [explanation_generate] Article: {article_id}")
     print(f"  [explanation_generate] Prior claims: {len(prior_claims)}, Matched prefs: {len(matched_prefs)}")
 
@@ -994,6 +1483,7 @@ def handle_item_detail_lookup(retrieval_input: dict, memory_context: dict | None
     user_message = retrieval_input.get("user_message", "")
     article_id   = payload.get("article_id", "")
 
+    article_id = _override_from_session(article_id, user_message, memory_context, "item_detail_lookup")
     print(f"  [item_detail_lookup] Article: {article_id}")
 
     metadata = _resolve_article_metadata(article_id, retrieval_input)
@@ -1035,6 +1525,17 @@ def handle_item_detail_lookup(retrieval_input: dict, memory_context: dict | None
             f"from the {item_info['department_name']} department. "
             f"{detail_desc}"
         )
+
+    # Outfit tip: deterministic Colour Harmony pairing line when the user
+    # asks what goes with the item ("what can I wear with this?").
+    if response_text and _detect_outfit_intent(user_message):
+        partners, note = kb_retriever.harmony_partners(item_info["colour_group_name"])
+        if partners:
+            response_text += (
+                f" Style tip: {item_info['colour_group_name']} pairs beautifully "
+                f"with {', '.join(partners[:3])}"
+            )
+            response_text += f" — {note[0].lower() + note[1:]}." if note else "."
 
     return {
         "action":        "item_detail_lookup",
@@ -1088,7 +1589,30 @@ def handle_no_retrieval(memory_context: dict) -> dict:
 
         print(f"  [no_retrieval] FEEDBACK: sentiment={sentiment_score:.1f}, type={feedback_type}")
 
-        if is_positive:
+        # Multi-item awareness: M3 always attributes feedback to the first
+        # item, but after a multi-item turn (e.g. an outfit pair) "I love it"
+        # is ambiguous — acknowledge the whole set instead of silently
+        # praising item 1. Uses M2's own session items cache.
+        session_items = _session_items_get((memory_context or {}).get("session_id") or "") or []
+        names = [it.get("prod_name") for it in session_items if it.get("prod_name")]
+        multi = len(names) >= 2
+        if multi:
+            names_str = ", ".join(names[:-1]) + f" and the {names[-1]}"
+
+        if is_positive and multi:
+            print(f"  [no_retrieval] Feedback follows a {len(names)}-item turn — acknowledging the set.")
+            prompt   = (
+                f"You are a friendly fashion assistant. The customer just expressed positive feedback "
+                f"(sentiment: {sentiment_score:.1f}/1.0) about the items you showed together: "
+                f"the {names_str}. It's not clear which one (or all) they mean, so celebrate how well "
+                f"the items work together (1-2 sentences) and ask whether they'd like to go with "
+                f"everything or focus on one of them."
+            )
+            fallback = (
+                f"So glad you love them! The {names_str} really do work well together. "
+                f"Would you like to go with the whole set, or shall I tell you more about one of them?"
+            )
+        elif is_positive:
             prompt   = (
                 f"You are a friendly fashion assistant. The customer just expressed positive feedback "
                 f"(sentiment: {sentiment_score:.1f}/1.0) about the {item_name}. "
@@ -1098,6 +1622,18 @@ def handle_no_retrieval(memory_context: dict) -> dict:
             fallback = (
                 f"Great choice! The {item_name} is an excellent pick. "
                 f"Would you like to see similar items, or shall I help with anything else?"
+            )
+        elif multi:
+            prompt   = (
+                f"You are a friendly fashion assistant. The customer just expressed negative feedback "
+                f"(sentiment: {sentiment_score:.1f}/1.0) after being shown these items together: "
+                f"the {names_str}. It's not clear which one they dislike, so acknowledge their "
+                f"reaction empathetically (1-2 sentences) and ask which item missed the mark or "
+                f"what they'd prefer instead."
+            )
+            fallback = (
+                f"I'm sorry those weren't quite right. Was it the {names_str.replace(', ', ' or the ').replace(' and the ', ' or the ')} "
+                f"that missed the mark? Tell me what you'd prefer and I'll find something better!"
             )
         else:
             prompt   = (
