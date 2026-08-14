@@ -273,7 +273,21 @@ async def get_session_history(session_id: str, user_id: str = Query(...)):
     rec_ids = [t.get("recommendation_id") for t in turns if t.get("recommendation_id")]
     recs_by_id = {}
     if rec_ids:
-        for prefix in ("m3", "m2", "m1"):
+        # The session's model lock names the collection the recommendations were
+        # written to, so the locked model is tried first. The remaining prefixes
+        # are a fallback: a session predating the lock, or a missing lock doc,
+        # must not silently strip every product card from a reopened chat.
+        lock     = await db.session_model_locks.find_one(
+            {"session_id": session_id}, {"selected_model": 1}
+        )
+        locked   = (lock or {}).get("selected_model")
+        prefixes = ([locked] if locked else []) + [
+            p for p in ("m3", "m2", "m1") if p != locked
+        ]
+        wanted = set(rec_ids)
+        for prefix in prefixes:
+            if len(recs_by_id) == len(wanted):
+                break
             try:
                 coll = get_collection_name("recommendations", prefix)
                 async for rec in db[coll].find({"recommendation_id": {"$in": rec_ids}}):
