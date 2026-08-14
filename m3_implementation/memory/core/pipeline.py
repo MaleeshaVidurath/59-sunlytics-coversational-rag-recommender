@@ -168,6 +168,10 @@ class MemoryPipeline:
                     customer_id=customer_id
                 )
                 user_id = user.user_id
+        elif user_id:
+            # user_id provided directly (e.g. from frontend anonymous session)
+            # ensure a MongoDB record exists for them
+            await self.user_mgr.get_or_create_user_by_user_id(user_id)
 
         # ── Step 2: Session ────────────────────────────────────────────────
         session = await self.session_mgr.get_or_create_session(

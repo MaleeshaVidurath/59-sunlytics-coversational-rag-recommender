@@ -1,226 +1,357 @@
-import random
+import base64
 import os
-from groq import Groq
-from dotenv import load_dotenv
+import random
 
-# Load environment variables from .env file
+from dotenv import load_dotenv
+from groq import Groq
+
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+_HALLUCINATION_COLORS = ["neon green", "hot pink", "silver", "striped magenta"]
+_RERANK_POOL_SIZE = 8
+_QUERY_VARIANTS = 3
+
+
+# ---------------------------------------------------------------------------
+# ExplanationGenerator
+# ---------------------------------------------------------------------------
 class ExplanationGenerator:
     """
-    Cloud LLM Explanation Generator for M2 Multimodal RAG.
-    Uses Groq API (free tier) to run Llama 3.1 in the cloud instead of locally.
-    This eliminates all local RAM/GPU requirements for text generation.
-    Includes a 'hallucination' mock mode strictly to test the BLIP Guard!
+    Cloud LLM wrapper for M2 Multimodal RAG using the Groq API (free tier).
+    Runs Llama 3.x in the cloud — no local RAM/GPU required.
+
+    Public surface:
+      generate()         — recommendation explanation (novelty 4)
+      regenerate()       — hallucination-corrected re-explanation
+      expand_query()     — semantic query variants for CLIP retrieval (novelty 1)
+      rerank_candidates()— LLM cross-encoder re-ranking (novelty 2)
     """
+
+    # ------------------------------------------------------------------
+    # Initialisation
+    # ------------------------------------------------------------------
+
     def __init__(self):
-        self.api_key = os.getenv("GROQ_API_KEY", "")
-        self.model_name = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-        self.is_available = False
-        self.client = None
-        
-        # Initialize the Groq client
-        if not self.api_key:
-            print("M2 LLM: [WARNING] GROQ_API_KEY not found in .env file.")
+        self.model_name        = os.getenv("GROQ_MODEL",        "llama-3.1-8b-instant")
+        self.vision_model_name = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+        self.is_available      = False
+        self.client            = None
+        # Real API failure counter (evaluation harnesses use this to detect
+        # quota exhaustion directly, instead of inferring it from guard
+        # layers' built-in "pass on failure" fallbacks — which look
+        # identical to a genuine pass in their output).
+        self.fail_count        = 0
+        self._init_client()
+
+    def _init_client(self) -> None:
+        api_key = os.getenv("GROQ_API_KEY", "")
+        if not api_key:
+            print("M2 LLM: [WARNING] GROQ_API_KEY not found — falling back to mock mode.")
             print("M2 LLM: Get a free key at https://console.groq.com/keys")
-            print("M2 LLM: Falling back to mock mode.")
             return
-            
+
         try:
-            self.client = Groq(api_key=self.api_key)
-            # Quick test call to verify the key works
-            test_response = self.client.chat.completions.create(
+            client = Groq(api_key=api_key)
+            test   = client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": "Hi"}],
                 max_tokens=5,
             )
-            if test_response.choices:
-                self.is_available = True
-                print(f"M2 LLM: [SUCCESS] Groq Cloud LLM initialized (Model: {self.model_name})")
-            else:
-                print("M2 LLM: [WARNING] Groq returned empty response. Falling back to mock mode.")
-        except Exception as e:
-            print(f"M2 LLM: [WARNING] Failed to initialize Groq: {e}")
-            print("M2 LLM: Falling back to mock mode.")
+            if not test.choices:
+                print("M2 LLM: [WARNING] Groq returned empty response — falling back to mock mode.")
+                return
 
-    def _call_llm(self, prompt: str, max_tokens: int = 150, temperature: float = 0.7) -> str:
-        """
-        Sends a prompt to the Groq Cloud API and returns the generated text.
-        Falls back to None if the API call fails.
-        """
+            self.client       = client
+            self.is_available = True
+            print(f"M2 LLM: [SUCCESS] Text model : {self.model_name}")
+            print(f"M2 LLM: [SUCCESS] Vision model: {self.vision_model_name}")
+
+        except Exception as exc:
+            print(f"M2 LLM: [WARNING] Groq init failed ({exc}) — falling back to mock mode.")
+
+    # ------------------------------------------------------------------
+    # Private: low-level API helpers
+    # ------------------------------------------------------------------
+
+    def _call_llm(self, prompt: str, max_tokens: int = 150,
+                  temperature: float = 0.7) -> str | None:
         if not self.is_available:
+            self.fail_count += 1
             return None
-            
         try:
-            response = self.client.chat.completions.create(
+            resp   = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
-            result = response.choices[0].message.content.strip()
-            return result if result else None
-        except Exception as e:
-            print(f"   [LLM API Error] {e}")
+            result = resp.choices[0].message.content.strip()
+            if not result:
+                self.fail_count += 1
+            return result or None
+        except Exception as exc:
+            print(f"   [LLM API Error] {exc}")
+            self.fail_count += 1
             return None
 
-    def generate(self, article_id: str, metadata: dict, force_hallucination=False) -> str:
-        """
-        Generates a natural language explanation of why the item was recommended.
-        Uses Groq Cloud for real generation, with mock fallback.
-        """
-        color = metadata.get('colour_group_name', 'Black')
-        product_type = metadata.get('product_type_name', 'Garment')
-        
-        if force_hallucination:
-            # CAUTION: We intentionally instruct the mock LLM to lie about the color
-            # so we can prove our VLM Guard catches errors mathematically!
-            wrong_colors = ['neon green', 'hot pink', 'silver', 'striped magenta']
-            bad_color = random.choice(wrong_colors)
-            return f"I highly recommend this item! As you can see, it features a beautiful {bad_color} design."
-        
-        # Try Groq Cloud API first
-        if self.is_available:
-            department = metadata.get('department_name', 'Fashion')
-            category = metadata.get('product_group_name', 'Clothing')
-            detail_desc = metadata.get('detail_desc', '')
-            # NOVELTY 5: psychology-grounded fact from Fashion KB
-            kb_fact = metadata.get('kb_psychology_fact', '')
-            kb_instruction = (
-                f"\n- Psychology insight: {kb_fact}"
-                if kb_fact else ""
+    def _call_vision_llm(self, prompt: str, image_path: str,
+                         max_tokens: int = 150,
+                         temperature: float = 0.7) -> str | None:
+        if not self.is_available:
+            return None
+
+        b64 = self._encode_image_base64(image_path)
+        if not b64:
+            print("   [Vision] Encoding failed — falling back to text-only LLM.")
+            return self._call_llm(prompt, max_tokens, temperature)
+
+        try:
+            resp   = self.client.chat.completions.create(
+                model=self.vision_model_name,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url",
+                         "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            result = resp.choices[0].message.content.strip()
+            print("   [Vision] Image-grounded generation succeeded.")
+            return result or None
+        except Exception as exc:
+            print(f"   [Vision LLM API Error] {exc} — falling back to text-only LLM.")
+            return self._call_llm(prompt, max_tokens, temperature)
+
+    @staticmethod
+    def _encode_image_base64(image_path: str) -> str | None:
+        try:
+            with open(image_path, "rb") as fh:
+                return base64.b64encode(fh.read()).decode("utf-8")
+        except Exception as exc:
+            print(f"   [Vision] Could not encode {image_path}: {exc}")
+            return None
+
+    # ------------------------------------------------------------------
+    # Private: metadata helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_metadata(metadata: dict) -> dict:
+        return {
+            "color":        metadata.get("colour_group_name", "Black"),
+            "product_type": metadata.get("product_type_name", "Garment"),
+            "department":   metadata.get("department_name",   "Fashion"),
+            "category":     metadata.get("product_group_name","Clothing"),
+            "description":  metadata.get("detail_desc",       ""),
+            "kb_fact":      metadata.get("kb_psychology_fact",""),
+        }
+
+    # ------------------------------------------------------------------
+    # Private: prompt builders
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_generate_prompt(m: dict, product_knowledge: str,
+                               with_image: bool) -> str:
+        kb_line = f"\n- Psychology insight: {m['kb_fact']}" if m["kb_fact"] else ""
+        knowledge_block = (
+            f"\n\nVerified product knowledge (stay factually grounded):\n{product_knowledge}"
+            if product_knowledge else ""
+        )
+        base_metadata = (
+            f"- Product Type: {m['product_type']}\n"
+            f"- Color: {m['color']}\n"
+            f"- Department: {m['department']}\n"
+            f"- Category: {m['category']}\n"
+            f"- Description: {m['description']}"
+            f"{kb_line}"
+            f"{knowledge_block}"
+        )
+        closing = (
+            "Respond with ONLY the recommendation explanation, nothing else. "
+            "Do not start with 'I recommend' — be creative and natural."
+        )
+
+        if with_image:
+            return (
+                "You are a friendly fashion recommendation assistant. "
+                "The image above shows the actual product being recommended. "
+                "Generate a warm, conversational 1-2 sentence explanation grounded in "
+                "what you can SEE in the image (colour, texture, pattern, fit, styling).\n\n"
+                f"Catalog metadata (for context only):\n{base_metadata}\n\n"
+                f"{closing} Prioritise what you observe in the image over the metadata."
             )
 
-            prompt = (
-                f"You are a friendly fashion recommendation assistant. "
-                f"Generate a warm, conversational 1-2 sentence explanation of why "
-                f"this item is a great recommendation for the customer.\n\n"
-                f"Item details:\n"
-                f"- Product Type: {product_type}\n"
-                f"- Color: {color}\n"
-                f"- Department: {department}\n"
-                f"- Category: {category}\n"
-                f"- Description: {detail_desc}"
-                f"{kb_instruction}\n\n"
-                f"Respond with ONLY the recommendation explanation, nothing else. "
-                f"Do not start with 'I recommend' — be creative and natural. "
-                f"If a psychology insight is provided, weave it naturally into your explanation."
+        return (
+            "You are a friendly fashion recommendation assistant. "
+            "Generate a warm, conversational 1-2 sentence explanation of why "
+            "this item is a great recommendation for the customer.\n\n"
+            f"Item details:\n{base_metadata}\n\n"
+            f"{closing} Weave any psychology insight naturally into your explanation. "
+            "Only describe features supported by the verified product knowledge."
+        )
+
+    @staticmethod
+    def _build_regenerate_prompt(m: dict, visual_feedback: str,
+                                 with_image: bool) -> str:
+        closing = "Respond with ONLY the corrected recommendation, nothing else."
+        if with_image:
+            return (
+                f"The image above shows the actual product. "
+                f"Your previous recommendation was REJECTED because: \"{visual_feedback}\"\n\n"
+                f"Look at the image carefully and write a corrected 1-2 sentence recommendation "
+                f"that ACCURATELY reflects what you see. "
+                f"Catalog metadata for reference: {m['color']} {m['product_type']}.\n\n"
+                f"{closing}"
             )
-            
-            result = self._call_llm(prompt)
+        return (
+            f"Your previous fashion recommendation was REJECTED by our visual verification "
+            f"system because: \"{visual_feedback}\"\n\n"
+            f"Write a corrected 1-2 sentence recommendation that ACCURATELY describes "
+            f"this {m['color']} {m['product_type']}. "
+            f"Only describe visually confirmed features.\n\n"
+            f"{closing}"
+        )
+
+    @staticmethod
+    def _build_rerank_context(user_message: str, soft_constraints: dict,
+                              purchase_hints: dict) -> str:
+        parts = [f"Customer query: '{user_message}'"]
+
+        if soft_constraints:
+            style_parts = [f"{k}: {v}" for k, v in soft_constraints.items() if v]
+            if style_parts:
+                parts.append(f"Style preference: {', '.join(style_parts)}")
+
+        if purchase_hints:
+            dc = purchase_hints.get("dominant_colour", "")
+            dt = purchase_hints.get("dominant_type",   "")
+            bt = purchase_hints.get("budget_tier",     "")
+            if dc or dt:
+                parts.append(f"Typically buys: {dc} {dt}".strip())
+            if bt:
+                parts.append(f"Budget tier: {bt}")
+
+        return "\n".join(parts)
+
+    @staticmethod
+    def _build_rerank_prompt(context: str, pool: list) -> str:
+        item_lines = [
+            f"{i}. {c.get('metadata', {}).get('prod_name', '?')} | "
+            f"Colour: {c.get('metadata', {}).get('colour_group_name', '?')} | "
+            f"Type: {c.get('metadata', {}).get('product_type_name', '?')} | "
+            f"Dept: {c.get('metadata', {}).get('department_name', '?')}"
+            for i, c in enumerate(pool, 1)
+        ]
+        return (
+            "You are a fashion recommendation expert. Rank these items for the customer.\n\n"
+            f"Customer context:\n{context}\n\n"
+            f"Candidates:\n" + "\n".join(item_lines) + "\n\n"
+            "Output ONLY a comma-separated list of item numbers ranked best to worst.\n"
+            "Example output: 3,1,5,2,4"
+        )
+
+    # ------------------------------------------------------------------
+    # Public: explanation generation (Novelty 4)
+    # ------------------------------------------------------------------
+
+    def generate(self, article_id: str, metadata: dict,
+                 force_hallucination: bool = False,
+                 product_knowledge: str = "",
+                 image_path: str = "") -> str:
+        m = self._parse_metadata(metadata)
+
+        if force_hallucination:
+            bad_color = random.choice(_HALLUCINATION_COLORS)
+            return f"I highly recommend this item! As you can see, it features a beautiful {bad_color} design."
+
+        if self.is_available:
+            prompt = self._build_generate_prompt(m, product_knowledge, bool(image_path))
+            if image_path:
+                print(f"   [Vision] Generating image-grounded explanation for {article_id}...")
+                result = self._call_vision_llm(prompt, image_path)
+            else:
+                result = self._call_llm(prompt)
+
             if result:
                 return result
-        
-        # Fallback to mock template if API unavailable
-        return f"I recommend this item because it is a stylish {color} {product_type} that matches your search."
-        
-    def regenerate(self, article_id: str, metadata: dict, visual_feedback: str) -> str:
-        """
-        Triggered ONLY if the BLIP Verification Guard rejects the previous explanation.
-        The LLM is prompted with the visual feedback to constrain its next attempt.
-        """
-        color = metadata.get('colour_group_name', 'Black')
-        product_type = metadata.get('product_type_name', 'Garment')
 
+        return f"I recommend this item because it is a stylish {m['color']} {m['product_type']} that matches your search."
+
+    def regenerate(self, article_id: str, metadata: dict,
+                   visual_feedback: str, image_path: str = "") -> str:
+        m = self._parse_metadata(metadata)
         print("\n[LLM INTERNAL] Received strict feedback from Visual Guard. Regenerating response...")
 
-        # Try Groq Cloud with corrective feedback
         if self.is_available:
-            prompt = (
-                f"Your previous fashion recommendation was REJECTED by our visual verification system "
-                f"because: \"{visual_feedback}\"\n\n"
-                f"Generate a corrected 1-2 sentence recommendation that ACCURATELY describes "
-                f"this {color} {product_type}. Only describe features that are visually confirmed.\n\n"
-                f"Respond with ONLY the corrected recommendation, nothing else."
-            )
+            prompt = self._build_regenerate_prompt(m, visual_feedback, bool(image_path))
+            if image_path:
+                print(f"   [Vision] Regenerating with image context for {article_id}...")
+                result = self._call_vision_llm(prompt, image_path)
+            else:
+                result = self._call_llm(prompt)
 
-            result = self._call_llm(prompt)
             if result:
                 return result
 
-        # Fallback to mock template
-        return f"Correcting my previous statement: based on verified visual evidence, this is a {color} {product_type}."
+        return f"Correcting my previous statement: based on verified visual evidence, this is a {m['color']} {m['product_type']}."
 
     # ------------------------------------------------------------------
-    # NOVELTY 1: LLM Query Expansion
+    # Public: LLM query expansion (Novelty 1)
     # ------------------------------------------------------------------
+
     def expand_query(self, query: str) -> list:
         """
-        Generates 3 semantic variants of the search query for multi-vector CLIP retrieval.
-        Returns a list containing the original query plus up to 3 LLM-generated variants.
-        Paper: RAG-VisualRec — enriching sparse signals into richer textual representations.
+        Returns the original query plus up to 3 LLM-generated semantic variants
+        for multi-vector CLIP retrieval (RAG-VisualRec novelty 1).
         """
         if not self.is_available or not query:
             return [query]
 
         prompt = (
-            f"You are a fashion search expert. Generate exactly 3 alternative search phrases "
-            f"for the same fashion item described below.\n"
+            f"You are a fashion search expert. Generate exactly {_QUERY_VARIANTS} alternative "
+            f"search phrases for the same fashion item described below.\n"
             f"Original: '{query}'\n"
             f"Rules:\n"
             f"- Each phrase must describe the same item from a different vocabulary angle\n"
             f"- Keep each phrase under 8 words\n"
             f"- Use varied fashion terminology (fabric, occasion, style, silhouette)\n"
-            f"Output ONLY the 3 phrases, one per line, no numbers, no explanation."
+            f"Output ONLY the {_QUERY_VARIANTS} phrases, one per line, no numbers, no explanation."
         )
 
         result = self._call_llm(prompt, max_tokens=80, temperature=0.3)
         if not result:
             return [query]
 
-        variants = [line.strip() for line in result.strip().split('\n') if line.strip()][:3]
+        variants = [ln.strip() for ln in result.strip().splitlines() if ln.strip()][:_QUERY_VARIANTS]
         print(f"   [Query Expansion] '{query}' → {len(variants)} variants: {variants}")
         return [query] + variants
 
     # ------------------------------------------------------------------
-    # NOVELTY 2: LLM Cross-Encoder Re-ranking
+    # Public: LLM cross-encoder re-ranking (Novelty 2)
     # ------------------------------------------------------------------
+
     def rerank_candidates(self, user_message: str, candidates: list,
-                          soft_constraints: dict = None, purchase_hints: dict = None) -> list:
+                          soft_constraints: dict = None,
+                          purchase_hints: dict = None) -> list:
         """
-        Two-stage re-ranking: LLM acts as a cross-encoder to score each candidate
-        against the full user context (query + style preferences + purchase history).
-        Paper: RAG-VisualRec — LLM-based re-ranking improves nDCG.
+        Scores each candidate against the full user context (query + style prefs +
+        purchase history) and returns candidates in ranked order
+        (RAG-VisualRec novelty 2).
         """
         if not self.is_available or len(candidates) <= 2:
             return candidates
 
-        pool = candidates[:8]
-
-        # Build context string
-        ctx_parts = [f"Customer query: '{user_message}'"]
-        if soft_constraints:
-            style_parts = [f"{k}: {v}" for k, v in soft_constraints.items() if v]
-            if style_parts:
-                ctx_parts.append(f"Style preference: {', '.join(style_parts)}")
-        if purchase_hints:
-            dc = purchase_hints.get('dominant_colour')
-            dt = purchase_hints.get('dominant_type')
-            bt = purchase_hints.get('budget_tier')
-            if dc or dt:
-                ctx_parts.append(f"Typically buys: {(dc or '')} {(dt or '')}".strip())
-            if bt:
-                ctx_parts.append(f"Budget tier: {bt}")
-
-        context = "\n".join(ctx_parts)
-
-        item_lines = []
-        for i, c in enumerate(pool, 1):
-            m = c.get('metadata', {})
-            item_lines.append(
-                f"{i}. {m.get('prod_name', '?')} | "
-                f"Colour: {m.get('colour_group_name', '?')} | "
-                f"Type: {m.get('product_type_name', '?')} | "
-                f"Dept: {m.get('department_name', '?')}"
-            )
-
-        prompt = (
-            f"You are a fashion recommendation expert. Rank these items for the customer.\n\n"
-            f"Customer context:\n{context}\n\n"
-            f"Candidates:\n" + "\n".join(item_lines) + "\n\n"
-            f"Output ONLY a comma-separated list of item numbers ranked best to worst.\n"
-            f"Example output: 3,1,5,2,4"
-        )
+        pool    = candidates[:_RERANK_POOL_SIZE]
+        context = self._build_rerank_context(user_message, soft_constraints or {}, purchase_hints or {})
+        prompt  = self._build_rerank_prompt(context, pool)
 
         result = self._call_llm(prompt, max_tokens=25, temperature=0.0)
         if not result:
@@ -229,65 +360,23 @@ class ExplanationGenerator:
         try:
             ranked_idx = [
                 int(x.strip()) - 1
-                for x in result.strip().split(',')
+                for x in result.strip().split(",")
                 if x.strip().isdigit()
             ]
             ranked_idx = [i for i in ranked_idx if 0 <= i < len(pool)]
-            seen = set(ranked_idx)
-            reranked = [pool[i] for i in ranked_idx]
-            reranked += [pool[i] for i in range(len(pool)) if i not in seen]
-            reranked += candidates[8:]
+            seen       = set(ranked_idx)
+            reranked   = [pool[i] for i in ranked_idx]
+            reranked  += [pool[i] for i in range(len(pool)) if i not in seen]
+            reranked  += candidates[_RERANK_POOL_SIZE:]
             print(f"   [LLM Re-rank] Cross-encoder reordered {len(pool)} candidates")
             return reranked
-        except Exception as e:
-            print(f"   [LLM Re-rank] Parse error: {e}. Keeping original order.")
+        except Exception as exc:
+            print(f"   [LLM Re-rank] Parse error: {exc}. Keeping original order.")
             return candidates
 
-    # ------------------------------------------------------------------
-    # NOVELTY 4: Proactive Self-Reflection Quality Gate
-    # ------------------------------------------------------------------
-    def self_evaluate(self, explanation: str, metadata: dict) -> tuple:
-        """
-        LLM scores its own generated explanation before ViLT verification.
-        Returns (passes: bool, feedback: str).
-        Proactively regenerates low-quality explanations before the ViLT gate.
-        Paper: MARC — reflection process as a core Agentic RAG pillar.
-        """
-        if not self.is_available:
-            return True, "Self-evaluation skipped (LLM unavailable)."
-
-        colour = metadata.get('colour_group_name', '')
-        product_type = metadata.get('product_type_name', '')
-
-        prompt = (
-            f"Evaluate this fashion recommendation explanation for quality.\n\n"
-            f"Verified item facts: {colour} {product_type}\n"
-            f"Explanation to evaluate: \"{explanation}\"\n\n"
-            f"Score 1-10 based on: factual consistency with item facts, clarity, helpfulness.\n"
-            f"Be strict — score below 6 if the explanation contradicts or ignores the item facts.\n"
-            f"Output format (two lines only):\n"
-            f"SCORE: <number>\n"
-            f"FEEDBACK: <one sentence>"
-        )
-
-        result = self._call_llm(prompt, max_tokens=60, temperature=0.0)
-        if not result:
-            return True, "Self-evaluation inconclusive. Passing."
-
-        try:
-            lines = result.strip().split('\n')
-            score_line = next((l for l in lines if l.upper().startswith('SCORE:')), None)
-            feedback_line = next((l for l in lines if l.upper().startswith('FEEDBACK:')), None)
-
-            score = int(score_line.split(':', 1)[1].strip()) if score_line else 7
-            feedback = feedback_line.split(':', 1)[1].strip() if feedback_line else "Quality acceptable."
-
-            passes = score >= 6
-            print(f"   [Self-Reflect] Score: {score}/10 — {'PASS' if passes else 'FAIL → proactive regeneration'}")
-            return passes, feedback
-        except Exception:
-            return True, "Self-evaluation parse error. Passing."
+    # generate_product_knowledge() and self_evaluate() live in:
+    # hallucination_guard/layer_1_knowledge_self_reflection.py
 
 
-# Singleton
+# Singleton used across the m2 pipeline
 llm_generator = ExplanationGenerator()

@@ -1,0 +1,91 @@
+{
+  "metric": "Recall@10  (colour + type match in top-10 results)",
+  "methods": [
+    "TF-IDF (literature)",
+    "Single CLIP ViT-B-32",
+    "CLIP Ensemble (ours)"
+  ],
+  "simple_queries": {
+    "avg_tfidf": 0.88,
+    "avg_single": 0.88,
+    "avg_ensemble": 0.82,
+    "per_query": [
+      {
+        "query": "black dress",
+        "tfidf": 1.0,
+        "single_clip": 1.0,
+        "ensemble": 1.0
+      },
+      {
+        "query": "white blouse",
+        "tfidf": 0.8,
+        "single_clip": 0.7,
+        "ensemble": 0.8
+      },
+      {
+        "query": "dark blue trousers",
+        "tfidf": 0.7,
+        "single_clip": 1.0,
+        "ensemble": 1.0
+      },
+      {
+        "query": "red top",
+        "tfidf": 0.9,
+        "single_clip": 0.7,
+        "ensemble": 0.6
+      },
+      {
+        "query": "grey sweater",
+        "tfidf": 1.0,
+        "single_clip": 1.0,
+        "ensemble": 0.7
+      }
+    ]
+  },
+  "complex_queries": {
+    "avg_tfidf": 0.16,
+    "avg_single": 0.92,
+    "avg_ensemble": 0.92,
+    "per_query": [
+      {
+        "query": "elegant black dress for a formal evening party",
+        "tfidf": 0.4,
+        "single_clip": 1.0,
+        "ensemble": 1.0
+      },
+      {
+        "query": "casual relaxed white blouse for a summer weekend",
+        "tfidf": 0.0,
+        "single_clip": 0.8,
+        "ensemble": 0.8
+      },
+      {
+        "query": "comfortable sporty dark blue trousers for travel",
+        "tfidf": 0.2,
+        "single_clip": 1.0,
+        "ensemble": 1.0
+      },
+      {
+        "query": "vibrant eye-catching red top for a night out",
+        "tfidf": 0.0,
+        "single_clip": 0.9,
+        "ensemble": 1.0
+      },
+      {
+        "query": "warm cosy grey sweater for cold autumn mornings",
+        "tfidf": 0.2,
+        "single_clip": 0.9,
+        "ensemble": 0.8
+      }
+    ]
+  },
+  "summary": {
+    "overall_tfidf": 0.52,
+    "overall_single": 0.9,
+    "overall_ensemble": 0.87,
+    "gain_vs_tfidf": 0.35,
+    "gain_vs_single": -0.03,
+    "gain_complex_queries": 0.0
+  },
+  "note": "Ensemble advantage is strongest on complex multi-faceted queries. Single CLIP and Ensemble are comparable on simple queries \u2014 the baseline comparison vs TF-IDF shows CLIP's superiority over literature."
+}

@@ -71,6 +71,18 @@ class ThompsonSamplingDiversityBandit:
         Returns:
             λ ∈ [LAMBDA_MIN, LAMBDA_MAX] sampled via Thompson Sampling.
         """
+        # Ablation (evaluation only): M2_ABLATE_BANDIT=<λ> fixes λ,
+        # disabling adaptive Thompson Sampling for baseline comparison.
+        import os
+        _fixed = os.getenv("M2_ABLATE_BANDIT")
+        if _fixed:
+            try:
+                lam = float(_fixed)
+                print(f"   [Bandit] ABLATED — fixed λ={lam:.2f} (no Thompson Sampling)")
+                return lam
+            except ValueError:
+                pass
+
         # Bayesian update: shift posterior based on observed feedback signals
         alpha = self.PRIOR_ALPHA + retained_count * self.RETENTION_WEIGHT
         beta  = self.PRIOR_BETA  + exclude_count  * self.REJECTION_WEIGHT

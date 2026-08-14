@@ -1,0 +1,128 @@
+{
+  "novelty_1_clip_ensemble": {
+    "metric": "Recall@10 (colour + type match)",
+    "baseline_avg": 0.74,
+    "novelty_avg": 0.71,
+    "improvement": -0.03,
+    "n_queries": 10,
+    "per_query": [
+      {
+        "query": "I want a black dress",
+        "baseline": 0.9,
+        "novelty": 1.0
+      },
+      {
+        "query": "Show me a white blouse",
+        "baseline": 0.6,
+        "novelty": 0.5
+      },
+      {
+        "query": "I need dark blue trousers",
+        "baseline": 1.0,
+        "novelty": 1.0
+      },
+      {
+        "query": "Find me a red top",
+        "baseline": 0.3,
+        "novelty": 0.4
+      },
+      {
+        "query": "I want a grey sweater",
+        "baseline": 0.9,
+        "novelty": 0.9
+      },
+      {
+        "query": "Show me a black jacket",
+        "baseline": 0.5,
+        "novelty": 0.1
+      },
+      {
+        "query": "I need a white dress",
+        "baseline": 0.8,
+        "novelty": 0.8
+      },
+      {
+        "query": "Find me dark blue jeans",
+        "baseline": 0.9,
+        "novelty": 0.9
+      },
+      {
+        "query": "I want a black top",
+        "baseline": 0.8,
+        "novelty": 0.7
+      },
+      {
+        "query": "Show me a red dress",
+        "baseline": 0.7,
+        "novelty": 0.8
+      }
+    ]
+  },
+  "novelty_2_ncf_scoring": {
+    "metric": "Hit@5 (ground truth in top-5 recommendations)",
+    "baseline_avg": 0.15,
+    "novelty_avg": 0.3,
+    "improvement": 0.15,
+    "n_users": 20
+  },
+  "novelty_3_thompson_sampling": {
+    "metric": "Intra-List Diversity (ILD) -- higher = more diverse",
+    "baseline_avg": 0.0,
+    "novelty_avg": 0.0,
+    "improvement": 0.0,
+    "note": "ILD measured by colour dissimilarity across recommended items",
+    "rejection_levels": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "fixed_ilds": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "adaptive_ilds": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "novelty_4_hallucination": {
+    "metric": "Attribute Accuracy -- % explanations with correct colour + type",
+    "baseline_avg": 0.8,
+    "novelty_avg": 0.9333,
+    "improvement": 0.1333,
+    "n_items": 15
+  },
+  "novelty_5_kansei_kb": {
+    "metric": "KB Relevance Score -- psychology-grounded scoring boost",
+    "baseline_avg": 0.0,
+    "novelty_avg": 0.4124,
+    "improvement": 0.4124,
+    "n_queries": 5
+  }
+}
