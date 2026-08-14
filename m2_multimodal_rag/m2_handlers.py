@@ -12,7 +12,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from shared.data_loader import data_loader
-from m2_multimodal_rag.llm_generator import llm_generator
+from m2_multimodal_rag.llm_generator import (
+    llm_generator, infer_product_type, strip_competing_types,
+)
 from m2_multimodal_rag.clip_embeddings import clip_encoder
 from m2_multimodal_rag.faiss_index import faiss_db
 from m2_multimodal_rag.hallucination_guard.regeneration_loop import generator_loop
@@ -106,6 +108,78 @@ def _hard_filter_allowed_ids(articles_df, filters: dict, exclude_ids: list) -> l
         excl = {str(e).zfill(10) for e in exclude_ids}
         ids = ids[~ids.isin(excl)]
     return ids.tolist()
+
+
+# --- Filter relaxation ladder ----------------------------------------
+# A filter set that matches nothing used to drop *every* filter at once and
+# search the unfiltered index, so "a pink shirt" came back as a blouse — the
+# nearest CLIP neighbours of a shirt query are blouses. Filters are given up
+# one rung at a time instead, weakest evidence first.
+#
+# product_type_name is never on the ladder: the garment category is the thing
+# the user actually asked for. A search that cannot honour it says so rather
+# than quietly answering a different question.
+_RELAXATION_ORDER = (
+    "graphical_appearance_name",   # pattern — usually an LLM guess
+    "garment_group_name",          # overlaps product_type_name; often redundant
+    "index_group_name",            # demographic; frequently over-narrows
+    "price",                       # price_min + price_max together
+    "colour_group_name",
+)
+
+
+def _drop_filter(filters: dict, key: str) -> dict:
+    """Returns `filters` without `key`. 'price' drops price_min and price_max."""
+    if key == "price":
+        return {k: v for k, v in filters.items()
+                if k not in ("price_min", "price_max")}
+    return {k: v for k, v in filters.items() if k != key}
+
+
+def _resolve_allowed_ids(articles_df, filters: dict, exclude_ids: list) -> tuple:
+    """Hard-filters the catalogue, relaxing the filter set until something
+    matches. Filters naming a column the catalogue does not have are dropped
+    up front — they can never match and would otherwise empty the result.
+
+    Returns (allowed_ids, applied_filters, relaxed_keys):
+        allowed_ids     zero-padded ids satisfying `applied_filters`
+        applied_filters the subset actually enforced — Phase 2 must re-check
+                        against this, not the requested set
+        relaxed_keys    filter keys given up, in the order they were dropped.
+                        Unknown columns are not listed: they were never
+                        enforceable, so there is no narrowing to report back.
+
+    An empty `allowed_ids` means even product_type_name alone matched nothing;
+    the caller must not fall back to an unfiltered search in that case.
+    """
+    unknown = [k for k in filters
+               if k not in ("price_min", "price_max")
+               and k not in articles_df.columns]
+    applied = {k: v for k, v in filters.items() if k not in unknown}
+    relaxed: list = []
+    if unknown:
+        print(f"  [relax] Filters name unknown catalogue columns {unknown} — ignored.")
+
+    ids = _hard_filter_allowed_ids(articles_df, applied, exclude_ids)
+    if ids:
+        return ids, applied, relaxed
+
+    for key in _RELAXATION_ORDER:
+        present = (any(k in applied for k in ("price_min", "price_max"))
+                   if key == "price" else key in applied)
+        if not present:
+            continue
+        applied = _drop_filter(applied, key)
+        relaxed.append(key)
+        ids = _hard_filter_allowed_ids(articles_df, applied, exclude_ids)
+        if ids:
+            print(f"  [relax] No article matched every filter — relaxed "
+                  f"{relaxed} → {len(ids):,} articles still satisfy {applied}")
+            return ids, applied, relaxed
+
+    print(f"  [relax] Nothing in the catalogue satisfies {applied} — "
+          f"no filter left to relax.")
+    return [], applied, relaxed
 
 
 # =====================================================================
@@ -699,6 +773,23 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
     if detected_kansei and not soft_constraints.get("style"):
         print(f"  [KB] Kansei detected from message: {detected_kansei} → style='{inferred_style}'")
 
+    # --- Requested garment type ---
+    # The category the user asked for. Protected end to end: it is never
+    # relaxed away, no fallback may answer with a different type, and nothing
+    # downstream may quietly select one.
+    #
+    # M3 does not always send one. When it doesn't, M2 reads the type off the
+    # message itself — without it there is nothing anywhere in the pipeline
+    # keeping "recommend me a party shirt" from answering with a blouse. The
+    # inferred type guards selection and shapes the query, but is never
+    # promoted to a hard catalogue filter: M3 owns the filters, and a guess is
+    # not grounds for narrowing a search the user never narrowed.
+    filter_type    = str(filters.get("product_type_name") or "").strip()
+    requested_type = filter_type or infer_product_type(user_message)
+    if requested_type and not filter_type:
+        print(f"  [catalog_search] M3 sent no product type — read "
+              f"'{requested_type}' from the message; guarding results on it.")
+
     # ---------------------------------------------------------------
     # PHASE 1 — LLM Query Expansion + Multi-Vector CLIP Ensemble
     # ---------------------------------------------------------------
@@ -720,6 +811,15 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
             occasion=soft_constraints.get("occasion"),
             style_word=inferred_style,
         )
+        # The KB recommends garments for the occasion without knowing what was
+        # asked for — for a party it contributes "Dress, Top, Blouse types" and
+        # "party dress sequin sparkle". Those category words steer the CLIP
+        # vector at retrieval time, which is how a party *shirt* ends up next
+        # to party blouses. Colour and mood guidance survives; only the
+        # competing garment names are removed.
+        if requested_type:
+            kb_query_context = strip_competing_types(kb_query_context, requested_type)
+            clip_terms       = strip_competing_types(clip_terms, requested_type)
     if kb_query_context:
         print(f"  [KB] Query context injected: {kb_query_context[:80]}...")
     if clip_terms:
@@ -745,6 +845,11 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
     from_cache  = False
     candidates  = []
 
+    # Filters actually enforced. Starts as the requested set and is narrowed by
+    # the relaxation ladder; Phase 2 re-checks against this, not `filters`.
+    applied_filters = dict(filters)
+    relaxed_keys: list = []
+
     if session_id and is_followup:
         survivors = _followup_pool_from_cache(
             session_id, articles_df, filters, exclude_ids,
@@ -765,7 +870,8 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         if _ABLATE_ENSEMBLE:
             expanded_queries = [base_search_text]   # ablation: single-vector baseline
         else:
-            expanded_queries = llm_generator.expand_query(base_search_text)
+            expanded_queries = llm_generator.expand_query(base_search_text,
+                                                          requested_type)
         trace.step("1.1  LLM query expansion (Groq)",
                    f"{len(expanded_queries)} query variants")
         for _q in expanded_queries:
@@ -783,9 +889,16 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         # Allowed ids are computed vectorised over the full catalogue, then FAISS
         # only scans those rows via an IDSelector. Every candidate is already
         # filter-valid, so the pool shrinks to 15 without losing valid items.
+        # When nothing satisfies the full set, _resolve_allowed_ids relaxes it a
+        # rung at a time rather than abandoning the filters wholesale.
         if filters:
-            allowed_ids = _hard_filter_allowed_ids(articles_df, filters, exclude_ids)
-            selector    = faiss_db.build_id_selector(allowed_ids)
+            allowed_ids, applied_filters, relaxed_keys = _resolve_allowed_ids(
+                articles_df, filters, exclude_ids)
+            if relaxed_keys:
+                trace.step("1.3a Filter relaxation",
+                           f"gave up {', '.join(relaxed_keys)} — "
+                           f"kept {applied_filters or 'nothing'}")
+            selector = faiss_db.build_id_selector(allowed_ids)
             if selector is not None:
                 trace.step("1.3  Metadata store — hard filters at index level",
                            f"{len(allowed_ids):,} of {len(articles_df):,} articles valid")
@@ -795,10 +908,23 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
                            f"{len(candidates)} candidates")
                 print(f"  [catalog_search] Filtered FAISS: {len(allowed_ids):,} "
                       f"filter-valid articles → {len(candidates)} candidates")
+            elif filter_type and not allowed_ids:
+                # Not even product_type_name alone can be satisfied. An
+                # unfiltered search here would answer with a different garment.
+                # Gated on the filter-supplied type, never an inferred one — a
+                # guess must not be able to turn a request away.
+                print(f"  [catalog_search] No '{filter_type}' in the catalogue "
+                      f"matches this request — refusing to substitute another type.")
+                return {"action": "catalog_search", "success": False,
+                        "response_text": (
+                            f"I couldn't find any {filter_type.lower()} matching "
+                            f"what you asked for. Would you like me to try "
+                            f"different colours or a wider budget?"),
+                        "items": [], "error": "No article satisfies product_type_name"}
 
         if not candidates:
             if filters:
-                print("  [catalog_search] Filtered FAISS empty/unavailable — "
+                print("  [catalog_search] Filtered FAISS unavailable — "
                       "falling back to unfiltered top-50 search.")
             candidates = faiss_db.search_multi(query_vectors, top_k=50)
         if not candidates:
@@ -832,10 +958,12 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         metadata = article_row.iloc[0].to_dict()
 
         # Hard filters — all must pass (already guaranteed when the FAISS
-        # pool was pre-filtered at index level)
+        # pool was pre-filtered at index level). Checked against the filters
+        # actually enforced upstream: re-imposing a rung the relaxation ladder
+        # deliberately gave up would empty the pool all over again.
         if not prefiltered:
             passes_filters = True
-            for filter_key, filter_value in filters.items():
+            for filter_key, filter_value in applied_filters.items():
                 if filter_key in ("price_max", "price_min"):
                     item_price = metadata.get("price")
                     if item_price is None or item_price != item_price:  # NaN check
@@ -909,11 +1037,48 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
 
     filtered_results.sort(key=lambda x: x["final_score"], reverse=True)
 
-    # Fallback: if all candidates were filtered out, use top raw FAISS results
+    # Fallback: if all candidates were filtered out, use top raw FAISS results.
+    # These are unscored CLIP neighbours, so they honour no filter at all — and
+    # the nearest neighbours of "shirt" are blouses. When the user named a
+    # garment type, only neighbours of that type qualify; if none do, the
+    # request goes unanswered rather than answered with the wrong garment.
+    used_fallback = False
     if not filtered_results:
         print("  [catalog_search] Hard filters eliminated all candidates. Falling back to top FAISS results.")
+        used_fallback = True
         for article_id, faiss_score in candidates[:10]:
             if article_id not in exclude_ids:
+                meta = _fetch_article(article_id)
+                if not meta:
+                    continue
+                if requested_type and str(meta.get("product_type_name", "")).strip().lower() \
+                        != requested_type.lower():
+                    continue
+                filtered_results.append({
+                    "article_id":  article_id,
+                    "metadata":    meta,
+                    "faiss_score": faiss_score,
+                    "final_score": faiss_score,
+                })
+
+        if not filtered_results and requested_type:
+            if filter_type:
+                print(f"  [catalog_search] No '{filter_type}' among the fallback "
+                      f"neighbours — refusing to substitute another type.")
+                return {"action": "catalog_search", "success": False,
+                        "response_text": (
+                            f"I couldn't find any {filter_type.lower()} matching what "
+                            f"you asked for. Would you like me to try a different colour "
+                            f"or a wider budget?"),
+                        "items": [], "error": "No fallback candidate of requested type"}
+            # Type was inferred, not requested. Too weak a signal to turn the
+            # request away on — recommend the neighbours and let the guard
+            # further down keep the selection as on-topic as the pool allows.
+            print(f"  [catalog_search] No '{requested_type}' among the fallback "
+                  f"neighbours, and the type was inferred — recommending anyway.")
+            for article_id, faiss_score in candidates[:10]:
+                if article_id in exclude_ids:
+                    continue
                 meta = _fetch_article(article_id)
                 if meta:
                     filtered_results.append({
@@ -925,8 +1090,10 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
 
     # Cache the scored pool for follow-up turns. Full runs only — a cache-
     # answered follow-up keeps the original pool's breadth so consecutive
-    # refinements don't progressively shrink it.
-    if session_id and not from_cache and filtered_results:
+    # refinements don't progressively shrink it. Fallback pools are never
+    # cached: they satisfy no filter, and a later no-filter follow-up would
+    # replay them as though they had been vetted.
+    if session_id and not from_cache and not used_fallback and filtered_results:
         _session_pool_put(
             session_id,
             [(r["article_id"], r["faiss_score"]) for r in filtered_results],
@@ -980,6 +1147,32 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         soft_constraints=enriched_soft_constraints,
         purchase_hints=purchase_hints,
     )
+
+    # --- Requested-type guard on the selection pool ---
+    # Last line of defence before selection, covering every route a wrong-type
+    # candidate can arrive by: session cache, unfiltered fallback, or an LLM
+    # re-rank promotion. It matters most for what comes next: MMR maximises
+    # difference from what it already picked and counts product_type_name as a
+    # diversity dimension, so given a mixed pool it actively prefers a
+    # different type for the second slot — "a party shirt" returning a shirt
+    # and then a blouse. Dropping off-type candidates here means diversity is
+    # expressed through colour, cut and price instead, within the type asked
+    # for. Skipped when nothing of the type survives, so the pool is never
+    # emptied by this guard alone.
+    if requested_type:
+        on_type = [r for r in reranked_results
+                   if str(r["metadata"].get("product_type_name", "")).strip().lower()
+                   == requested_type.lower()]
+        if on_type and len(on_type) != len(reranked_results):
+            _dropped = len(reranked_results) - len(on_type)
+            print(f"  [type-guard] Dropped {_dropped} non-'{requested_type}' "
+                  f"candidate(s) before selection — {len(on_type)} remain.")
+            trace.step("3.3  Requested-type guard",
+                       f"{_dropped} off-type candidate(s) removed")
+            reranked_results = on_type
+        elif not on_type:
+            print(f"  [type-guard] No '{requested_type}' candidate survived "
+                  f"re-ranking — leaving the pool untouched.")
 
     # Ensure prefetch covers every candidate MMR can pick from — the LLM
     # rerank may promote items outside the Phase-3 top-8.
@@ -1150,7 +1343,24 @@ def handle_catalog_search(retrieval_input: dict, memory_context: dict | None = N
         last = f"the {response_items[-1]['prod_name']} in {response_items[-1]['colour_group_name']}"
         summary = f"Based on your search, I found {n} great options: {item_list}, and {last}."
 
+    # Broadening the search is the user's business — say so rather than
+    # presenting a relaxed result as an exact match.
+    if relaxed_keys and n:
+        _readable = {
+            "colour_group_name":         "colour",
+            "index_group_name":          "department",
+            "garment_group_name":        "category",
+            "graphical_appearance_name": "pattern",
+            "price":                     "price range",
+        }
+        _given_up = [_readable.get(k, k.replace("_", " ")) for k in relaxed_keys]
+        _given_up = ", ".join(dict.fromkeys(_given_up))   # de-duped, order kept
+        summary += (f" Nothing matched every detail you asked for, so I widened "
+                    f"the {_given_up} to find these.")
+
     _print_accuracy(response_items, filters)
+    if relaxed_keys:
+        print(f"  [ACCURACY] Filters relaxed to get results: {relaxed_keys}")
 
     # Remember this recommendation's ordered items so later ordinal/name
     # follow-ups resolve correctly even if M3's dialogue state narrows.

@@ -1,0 +1,23 @@
+INDEPENDENT AUDIT OF THE `clean` LABELS
+========================================================================
+Rule-based. No NLI, no embeddings, no code shared with the detector.
+188 clean cases · 186 pass · 2 fail
+
+------------------------------------------------------------------------
+ccase_0789  [item_compare]
+  evidence : tho/Black/£16.13 | Skinny Midprice No Fade Black/Black/£29.49
+  PROBLEM  : R1 price £24.99 not in known [16.13, 29.49] nor a derived difference
+  response : Here's a comparison of tho and Skinny Midprice No Fade Black:
+* tho is a more affordable option at £16.13 compared to Skinny Midprice No Fade Black at £24.99 (not £29.49, as per evidence).
+* Both tho and Skinny Midprice No Fade Black are Black in colour.
+* In terms of overall value, tho is a better 
+
+------------------------------------------------------------------------
+ccase_1080  [catalog_search]
+  evidence : FESTIVAL Tee/White/£10.08 | Printed  tee 9.99/White/£10.08
+  PROBLEM  : R1 price £9.99 not in known [10.08] nor a derived difference
+  response : We have two options for white t-shirts for men.
+Option 1:
+FESTIVAL Tee, White, £10.08, This tee has a round neckline and short sleeves, a classic style for everyday wear.
+Option 2:
+Printed tee, White, £9.99, This tee has a wider neckline and is slightly longer at the back, a versatile design for cas

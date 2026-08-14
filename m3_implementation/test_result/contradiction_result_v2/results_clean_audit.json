@@ -1,0 +1,1392 @@
+{
+  "meta": {
+    "purpose": "verify the presumed `clean` labels independently",
+    "test_set": "labeled_test_set.jsonl",
+    "n_clean": 188,
+    "n_pass": 186,
+    "n_fail": 2,
+    "method": "literal value checks against product_refs + graph_before; no model, no shared code"
+  },
+  "cases": [
+    {
+      "case_id": "ccase_0001",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R1-minor budget figure \u00a350 (\"find a black dress under \u00a350\")"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0013",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0017",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0023",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0029",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0035",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0040",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0053",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0066",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0072",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0078",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0084",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0097",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0099",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0105",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0112",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0118",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0121",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0129",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R3-minor name re-cased/truncated: 'Pull On Ankle.'"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0136",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0141",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0146",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [
+        "R3-minor name re-cased/truncated: 'Pull On Ankle.'"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0157",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0163",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0177",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0185",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0189",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0195",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0201",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Purple' is a component of a known compound colour ['black', 'light purple']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0212",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Purple' is a component of a known compound colour ['black', 'light purple']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0217",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0219",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0225",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0230",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Pink' is a component of a known compound colour ['light pink']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0243",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0250",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Pink' is a component of a known compound colour ['light pink']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0253",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0259",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0265",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0275",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0280",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0286",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0293",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0299",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0305",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0319",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0321",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0327",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0334",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0347",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0360",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0369",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0374",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0377",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0388",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0393",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0396",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0403",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0408",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0422",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0429",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0432",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0438",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0443",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0454",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0456",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0461",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0470",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0475",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0486",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0493",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0498",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0502",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0505",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Brown' is a component of a known compound colour ['yellowish brown']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0516",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Brown' is a component of a known compound colour ['yellowish brown']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0520",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Brown' is a component of a known compound colour ['yellowish brown']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0525",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0531",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Brown' is a component of a known compound colour ['yellowish brown']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0536",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R1-minor budget figure \u00a330 (\"ome grey cardigans under \u00a330\")"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0549",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0555",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0559",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0566",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0577",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0585",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0587",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0592",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0597",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0606",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R3-minor name 'Late leggings' not found verbatim",
+        "R3-minor name 'FIRRE conscious' not found verbatim"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0612",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0617",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0621",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0630",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Black dresses' is a styling aside, not a claim about a ['boots']",
+        "R2-minor 'Brown' is a component of a known compound colour ['yellowish brown']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0641",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Brown' is a component of a known compound colour ['yellowish brown']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0646",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0650",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Brown' is a component of a known compound colour ['yellowish brown']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0659",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Brown' is a component of a known compound colour ['yellowish brown']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0664",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0677",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0681",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0687",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0692",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0705",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0707",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0713",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0720",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0724",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0737",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0746",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0748",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0754",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0760",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0766",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R3-minor name 'tho' not found verbatim"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0777",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0783",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0789",
+      "action": "item_compare",
+      "problems": [
+        "R1 price \u00a324.99 not in known [16.13, 29.49] nor a derived difference"
+      ],
+      "minor": [],
+      "verdict": "FAIL"
+    },
+    {
+      "case_id": "ccase_0802",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0806",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Pink' is a component of a known compound colour ['light pink']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0819",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0823",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0825",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0831",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0836",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0849",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0854",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0860",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0871",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0877",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0890",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0896",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0902",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0904",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0910",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0923",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0936",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0942",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0948",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0961",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0974",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0983",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0989",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_0994",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1000",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1005",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R3-minor name re-cased/truncated: 'Wow Rispan Hood 19.99:-'",
+        "R3-minor name re-cased/truncated: 'Michael Hood 24.99:-'"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1015",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1020",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1024",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1037",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1043",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1054",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1065",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1070",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1077",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1080",
+      "action": "catalog_search",
+      "problems": [
+        "R1 price \u00a39.99 not in known [10.08] nor a derived difference"
+      ],
+      "minor": [
+        "R3-minor name re-cased/truncated: 'Printed  tee 9.99'"
+      ],
+      "verdict": "FAIL"
+    },
+    {
+      "case_id": "ccase_1086",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R3-minor name re-cased/truncated: 'Regular Printed tee 9.99 B2'"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1094",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1096",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1101",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1109",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1122",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1134",
+      "action": "explanation_generate",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1140",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1146",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1152",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1160",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1168",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1170",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1175",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1181",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1194",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Black dress' is a styling aside, not a claim about a ['blouse']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1207",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1212",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1218",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1224",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Black dress' is a styling aside, not a claim about a ['trousers']",
+        "R3-minor name re-cased/truncated: 'Skinny high waist black'"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1235",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1242",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R3-minor name 'Enter' not found verbatim",
+        "R3-minor name 'Tori black dressed' not found verbatim"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1252",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1258",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1263",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1275",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1287",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [
+        "R3-minor name re-cased/truncated: 'D. Kurt Denim (1)'",
+        "R3-minor name 'Vash bomber.' not found verbatim"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1297",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1301",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1306",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1319",
+      "action": "catalog_search",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1331",
+      "action": "item_detail_lookup",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1337",
+      "action": "item_attribute_lookup",
+      "problems": [],
+      "minor": [
+        "R2-minor 'Grey' is a component of a known compound colour ['dark grey', 'light pink']"
+      ],
+      "verdict": "pass"
+    },
+    {
+      "case_id": "ccase_1341",
+      "action": "item_compare",
+      "problems": [],
+      "minor": [],
+      "verdict": "pass"
+    }
+  ]
+}
