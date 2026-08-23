@@ -210,7 +210,7 @@ refactor(m3): simplify adaptive trigger logic
 1. **Domain fine-tuned multimodal retrieval** — image + text embeddings in a single FAISS space,
    with CLIP fine-tuned on H&M rather than used off the shelf.
    *Recall@10 57.2% → 76.0% (+18.7 pp, 95% CI [+16.8, +20.6], n=2084).*
-2. **Visual faithfulness verification** — a 3-layer guard (knowledge-grounded self-reflection →
+2. **Visual faithfulness verification** : a 3-layer guard (knowledge-grounded self-reflection →
    Chain-of-Verification → ViLT VQA visual check) with a CLIP image–text faithfulness scorer and a
    regeneration loop, so no claim reaches the user without being checked against the product image.
    *Visual-corruption recall 0.76 → 0.80 over a text-only first layer (n=168).*
