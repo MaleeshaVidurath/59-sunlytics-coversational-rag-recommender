@@ -596,6 +596,9 @@ async def _call_groq(prompt: str, max_tokens: int = 300) -> str:
                     "max_tokens":  max_tokens,
                     "temperature": 0.3,
                     "top_p":       0.9,
+                    # gpt-oss is a reasoning model: without this it spends the whole
+                    # max_tokens budget on hidden reasoning and returns empty content.
+                    "reasoning_effort": "low",
                 }
             )
         elapsed = time.time() - _t0

@@ -261,76 +261,7 @@ class SessionDocument(BaseModel):
         extra = "allow"
 
 
-# ─── 10. Explanation Claim ────────────────────────────────────────────────────
-# One atomic, verifiable claim extracted from a system explanation.
-# This is the core unit for contradiction detection.
-# Inspired by FActScore's atomic fact decomposition.
-
-class ExplanationClaim(BaseModel):
-    claim_id: str = Field(default_factory=lambda: new_id("claim_"))
-
-    # The claim as a self-contained natural language sentence
-    # "self-contained" means it can be understood without context
-    claim_text: str
-
-    # What kind of claim is this?
-    claim_type: Literal[
-        "preference_match",   # "This matches the user's preference for black"
-        "price_match",        # "This item is within the user's budget"
-        "attribute_fact",     # "This item is made from cotton"
-        "comparative",        # "This item is cheaper than the other option"
-        "style_match"         # "This matches the user's casual style preference"
-    ]
-
-    # Which article attribute this claim is about
-    # Matches column names from sample_articles.csv
-    attribute: Optional[str] = None   # e.g. "colour_group_name", "price"
-
-    # The actual value being claimed
-    evidence_value: Optional[str | float] = None
-
-    # Cross-references for contradiction detection
-    # Links this claim to the preference it references
-    user_preference_ref: Optional[str] = None  # pref_id from user's preferences
-
-    confidence: float = Field(ge=0.0, le=1.0, default=1.0)
-
-    # Current status — updated when contradictions are detected
-    status: Literal[
-        "active",        # Currently valid
-        "retracted",     # Withdrawn because it was wrong
-        "contradicted",  # A later claim contradicted this one
-        "confirmed"      # User explicitly confirmed this
-    ] = "active"
-
-
-# ─── 11. Explanation Document ─────────────────────────────────────────────────
-# Stored in the `explanations` MongoDB collection.
-# One document per recommendation, containing all claims about that recommendation.
-
-class ExplanationDocument(BaseModel):
-    explanation_id: str = Field(default_factory=lambda: new_id("expl_"))
-    recommendation_id: str    # Links to recommendations collection
-    article_id: str           # The article this explanation is about
-    session_id: str
-    user_id: str
-    turn_id: str              # Which assistant turn generated this explanation
-    created_at: datetime = Field(default_factory=now_utc)
-
-    # The full natural language explanation shown to the user
-    full_explanation: str
-
-    # Atomic claims extracted from the explanation
-    claims: list[ExplanationClaim] = []
-
-    # Log of contradictions detected for claims in this explanation
-    contradiction_log: list[dict] = []
-
-    class Config:
-        extra = "allow"
-
-
-# ─── 12. Recommendation Document ──────────────────────────────────────────────
+# ─── 10. Recommendation Document ──────────────────────────────────────────────
 # Stored in the `recommendations` MongoDB collection.
 # Tracks every time the system recommended items.
 
@@ -355,7 +286,7 @@ class RecommendationDocument(BaseModel):
         extra = "allow"
 
 
-# ─── 13. Contradiction Log Entry ──────────────────────────────────────────────
+# ─── 11. Contradiction Log Entry ──────────────────────────────────────────────
 # Stored in the `contradiction_log` MongoDB collection.
 
 class ContradictionEntry(BaseModel):

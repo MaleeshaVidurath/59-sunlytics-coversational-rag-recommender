@@ -48,10 +48,9 @@ async def _fire_and_forget(url: str, pipeline_output: dict, module_name: str):
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             await client.post(f"{url}/api/process", json=body)
-        print(f"[CHAT] Sent pipeline_output to {module_name} ({url})")
     except Exception as e:
         # Non-fatal — friend module may not be running yet
-        print(f"[CHAT] Could not reach {module_name} at {url}: {type(e).__name__}")
+        pass
 
 
 async def _call_m2_sync(pipeline_output: dict, timeout: float = 300.0):
@@ -75,13 +74,8 @@ async def _call_m2_sync(pipeline_output: dict, timeout: float = 300.0):
             resp = await client.post(f"{_M2_URL}/api/process", json=body)
             resp.raise_for_status()
             data = resp.json()
-            if data.get("success"):
-                print(f"[CHAT] M2 response received: action={data.get('action')} items={len(data.get('items', []))}")
-            else:
-                print(f"[CHAT] M2 application error: {data.get('error')}")
             return data  # always return — None only means unreachable
     except Exception as e:
-        print(f"[CHAT] M2 sync call failed ({type(e).__name__}): {e}")
         return None
 
 
@@ -101,23 +95,14 @@ async def _call_m1_sync(pipeline_output: dict, customer_id: str, timeout: float 
         "memory_context":  pipeline_output.get("memory_context") or {},
     })
 
-    print("\n" + "═"*60)
-    print(f"[DEBUG] ━━━ FULL JSON PAYLOAD SENT TO M1 ━━━")
-    print(_json.dumps(body, indent=2))
-    print("═"*60 + "\n")
     
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(f"{_M1_URL}/api/process", json=body)
             resp.raise_for_status()
             data = resp.json()
-            if data.get("success"):
-                print(f"[CHAT] M1 response received: action={data.get('action')} items={len(data.get('items', []))}")
-            else:
-                print(f"[CHAT] M1 application error: {data.get('error')}")
             return data  # always return — None only means unreachable
     except Exception as e:
-        print(f"[CHAT] M1 sync call failed ({type(e).__name__}): {e}")
         return None
 
 
@@ -326,7 +311,6 @@ async def _enrich_member_items(items: list) -> list:
         from text_rag.db.postgres_client import get_articles_by_ids
         pg_rows = await get_articles_by_ids(article_ids)
         pg_map = {str(row["article_id"]): row for row in pg_rows}
-        print(f"[CHAT] item enrichment: fetched {len(pg_map)} product(s) from catalog for ids={article_ids}")
 
         enriched = []
         for item in items:
@@ -351,7 +335,6 @@ async def _enrich_member_items(items: list) -> list:
             enriched.append(enriched_item)
         return enriched
     except Exception as _enr_err:
-        print(f"[CHAT] item enrichment warning (non-fatal): {_enr_err}")
         return items
 
 
@@ -409,7 +392,7 @@ async def _fetch_last_recommended_items(session_id: str, effective_model: str) -
             items = latest_rec["items_recommended"]
             return [str(item["article_id"]) for item in items[:2] if item.get("article_id")]
     except Exception as e:
-        print(f"[CHAT] Fallback fetch error: {e}")
+        pass
         
     return []
 
@@ -458,11 +441,6 @@ async def chat(req: ChatRequest):
             detail="Pipeline not initialised. Server starting up."
         )
 
-    print("\n" + "="*60)
-    print(f"[CHAT] ━━━ NEW REQUEST ━━━")
-    print(f"[CHAT] user_id={req.user_id[:20]}")
-    print(f"[CHAT] message='{req.message[:80]}'")
-    print(f"[CHAT] session_id={req.session_id} force_new={req.force_new_session}")
     try:
         # If force_new_session, clear Redis active session pointer first
         if req.force_new_session:
@@ -470,9 +448,8 @@ async def chat(req: ChatRequest):
                 from memory.db.redis_client import get_redis
                 redis = await get_redis()
                 await redis.delete(f"user:{req.user_id}:active_session")
-                print(f"[Chat] Force new session for user {req.user_id}")
             except Exception as e:
-                print(f"[Chat] Redis clear error (non-fatal): {e}")
+                pass
 
         # ── Pre-read model lock so process_turn uses the right CSE ──────────
         # For existing sessions we look up the lock BEFORE process_turn so the
@@ -489,12 +466,10 @@ async def chat(req: ChatRequest):
                 )
                 if _early_lock and _early_lock.get("selected_model"):
                     _early_model = _early_lock["selected_model"]
-                    print(f"[CHAT] early model lock read → {_early_model}")
             except Exception as _em_err:
-                print(f"[CHAT] early lock read warning (non-fatal): {_em_err}")
+                pass
 
         t_start = time.perf_counter()
-        print(f"[CHAT] ─── Step 1: calling memory.process_turn (member_model={_early_model})...")
         # Step 1: Memory pipeline
         pipeline_output = await memory.process_turn(
             user_id=req.user_id,
@@ -505,80 +480,7 @@ async def chat(req: ChatRequest):
         )
 
         t_memory_done = time.perf_counter()
-        print(f"[CHAT] ─── Memory pipeline done")
-        import json as _json
-        print("\n" + "="*60)
-        print("[SPEC-CHECK] ━━━ FULL pipeline_output (vs retrieval_input_reference_v2) ━━━")
         _ri = pipeline_output.get("retrieval_input") or {}
-        _mc = pipeline_output.get("memory_context") or {}
-        _payload = _ri.get("payload") or {}
-        print(f"[SPEC] user_id              = {pipeline_output.get('user_id','MISSING')[:300]}")
-        print(f"[SPEC] session_id           = {pipeline_output.get('session_id','MISSING')}")
-        print(f"[SPEC] label                = {pipeline_output.get('label','MISSING')}")
-        print(f"[SPEC] confidence           = {pipeline_output.get('confidence','MISSING')}")
-        print(f"[SPEC] retrieval_strategy   = {pipeline_output.get('retrieval_strategy','MISSING')}")
-        print(f"[SPEC] classifier_input     = {str(pipeline_output.get('classifier_input','MISSING'))[:80]}")
-        print(f"[SPEC] side_effects         = {pipeline_output.get('side_effects','MISSING')}")
-        print(f"[SPEC-RI] retrieval_input fields:")
-        if _ri:
-            print(f"  action                  = {_ri.get('action','MISSING')}")
-            print(f"  retrieval_strategy      = {_ri.get('retrieval_strategy','MISSING')}")
-            print(f"  user_message            = {str(_ri.get('user_message','MISSING'))[:80]}")
-            _ctx = _ri.get("items_in_context") or {}
-            print(f"  items_in_context.item_a = {_ctx.get('item_a','None')}")
-            print(f"  items_in_context.item_b = {_ctx.get('item_b','None')}")
-            print(f"  exclude_ids             = {_ri.get('exclude_ids','MISSING')}")
-            print(f"[SPEC-PAYLOAD] payload fields (action={_ri.get('action','?')})")
-            if _ri.get("action") in ("catalog_search",):
-                print(f"  filters                 = {_payload.get('filters','MISSING')}")
-                print(f"  soft_constraints [NEW]  = {_payload.get('soft_constraints','MISSING')}")
-                print(f"  preference_boosts       = {_payload.get('preference_boosts','MISSING')}")
-                _ph = _payload.get("purchase_history_hints") or {}
-                print(f"  purchase_history_hints [NEW]:")
-                print(f"    top_colours           = {_ph.get('top_colours','MISSING')}")
-                print(f"    top_product_types     = {_ph.get('top_product_types','MISSING')}")
-                print(f"    inferred_gender       = {_ph.get('inferred_gender','MISSING')}")
-                print(f"    budget_tier           = {_ph.get('budget_tier','MISSING')}")
-                print(f"    preferred_price_range = {_ph.get('preferred_price_range','MISSING')}")
-                print(f"    dominant_colour       = {_ph.get('dominant_colour','MISSING')}")
-                print(f"    dominant_type         = {_ph.get('dominant_type','MISSING')}")
-                print(f"  penalties               = {_payload.get('penalties','MISSING')}")
-            elif _ri.get("action") == "item_attribute_lookup":
-                print(f"  article_id              = {_payload.get('article_id','MISSING')}")
-                print(f"  attribute_topic         = {_payload.get('attribute_topic','MISSING')}")
-            elif _ri.get("action") == "item_compare":
-                print(f"  article_id_a            = {_payload.get('article_id_a','MISSING')}")
-                print(f"  article_id_b            = {_payload.get('article_id_b','MISSING')}")
-                print(f"  comparison_dimension    = {_payload.get('comparison_dimension','MISSING')}")
-                print(f"  preference_weights      = {_payload.get('preference_weights','MISSING')}")
-            elif _ri.get("action") == "explanation_generate":
-                print(f"  article_id              = {_payload.get('article_id','MISSING')}")
-                print(f"  prior_claims            = {_payload.get('prior_claims','MISSING')}")
-                print(f"  matched_prefs           = {_payload.get('matched_prefs','MISSING')}")
-            elif _ri.get("action") == "item_detail_lookup":
-                print(f"  article_id              = {_payload.get('article_id','MISSING')}")
-        else:
-            print("  retrieval_input = None (FEEDBACK/CHITCHAT — correct per spec)")
-            _fb = _mc.get("feedback") or {}
-            if _fb:
-                print(f"  memory_context.feedback.sentiment_score = {_fb.get('sentiment_score','MISSING')}")
-                print(f"  memory_context.feedback.is_positive     = {_fb.get('is_positive','MISSING')}")
-                print(f"  memory_context.feedback.feedback_type   = {_fb.get('feedback_type','MISSING')}")
-                print(f"  memory_context.feedback.item_reacted_to = {_fb.get('item_reacted_to','MISSING')}")
-        print("[SPEC-CHECK] ━━━ end pipeline_output ━━━")
-        print(f"[CHAT] pipeline_output keys: {list(pipeline_output.keys())}")
-        print(f"[CHAT] label={pipeline_output.get('label')} conf={pipeline_output.get('confidence',0):.1%} strategy={pipeline_output.get('retrieval_strategy')}")
-        _ri_tmp = pipeline_output.get("retrieval_input") or {}
-        print(f"[CHAT] session_id={pipeline_output.get('session_id','?')} action={_ri_tmp.get('action','NO_RETRIEVAL')}")
-        _ri = pipeline_output.get("retrieval_input") or {}
-        _payload_dbg = _ri.get('payload') or {}
-        print(f"[CHAT] filters={_payload_dbg.get('filters',{})}")
-        print(f"[CHAT] soft_constraints={_payload_dbg.get('soft_constraints',{})}")
-        print(f"[CHAT] purchase_hints_present={bool(_payload_dbg.get('purchase_history_hints'))}")
-        _cse = pipeline_output.get("cse", {})
-        if _cse:
-            print(f"[CHAT] CSE: tier={_cse.get('tier','?')} override={_cse.get('override','?')} "
-                  f"full_sub={_cse.get('full_subtype')} partial_sub={_cse.get('partial_subtype')}")
         # ── Determine effective model (session-level lock) ─────────────────
         # Uses a dedicated session_model_locks collection — never writes to
         # sessions, users, recommendations or any other existing collection.
@@ -602,7 +504,6 @@ async def chat(req: ChatRequest):
             if _lock_doc and _lock_doc.get("selected_model"):
                 # Existing session — honour the locked model, ignore request value
                 effective_model = _lock_doc["selected_model"]
-                print(f"[CHAT] model lock: existing lock found → model={effective_model}")
             else:
                 # New session — persist the model selection in its own collection
                 await _db_model.session_model_locks.update_one(
@@ -615,9 +516,8 @@ async def chat(req: ChatRequest):
                     }},
                     upsert=True,
                 )
-                print(f"[CHAT] model lock: new lock stored → model={effective_model}")
         except Exception as _me:
-            print(f"[CHAT] model lock warning (non-fatal): {_me}")
+            pass
 
         # ── NEW FALLBACK LOGIC FOR COMPARISON ─────────────────────────────
         # If the user asked to compare but the memory context cache missed the IDs,
@@ -625,16 +525,12 @@ async def chat(req: ChatRequest):
         if _ri and _ri.get("action") == "item_compare":
             _pl = _ri.get("payload", {})
             if not _pl.get("article_id_a") or not _pl.get("article_id_b"):
-                print("[DEBUG] Comparison IDs missing. Fetching from MongoDB fallback...")
                 _last_items = await _fetch_last_recommended_items(_session_id_for_model, effective_model)
                 if len(_last_items) >= 2:
                     _pl["article_id_a"] = _last_items[0]
                     _pl["article_id_b"] = _last_items[1]
                     _ri["payload"] = _pl
                     pipeline_output["retrieval_input"] = _ri
-                    print(f"[DEBUG] Fallback success! Comparing {_last_items[0]} vs {_last_items[1]}")
-                else:
-                    print("[DEBUG] Fallback failed. Not enough items in session history.")
         # ──────────────────────────────────────────────────────────────────
 
         # ── Route pipeline_output to the selected member module only ──────
@@ -642,24 +538,17 @@ async def chat(req: ChatRequest):
         # M2/M1: call synchronously and use their response exclusively.
         #        If the module is unreachable, return an error to the user
         #        immediately — NO fallback to M3.
-        print(f"[CHAT] routing to selected_model={effective_model}")
         _member_rag_result = None
         if effective_model == "m2":
-            print(f"[CHAT] M2 selected — calling M2 sync (timeout=300s)")
             _m2_resp = await _call_m2_sync(pipeline_output)
             if _m2_resp is None:
-                print(f"[CHAT] M2 unavailable — returning error to user")
                 return _member_unavailable_response("M2 · Multimodal RAG", pipeline_output)
             _member_rag_result = _normalize_member_response(_m2_resp, "m2")
         elif effective_model == "m1":
-            print(f"[CHAT] M1 selected — calling M1 sync (timeout=300s)")
             _m1_resp = await _call_m1_sync(pipeline_output, customer_id=req.customer_id)
             if _m1_resp is None:
-                print(f"[CHAT] M1 unavailable — returning error to user")
                 return _member_unavailable_response("M1 · Graph RAG", pipeline_output)
             _member_rag_result = _normalize_member_response(_m1_resp, "m1")
-        else:
-            print(f"[CHAT] M3 selected — processing locally")
 
         # ── Store classifier_input in the turn document ───────────────────
         # Stores the [SEP]-joined DistilBERT input so rl_routes.py can
@@ -684,9 +573,8 @@ async def chat(req: ChatRequest):
                     {"$set": {"turns.$.classifier_input": _classifier_input}}
                 )
             except Exception as _ci_err:
-                print(f"[CHAT] classifier_input store warning (non-fatal): {_ci_err}")
+                pass
 
-        print(f"[CHAT] ─── Step 2: calling rag.process...")
         # Step 2: Text RAG — M3 only. M1/M2 already produced their result above.
         if _member_rag_result is not None:
             rag_result = _member_rag_result
@@ -694,7 +582,6 @@ async def chat(req: ChatRequest):
             rag_result["items_recommended"] = await _enrich_member_items(
                 rag_result.get("items_recommended", [])
             )
-            print(f"[CHAT] ─── Using {effective_model.upper()} response (local RAG skipped)")
             # Store the M2/M1 response so CSE can populate currently_discussing
             # on follow-up turns (ATTRIBUTE_QUESTION, EXPLANATION_WHY, etc.)
             _member_items = rag_result.get("items_recommended", [])
@@ -712,9 +599,8 @@ async def chat(req: ChatRequest):
                         retrieval_strategy=pipeline_output.get("retrieval_strategy", "UNKNOWN"),
                         collection_prefix=effective_model,
                     )
-                    print(f"[CHAT] store_response OK for {effective_model.upper()} — {len(_member_items)} item(s) saved")
                 except Exception as _sr_err:
-                    print(f"[CHAT] store_response warning (non-fatal): {_sr_err}")
+                    pass
         else:
             rag_result = await rag.process(
                 pipeline_output=pipeline_output,
@@ -724,7 +610,6 @@ async def chat(req: ChatRequest):
             )
 
         t_rag_done = time.perf_counter()
-        print(f"[CHAT] ─── RAG done")
         _tier, _sub_tier = determine_tier(pipeline_output)
         log_turn(
             session_id      = pipeline_output.get("session_id", ""),
@@ -738,11 +623,6 @@ async def chat(req: ChatRequest):
             total_ms        = (t_rag_done    - t_start)       * 1000,
             response_status = compute_response_status(rag_result),
         )
-        print(f"[CHAT] rag_result keys: {list(rag_result.keys())}")
-        print(f"[CHAT] response_text: '{rag_result.get('response_text','')[:100]}'")
-        print(f"[CHAT] action={rag_result.get('action')} items={len(rag_result.get('items_recommended',[]))} hall={rag_result.get('hallucination_flag')} contra={rag_result.get('contradiction_found')}")
-        for _itm in rag_result.get("items_recommended",[]):
-            print(f"[CHAT] ITEM: {_itm.get('article_id','?')} | {str(_itm.get('name','?'))[:300]} | {_itm.get('colour','?')} | {_itm.get('price','?')}")
 
         # ── Retrieve recommendation_id and patch user_turn_id ─────────────
         # store_response() saves recommendation linked to the BOT turn.
@@ -771,7 +651,7 @@ async def chat(req: ChatRequest):
                             {"$set": {"user_turn_id": _user_turn_id_for_rec}}
                         )
             except Exception as _rec_err:
-                print(f"[CHAT] recommendation_id lookup warning (non-fatal): {_rec_err}")
+                pass
         # Extract items for product cards
         items = []
         for item in rag_result.get("items_recommended", []):
@@ -801,7 +681,6 @@ async def chat(req: ChatRequest):
                     "match_percent": item.get("match_percent"),
                 })
 
-        print(f"[CHAT] ─── Returning final response to frontend")
 
         # ── Collect implicit RL signal (next-turn behaviour) ──────────────
         # This fires silently — never affects the response to the user.
@@ -846,10 +725,9 @@ async def chat(req: ChatRequest):
                         next_label=      _cur_label,
                         db=              _db,
                     ))
-                    print(f"[CHAT] RL implicit: {_prev_lbl}->{_cur_label} queued for session {_session_id[:12]}")
         except Exception as _rl_err:
             # RL signal collection NEVER breaks the main response
-            print(f"[CHAT] RL implicit signal warning (non-fatal): {_rl_err}")
+            pass
 
         return {
             "response_text":       rag_result.get("response_text", ""),
@@ -879,6 +757,5 @@ async def chat(req: ChatRequest):
         }
 
     except Exception as e:
-        print(f"[Chat API] Error: {e}")
         import traceback; traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

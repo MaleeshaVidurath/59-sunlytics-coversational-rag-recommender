@@ -582,8 +582,9 @@ async def _groq_relevance_check(message: str) -> tuple:
                 json={
                     "model": GROQ_ENTITY_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 60,
+                    "max_tokens": 200,
                     "temperature": 0.0,
+                    "reasoning_effort": "low",
                     "response_format": {"type": "json_object"},
                 }
             )
@@ -1227,6 +1228,7 @@ async def extract_entities_llm(message: str) -> dict:
                         ],
                         "max_tokens":  150,
                         "temperature": 0.0,
+                        "reasoning_effort": "low",
                         "response_format": {"type": "json_object"},
                     }
                 )

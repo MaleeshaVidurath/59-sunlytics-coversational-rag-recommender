@@ -59,11 +59,6 @@ async def _create_indexes():
     await db.recommendations.create_index("session_id")
     await db.recommendations.create_index([("user_id", 1), ("created_at", -1)])
 
-    # explanations collection — find explanations by session and by recommendation
-    await db.explanations.create_index("session_id")
-    await db.explanations.create_index("recommendation_id")
-    await db.explanations.create_index([("user_id", 1), ("created_at", -1)])
-
     # contradiction_log collection — find contradictions by session
     await db.contradiction_log.create_index("session_id")
     await db.contradiction_log.create_index([("user_id", 1), ("detected_at", -1)])
@@ -94,15 +89,6 @@ async def _create_indexes():
     await db.m2_recommendations.create_index("session_id")
     await db.m2_recommendations.create_index([("user_id", 1), ("created_at", -1)])
 
-    await db.m2_explanations.create_index("session_id")
-    await db.m2_explanations.create_index("recommendation_id")
-    await db.m2_explanations.create_index([("user_id", 1), ("created_at", -1)])
-
-    # m2_turns — standalone (M3 turns are embedded in sessions; M2 gets its own collection)
-    await db.m2_turns.create_index("turn_id", unique=True)
-    await db.m2_turns.create_index("session_id")
-    await db.m2_turns.create_index([("user_id", 1), ("created_at", -1)])
-
     # ── M1 member collections (full set, same structure as M3) ───────────────
     await db.m1_session_graphs.create_index("session_id", unique=True)
 
@@ -114,15 +100,6 @@ async def _create_indexes():
 
     await db.m1_recommendations.create_index("session_id")
     await db.m1_recommendations.create_index([("user_id", 1), ("created_at", -1)])
-
-    await db.m1_explanations.create_index("session_id")
-    await db.m1_explanations.create_index("recommendation_id")
-    await db.m1_explanations.create_index([("user_id", 1), ("created_at", -1)])
-
-    # m1_turns — standalone (same reasoning as m2_turns)
-    await db.m1_turns.create_index("turn_id", unique=True)
-    await db.m1_turns.create_index("session_id")
-    await db.m1_turns.create_index([("user_id", 1), ("created_at", -1)])
 
     print("MongoDB indexes created/verified.")
 

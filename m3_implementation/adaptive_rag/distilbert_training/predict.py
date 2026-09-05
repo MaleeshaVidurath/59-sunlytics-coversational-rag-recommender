@@ -88,8 +88,11 @@ class _GroqJudge:
                     {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
                     {"role": "user",   "content": user_content},
                 ],
-                max_tokens=15,
+                # gpt-oss is a reasoning model: a 15-token budget was consumed
+                # entirely by hidden reasoning, returning empty content.
+                max_tokens=200,
                 temperature=0.0,
+                reasoning_effort="low",
             )
             raw = resp.choices[0].message.content.strip().upper()
             if raw in _VALID_LABELS:

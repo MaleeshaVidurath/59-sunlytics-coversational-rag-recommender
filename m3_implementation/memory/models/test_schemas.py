@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 from memory.models.schemas import (
     UserDocument, SessionDocument, ConversationTurn,
     TurnClassification, DialogueState, PreferenceEntry,
-    ItemInContext, ExplanationDocument, ExplanationClaim
+    ItemInContext
 )
 
 print("Testing schema creation...\n")
@@ -58,28 +58,5 @@ print(f"\nTurn added: {turn.turn_id}")
 print(f"  Content: {turn.content}")
 print(f"  Classification: {turn.classification.label} → {turn.classification.retrieval_strategy}")
 print(f"  Entities: {turn.entities}")
-
-# 5. Create an explanation with claims
-claim = ExplanationClaim(
-    claim_text="This item matches the user's preference for black colour",
-    claim_type="preference_match",
-    attribute="colour_group_name",
-    evidence_value="Black",
-    user_preference_ref=pref.pref_id,
-    confidence=0.97
-)
-explanation = ExplanationDocument(
-    recommendation_id="rec_test001",
-    article_id="108775015",
-    session_id=session.session_id,
-    user_id=user.user_id,
-    turn_id=turn.turn_id,
-    full_explanation="I recommend this black dress because it matches your colour preference.",
-    claims=[claim]
-)
-print(f"\nExplanation created: {explanation.explanation_id}")
-print(f"  Claims: {len(explanation.claims)}")
-print(f"  First claim: {explanation.claims[0].claim_text}")
-print(f"  Claim status: {explanation.claims[0].status}")
 
 print("\nAll schema tests PASSED.")
