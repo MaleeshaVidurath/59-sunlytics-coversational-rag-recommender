@@ -43,6 +43,11 @@ async def lifespan(app: FastAPI):
     await create_schema()
     get_qdrant()   # verify Qdrant connection
 
+    # Unique username + TTL index on refresh tokens. Safe to call repeatedly.
+    from api.security.models import ensure_indexes
+    await ensure_indexes()
+    print("[API] Auth indexes ensured")
+
     # Create RL experiences index (safe to run every startup)
     try:
         from memory.db.mongo import get_db

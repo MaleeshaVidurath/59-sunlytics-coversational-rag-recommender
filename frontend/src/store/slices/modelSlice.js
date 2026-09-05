@@ -1,5 +1,5 @@
 import { createSlice } from "@reduxjs/toolkit";
-import { loggedOut } from "./authSlice";
+import { logout, sessionExpired } from "./authSlice";
 
 /**
  * Which recommendation model the current chat is bound to.
@@ -15,9 +15,11 @@ const modelSlice = createSlice({
     modelReset(state)            { state.selected = null; },
   },
   extraReducers: builder => {
-    // Signing out must also drop the model choice, otherwise the next user to
-    // sign in on this browser would land straight in someone else's model.
-    builder.addCase(loggedOut, state => { state.selected = null; });
+    // Signing out — deliberately or because the session died — must drop the
+    // model choice, otherwise the next user to sign in on this browser would
+    // land straight in someone else's model.
+    const clear = state => { state.selected = null; };
+    builder.addCase(logout.fulfilled, clear).addCase(sessionExpired, clear);
   },
 });
 

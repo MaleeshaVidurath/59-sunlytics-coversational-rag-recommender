@@ -7,7 +7,7 @@ import ChatHeader from "../components/organisms/ChatHeader";
 import MessageList from "../components/organisms/MessageList";
 import MessageInput from "../components/molecules/MessageInput";
 
-import { selectUser, loggedOut } from "../store/slices/authSlice";
+import { selectUser, logout } from "../store/slices/authSlice";
 import { selectModel, modelReset } from "../store/slices/modelSlice";
 import {
   selectSessions, selectActiveSession, selectSessionsError,
@@ -47,19 +47,21 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, sending]);
 
-  useEffect(() => { dispatch(fetchSessions(user.user_id)); }, [dispatch, user.user_id]);
+  // Identity comes from the session cookie, so this only needs to run once
+  // per signed-in user.
+  useEffect(() => { dispatch(fetchSessions()); }, [dispatch]);
 
   const refocus = () => inputRef.current?.focus();
 
   async function newChat() {
-    await dispatch(startNewChat(user.user_id));
+    await dispatch(startNewChat());
     // Back to model selection — the next chat picks its model afresh.
     dispatch(modelReset());
   }
 
   async function handleDeleteSession(sessionId) {
     if (!window.confirm("Delete this chat? All data will be removed.")) return;
-    dispatch(removeSession({ sessionId, userId: user.user_id }));
+    dispatch(removeSession({ sessionId }));
   }
 
   async function send() {
@@ -69,7 +71,7 @@ export default function ChatPage() {
     const { valid, value } = validateMessage(input);
     if (!valid || sending || awaitingConsent) return;
     setInput("");
-    await dispatch(sendChatMessage({ text: value, user, model }));
+    await dispatch(sendChatMessage({ text: value, model }));
     refocus();
   }
 
@@ -87,11 +89,11 @@ export default function ChatPage() {
           activeSession={activeSession}
           model={model}
           onNewChat={newChat}
-          onSelectSession={session => dispatch(openSession({ session, userId: user.user_id }))}
+          onSelectSession={session => dispatch(openSession({ session }))}
           onDeleteSession={handleDeleteSession}
-          onLogout={() => dispatch(loggedOut())}
+          onLogout={() => dispatch(logout())}
           error={sessionsError}
-          onRetry={() => dispatch(fetchSessions(user.user_id))}
+          onRetry={() => dispatch(fetchSessions())}
         />
       }
       header={
@@ -119,8 +121,8 @@ export default function ChatPage() {
         model={model}
         awaitingConsent={awaitingConsent}
         onFeedback={(msg, rating) => dispatch(rateMessage({ msg, rating, userId: user.user_id }))}
-        onConsentYes={async () => { await dispatch(acceptConsent({ user, model })); refocus(); }}
-        onConsentNo={async () => { await dispatch(declineConsent({ user, model })); refocus(); }}
+        onConsentYes={async () => { await dispatch(acceptConsent({ model })); refocus(); }}
+        onConsentNo={async () => { await dispatch(declineConsent({ model })); refocus(); }}
         onSuggestion={s => { setInput(s); refocus(); }}
         endRef={messagesEndRef}
         error={chatError}

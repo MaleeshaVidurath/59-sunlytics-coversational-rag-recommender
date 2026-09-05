@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:auth": "esbuild tests/auth-client.test.jsx --bundle --platform=node --format=cjs --loader:.jsx=jsx --jsx=automatic --outfile=node_modules/.cache/auth-test.cjs --log-level=error && node node_modules/.cache/auth-test.cjs"
   },
   "dependencies": {
     "@reduxjs/toolkit": "^2.12.0",

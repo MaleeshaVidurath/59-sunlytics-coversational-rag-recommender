@@ -2,13 +2,17 @@ import { useDispatch, useSelector } from "react-redux";
 import CenteredTemplate from "../components/templates/CenteredTemplate";
 import CredentialsForm from "../components/organisms/CredentialsForm";
 import Wordmark from "../components/atoms/Wordmark";
-import { login, selectAuthError, authErrorCleared } from "../store/slices/authSlice";
+import { register, selectAuthError, authErrorCleared } from "../store/slices/authSlice";
 import { C } from "../styles/theme";
 
-export default function LoginPage({ onShowRegister }) {
+/**
+ * New accounts start cold: no linked H&M persona, so no purchase history.
+ * Recommendations are ranked semantically until preferences build up through
+ * conversation. Said plainly on the form so the difference is not a surprise.
+ */
+export default function RegisterPage({ onShowLogin }) {
   const dispatch = useDispatch();
   const error = useSelector(selectAuthError);
-  const busy  = useSelector(s => s.auth.status === "bootstrapping");
 
   return (
     <CenteredTemplate fontFamily="'Playfair Display',Georgia,serif">
@@ -16,25 +20,31 @@ export default function LoginPage({ onShowRegister }) {
         border:`1px solid ${C.border}`, borderRadius:16, padding:"48px 40px", textAlign:"center" }}>
         <Wordmark size={36} letterSpacing={6} color={C.accent} weight={700} marginBottom={8} />
         <div style={{ fontSize:12, letterSpacing:3, color:C.textDim,
-          textTransform:"uppercase", marginBottom:36, fontFamily:"system-ui,sans-serif" }}>
-          Fashion Intelligence System
+          textTransform:"uppercase", marginBottom:24, fontFamily:"system-ui,sans-serif" }}>
+          Create an account
+        </div>
+
+        <div style={{ fontSize:12, color:C.textMuted, lineHeight:1.6, marginBottom:24,
+          fontFamily:"system-ui,sans-serif", textAlign:"left",
+          background:C.card, border:`1px solid ${C.border}`, borderRadius:8, padding:"10px 12px" }}>
+          A new account starts with no shopping history, so early recommendations
+          are based on what you ask for rather than what you have bought before.
         </div>
 
         <CredentialsForm
-          mode="login"
-          busy={busy}
+          mode="register"
           error={error}
           onDismissError={() => dispatch(authErrorCleared())}
-          onSubmit={({ username, password }) => dispatch(login({ username, password }))}
+          onSubmit={({ username, password }) => dispatch(register({ username, password }))}
         />
 
         <div style={{ marginTop:20, fontSize:12, color:C.textDim,
           fontFamily:"system-ui,sans-serif" }}>
-          No account?{" "}
-          <button onClick={onShowRegister}
+          Already have an account?{" "}
+          <button onClick={onShowLogin}
             style={{ background:"none", border:"none", color:C.accent,
               cursor:"pointer", fontSize:12, padding:0, textDecoration:"underline" }}>
-            Create one
+            Sign in
           </button>
         </div>
       </div>

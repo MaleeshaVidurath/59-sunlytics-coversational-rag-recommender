@@ -5,13 +5,13 @@ import { requestJson } from "./http";
  *
  * Deliberately never retried: the turn is not idempotent, and a retry after a
  * timeout would append a second message the user never typed.
+ *
+ * Identity is not sent — the server reads it from the access token.
  */
-export function sendMessage({ userId, customerId, message, sessionId, forceNew, selectedModel }) {
+export function sendMessage({ message, sessionId, forceNew, selectedModel }) {
   return requestJson("/api/chat", {
     method: "POST",
     body: {
-      user_id:           userId,
-      customer_id:       customerId,
       message,
       session_id:        sessionId || null,
       force_new_session: forceNew || false,

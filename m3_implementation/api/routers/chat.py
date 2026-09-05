@@ -4,7 +4,7 @@ import json as _json
 import re as _re
 import time
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from api.dependencies import get_memory_pipeline, get_rag_pipeline
@@ -397,12 +397,27 @@ async def _fetch_last_recommended_items(session_id: str, effective_model: str) -
     return []
 
 
-router = APIRouter(prefix="/api/chat", tags=["chat"])
+from ..security.dependencies import get_current_account, verify_csrf
+from ..security.models import AccountDocument
+
+# Authenticate before the CSRF check, so an expired session answers 401 (which
+# the client can act on by refreshing) rather than 403.
+router = APIRouter(
+    prefix="/api/chat",
+    tags=["chat"],
+    dependencies=[Depends(get_current_account), Depends(verify_csrf)],
+)
 
 
 class ChatRequest(BaseModel):
-    user_id:            str
-    customer_id:        str
+    """
+    A chat turn.
+
+    `user_id` and `customer_id` used to be fields here. They are gone on
+    purpose: both identify *whose* data the pipeline reads and writes, and
+    accepting them from the request body let any caller act as any user. They
+    are now derived from the caller's access token.
+    """
     message:            str
     session_id:         Optional[str] = None   # None = start new session
     force_new_session:  bool = False            # True = ignore existing session, start fresh
@@ -410,7 +425,8 @@ class ChatRequest(BaseModel):
 
 
 @router.post("")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest,
+               account: AccountDocument = Depends(get_current_account)):
     """
     Main chat endpoint. Runs the full pipeline:
       1. Memory pipeline — classify + enrich
@@ -432,6 +448,12 @@ async def chat(req: ChatRequest):
       contradiction_found:   True if contradiction was detected and fixed
       contradiction_count:   Number of contradictions found
     """
+    # Identity comes from the verified access token, never from the payload.
+    # A self-registered account has no H&M persona, so customer_id is empty and
+    # the pipeline runs cold-start: semantic ranking, no purchase-history hints.
+    user_id     = account.user_id or account.account_id
+    customer_id = account.linked_customer_id or ""
+
     memory = get_memory_pipeline()
     rag    = get_rag_pipeline()
 
@@ -447,7 +469,7 @@ async def chat(req: ChatRequest):
             try:
                 from memory.db.redis_client import get_redis
                 redis = await get_redis()
-                await redis.delete(f"user:{req.user_id}:active_session")
+                await redis.delete(f"user:{user_id}:active_session")
             except Exception as e:
                 pass
 
@@ -472,10 +494,10 @@ async def chat(req: ChatRequest):
         t_start = time.perf_counter()
         # Step 1: Memory pipeline
         pipeline_output = await memory.process_turn(
-            user_id=req.user_id,
+            user_id=user_id,
             message=req.message,
             session_id=None if req.force_new_session else req.session_id,
-            customer_id=req.customer_id,
+            customer_id=customer_id,
             member_model=_early_model,
         )
 
@@ -545,7 +567,7 @@ async def chat(req: ChatRequest):
                 return _member_unavailable_response("M2 · Multimodal RAG", pipeline_output)
             _member_rag_result = _normalize_member_response(_m2_resp, "m2")
         elif effective_model == "m1":
-            _m1_resp = await _call_m1_sync(pipeline_output, customer_id=req.customer_id)
+            _m1_resp = await _call_m1_sync(pipeline_output, customer_id=customer_id)
             if _m1_resp is None:
                 return _member_unavailable_response("M1 · Graph RAG", pipeline_output)
             _member_rag_result = _normalize_member_response(_m1_resp, "m1")

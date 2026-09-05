@@ -1,8 +1,21 @@
 # m3_implementation/api/routers/sessions.py
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from memory.db.mongo import get_db, get_collection_name
 
-router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+from ..security.dependencies import get_current_user_id, verify_csrf
+
+# Every route here is authenticated. `user_id` comes from the caller's access
+# token via get_current_user_id and is NEVER read from the query string:
+# a client-supplied user id is not a credential, and accepting one previously
+# let anyone list or delete another user's chats by guessing their id.
+# Dependency order matters: authenticate first, then check CSRF. Reversed, an
+# unauthenticated POST would answer 403 (CSRF) instead of 401, and the client
+# could not tell "your session expired, refresh it" from "you may not do that".
+router = APIRouter(
+    prefix="/api/sessions",
+    tags=["sessions"],
+    dependencies=[Depends(get_current_user_id), Depends(verify_csrf)],
+)
 
 # Attribute name → the wording used in the in-chat correction note.
 _ATTR_LABEL = {
@@ -160,7 +173,7 @@ def _merge_correction(bucket: list, entry: dict) -> None:
 
 
 @router.get("")
-async def list_sessions(user_id: str = Query(...)):
+async def list_sessions(user_id: str = Depends(get_current_user_id)):
     """
     Returns all sessions for a user, newest first.
     Reads from both the sessions collection AND the turns collection
@@ -226,7 +239,7 @@ async def list_sessions(user_id: str = Query(...)):
 
 
 @router.post("/new")
-async def create_new_session(user_id: str = Query(...)):
+async def create_new_session(user_id: str = Depends(get_current_user_id)):
     """
     Explicitly starts a new session by clearing the Redis active session pointer.
     Call this when user clicks "New Chat" so the next message creates a fresh session.
@@ -247,7 +260,8 @@ async def create_new_session(user_id: str = Query(...)):
 
 
 @router.get("/{session_id}")
-async def get_session_history(session_id: str, user_id: str = Query(...)):
+async def get_session_history(session_id: str,
+                              user_id: str = Depends(get_current_user_id)):
     """
     Returns full message history for a session.
     Used when switching to a previous chat in the sidebar.
@@ -344,7 +358,8 @@ async def get_session_history(session_id: str, user_id: str = Query(...)):
 
 
 @router.delete("/{session_id}")
-async def delete_session(session_id: str, user_id: str = Query(...)):
+async def delete_session(session_id: str,
+                         user_id: str = Depends(get_current_user_id)):
     """
     Deletes a session and ALL related data:
       - sessions collection

@@ -46,13 +46,21 @@ export class ApiError extends Error {
         return "Cannot reach the server. Check that the backend is running.";
       case ErrorKind.PARSE:
         return "The server sent a response we could not read.";
-      default:
+      default: {
+        // The API authors its own 4xx messages ("Invalid username or password.",
+        // "That username is already taken.") and they are more useful than
+        // anything generic. Only trusted for client errors: a 5xx detail can
+        // carry internal information the user should not see.
+        const detail = this.body && typeof this.body === "object" ? this.body.detail : null;
+        if (detail && this.status >= 400 && this.status < 500) return detail;
+
         if (this.status === 401 || this.status === 403) return "Your session is no longer valid. Please sign in again.";
         if (this.status === 404) return "That item no longer exists.";
         if (this.status === 429) return "Too many requests — please wait a moment and try again.";
         if (this.status >= 500)  return "The server ran into a problem. Please try again.";
         if (this.status >= 400)  return "The server rejected that request.";
         return "Something went wrong.";
+      }
     }
   }
 

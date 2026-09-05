@@ -1,13 +1,13 @@
 import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
 import { getSessions, deleteSession } from "../../services/sessionService";
 import { toApiError } from "../../services/ApiError";
-import { loggedOut } from "./authSlice";
+import { logout, sessionExpired } from "./authSlice";
 
 export const fetchSessions = createAsyncThunk(
   "sessions/fetch",
-  async (userId, { rejectWithValue }) => {
+  async (_, { rejectWithValue }) => {
     try {
-      const data = await getSessions(userId);
+      const data = await getSessions();
       return data.sessions || [];
     } catch (err) {
       return rejectWithValue(toApiError(err).toPayload());
@@ -24,11 +24,11 @@ export const fetchSessions = createAsyncThunk(
  */
 export const refreshSessionsUntilPresent = createAsyncThunk(
   "sessions/refreshUntilPresent",
-  async ({ userId, sessionId, retries = 3, delay = 600 }, { dispatch }) => {
+  async ({ sessionId, retries = 3, delay = 600 }, { dispatch }) => {
     for (let i = 0; i < retries; i++) {
       await new Promise(r => setTimeout(r, delay));
       try {
-        const data = await getSessions(userId);
+        const data = await getSessions();
         const list = data.sessions || [];
         if (list.some(s => s.session_id === sessionId) || i === retries - 1) {
           dispatch(sessionsReceived(list));
@@ -46,19 +46,24 @@ export const refreshSessionsUntilPresent = createAsyncThunk(
 
 export const removeSession = createAsyncThunk(
   "sessions/remove",
-  async ({ sessionId, userId }, { getState, dispatch, rejectWithValue }) => {
+  async ({ sessionId }, { getState, dispatch, rejectWithValue }) => {
     try {
-      await deleteSession(sessionId, userId);
+      await deleteSession(sessionId);
     } catch (err) {
       return rejectWithValue(toApiError(err).toPayload());
     }
     // Clear before reloading the list, so the deleted chat is never briefly
     // shown as the open one.
     if (getState().sessions.activeId === sessionId) dispatch(activeSessionCleared());
-    await dispatch(fetchSessions(userId));
+    await dispatch(fetchSessions());
     return sessionId;
   },
 );
+
+/** Signing out, or losing the session, empties the sidebar. */
+const resetSessions = state => {
+  state.items = []; state.activeId = null; state.error = null;
+};
 
 const sessionsSlice = createSlice({
   name: "sessions",
@@ -85,9 +90,8 @@ const sessionsSlice = createSlice({
       .addCase(removeSession.rejected, (state, action) => {
         state.error = action.payload?.message ?? "Could not delete that chat.";
       })
-      .addCase(loggedOut, state => {
-        state.items = []; state.activeId = null; state.error = null;
-      });
+      .addCase(logout.fulfilled, resetSessions)
+      .addCase(sessionExpired, resetSessions);
   },
 });
 

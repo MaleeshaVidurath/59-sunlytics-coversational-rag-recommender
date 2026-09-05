@@ -1,33 +1,18 @@
-import { configureStore, createListenerMiddleware } from "@reduxjs/toolkit";
-import authReducer, { loggedIn, loggedOut, STORAGE_KEY } from "./slices/authSlice";
+import { configureStore } from "@reduxjs/toolkit";
+import authReducer, { sessionExpired } from "./slices/authSlice";
 import modelReducer from "./slices/modelSlice";
 import sessionsReducer from "./slices/sessionsSlice";
 import chatReducer from "./slices/chatSlice";
+import { setSessionExpiredHandler } from "../services/http";
 
 /**
- * Keeps localStorage in step with the auth slice.
+ * There is no persistence middleware any more.
  *
- * Done here rather than inside the reducers so those stay pure — a reducer that
- * writes to storage cannot be replayed or tested in isolation.
+ * The session used to be mirrored into localStorage, which meant any injected
+ * script could read it. It now lives entirely in httpOnly cookies: the page
+ * cannot read them, and the profile in this store is rebuilt on load from
+ * /api/auth/me.
  */
-const persistence = createListenerMiddleware();
-
-persistence.startListening({
-  actionCreator: loggedIn,
-  effect: action => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(action.payload)); }
-    catch (e) { console.warn("Could not persist session", e); }
-  },
-});
-
-persistence.startListening({
-  actionCreator: loggedOut,
-  effect: () => {
-    try { localStorage.removeItem(STORAGE_KEY); }
-    catch (e) { console.warn("Could not clear persisted session", e); }
-  },
-});
-
 export const store = configureStore({
   reducer: {
     auth:     authReducer,
@@ -35,7 +20,12 @@ export const store = configureStore({
     sessions: sessionsReducer,
     chat:     chatReducer,
   },
-  middleware: getDefault => getDefault().prepend(persistence.middleware),
 });
+
+/**
+ * Lets the HTTP layer report a dead session without importing the store —
+ * which would be a cycle, since the store's thunks import the HTTP layer.
+ */
+setSessionExpiredHandler(() => store.dispatch(sessionExpired()));
 
 export default store;

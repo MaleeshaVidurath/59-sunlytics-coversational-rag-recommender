@@ -32,3 +32,12 @@ export function validateCustomerId(id) {
   if (!value) return { valid: false, error: "Select a customer profile to continue." };
   return { valid: true, value };
 }
+
+/**
+ * Mirrors PASSWORD_MIN_LENGTH in the API's security config.
+ *
+ * Client-side length checking is a convenience, not a control: the server
+ * enforces the real policy (length, common-password blocklist, username
+ * containment) and rejects anything that slips past this.
+ */
+export const MIN_PASSWORD_LENGTH = 12;

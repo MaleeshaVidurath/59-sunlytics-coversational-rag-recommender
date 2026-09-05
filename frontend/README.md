@@ -480,3 +480,76 @@ parsed as `data.sessions || []` and became **an empty sidebar with no error** �
 user could not tell "no chats yet" from "the backend is down". Those failures are now
 visible. This is the intended fix, but it does mean errors appear where the UI
 previously showed nothing.
+
+---
+
+## 11. Authentication
+
+Sign-in uses **JWT access + rotating opaque refresh tokens delivered as
+`httpOnly` cookies**. The full model, threat coverage and known gaps are in
+[`../SECURITY.md`](../SECURITY.md); this section covers only what the frontend does.
+
+### There is no token in JavaScript
+
+The session is **not** in `localStorage`, Redux, or any variable. Access and
+refresh tokens are `httpOnly` cookies the page cannot read, so an injected
+script has nothing to steal. The one readable cookie is the CSRF token, which is
+readable by design — the double-submit pattern needs the page to echo it back in
+an `X-CSRF-Token` header, something a cross-origin attacker cannot do.
+
+### Bootstrap
+
+Because the page cannot read its own session, `App.jsx` does not know on load
+whether anyone is signed in. It dispatches `bootstrapSession()`
+(`GET /api/auth/me`) and holds a neutral splash until the answer arrives —
+rendering the login screen first would flash it at users who *are* signed in.
+
+```
+status:  "bootstrapping"  ->  "anonymous" | "authenticated"
+```
+
+### The 401 interceptor
+
+Access tokens last 15 minutes. `services/http.js` turns that into a non-event:
+
+```
+request -> 401 -> POST /api/auth/refresh -> replay original request -> 200
+```
+
+**Concurrent 401s share one refresh.** This is not an optimisation. Refresh
+tokens rotate and reuse is treated as theft, so two parallel refreshes would
+land the second on an already-rotated token, revoke the whole family, and log
+the user out *because the page was busy*. The single-flight promise in
+`refreshSession()` prevents that, and it is cleared **synchronously** — a
+deferred clear leaves an already-resolved `false` in place, and the next 401
+then "fails" a refresh it never attempted.
+
+If refresh itself fails, `setSessionExpiredHandler` tells the store, which
+clears the user, transcript, sidebar and model choice and returns to sign-in.
+
+### Requests carry no identity
+
+`user_id` and `customer_id` are absent from every payload and query string — the
+server derives them from the token. Passing a client-supplied `user_id` used to
+let anyone read or delete another user's chats.
+
+### Screens
+
+| | |
+|---|---|
+| `LoginPage` | Username + password. Credentials for the 250 research personas are in the gitignored `credentials/seeded_accounts.csv`. |
+| `RegisterPage` | Creates a **cold-start** account: no linked H&M persona, so no purchase history. The form says so, because early recommendations genuinely differ. |
+| `CredentialsForm` | Shared by both. Handles confirm-match and the 12-character minimum client-side; the server enforces the real policy. |
+
+`CustomerPicker` was deleted — picking a customer from a list is no longer how
+you sign in.
+
+### Testing
+
+```bash
+npm run test:auth
+```
+
+Drives the real store and services against a mock that emulates the server's
+cookie and 401 semantics: httpOnly invisibility, CSRF echo, expiry, refresh
+rotation, and session death.

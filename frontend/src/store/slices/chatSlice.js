@@ -7,7 +7,7 @@ import { toApiError } from "../../services/ApiError";
 import {
   activeSessionSet, activeSessionCleared, refreshSessionsUntilPresent,
 } from "./sessionsSlice";
-import { loggedOut } from "./authSlice";
+import { logout, sessionExpired } from "./authSlice";
 
 const now = () => new Date().toISOString();
 
@@ -77,10 +77,10 @@ const errorMessage = (err) => ({
  */
 export const refreshTranscript = createAsyncThunk(
   "chat/refreshTranscript",
-  async ({ sessionId, userId }, { dispatch }) => {
+  async ({ sessionId }, { dispatch }) => {
     if (!sessionId) return;
     try {
-      const data = await getSessionHistory(sessionId, userId);
+      const data = await getSessionHistory(sessionId);
       dispatch(messagesSet(mapHistoryMessages(data, sessionId)));
     } catch (e) {
       // Non-fatal: the reply itself arrived, only the correction note is missing.
@@ -92,11 +92,11 @@ export const refreshTranscript = createAsyncThunk(
 /** Opens a chat from the sidebar and loads its transcript. */
 export const openSession = createAsyncThunk(
   "chat/openSession",
-  async ({ session, userId }, { dispatch }) => {
+  async ({ session }, { dispatch }) => {
     dispatch(consentCleared());
     dispatch(activeSessionSet(session.session_id));
     try {
-      const data = await getSessionHistory(session.session_id, userId);
+      const data = await getSessionHistory(session.session_id);
       dispatch(messagesSet(mapHistoryMessages(data, session.session_id)));
     } catch (e) {
       // The user clicked a chat and got nothing — this must be visible.
@@ -114,10 +114,10 @@ export const openSession = createAsyncThunk(
  */
 export const startNewChat = createAsyncThunk(
   "chat/startNew",
-  async (userId, { dispatch }) => {
+  async (_, { dispatch }) => {
     // Non-fatal: the next send passes force_new anyway, so a failed pointer
     // clear cannot strand the user in the old session.
-    try { await startNewSession(userId); }
+    try { await startNewSession(); }
     catch (e) { console.warn("could not clear session pointer:", toApiError(e).userMessage); }
     dispatch(activeSessionCleared());
   },
@@ -125,15 +125,13 @@ export const startNewChat = createAsyncThunk(
 
 export const sendChatMessage = createAsyncThunk(
   "chat/send",
-  async ({ text, user, model }, { getState, dispatch }) => {
+  async ({ text, model }, { getState, dispatch }) => {
     dispatch(messageAppended({ id: Date.now(), role: "user", content: text, timestamp: now() }));
 
     const activeSession = getState().sessions.activeId;
 
     try {
       const res = await sendMessage({
-        userId: user.user_id,
-        customerId: user.customer_id,
         message: text,
         sessionId: activeSession,
         // No session open in the UI means the model was just picked, so this
@@ -157,14 +155,12 @@ export const sendChatMessage = createAsyncThunk(
       // from the server so the correction note appears under the earlier
       // message that quoted the old value.
       if ((res.revisions || []).length > 0) {
-        await dispatch(refreshTranscript({
-          sessionId: newSessionId || activeSession, userId: user.user_id,
-        }));
+        await dispatch(refreshTranscript({ sessionId: newSessionId || activeSession }));
       }
 
       // Deliberately not awaited — the sidebar catching up must not hold the
       // composer disabled.
-      dispatch(refreshSessionsUntilPresent({ userId: user.user_id, sessionId: newSessionId }));
+      dispatch(refreshSessionsUntilPresent({ sessionId: newSessionId }));
     } catch (e) {
       dispatch(messageAppended(errorMessage(e)));
     }
@@ -180,23 +176,20 @@ export const sendChatMessage = createAsyncThunk(
 /** "Yes" to a consent question — re-runs the search and shows the reply. */
 export const acceptConsent = createAsyncThunk(
   "chat/acceptConsent",
-  async ({ user, model }, { getState, dispatch }) => {
+  async ({ model }, { getState, dispatch }) => {
     dispatch(consentCleared());
     dispatch(messageAppended({ id: Date.now(), role: "user", content: "Yes", timestamp: now() }));
 
     const activeSession = getState().sessions.activeId;
     try {
       const res = await sendMessage({
-        userId: user.user_id, customerId: user.customer_id,
         message: "yes", sessionId: activeSession, selectedModel: model,
       });
       const botMsg = buildBotMessage(res);
       dispatch(messageAppended(botMsg));
       if (botMsg.isConsentQuestion) dispatch(consentAwaited());
       if ((res.revisions || []).length > 0) {
-        await dispatch(refreshTranscript({
-          sessionId: res.session_id || activeSession, userId: user.user_id,
-        }));
+        await dispatch(refreshTranscript({ sessionId: res.session_id || activeSession }));
       }
     } catch (e) {
       dispatch(messageAppended(errorMessage(e)));
@@ -213,14 +206,13 @@ export const acceptConsent = createAsyncThunk(
  */
 export const declineConsent = createAsyncThunk(
   "chat/declineConsent",
-  async ({ user, model }, { getState, dispatch }) => {
+  async ({ model }, { getState, dispatch }) => {
     dispatch(consentCleared());
     dispatch(messageAppended({ id: Date.now(), role: "user", content: "No", timestamp: now() }));
 
     const activeSession = getState().sessions.activeId;
     try {
       await sendMessage({
-        userId: user.user_id, customerId: user.customer_id,
         message: "no", sessionId: activeSession, selectedModel: model,
       });
     } catch (e) { /* nothing to show either way */ }
@@ -232,6 +224,8 @@ export const rateMessage = createAsyncThunk(
   "chat/rate",
   async ({ msg, rating, userId }, { getState, dispatch }) => {
     dispatch(feedbackRecorded({ id: msg.id, rating }));
+    // The RL endpoint still takes an explicit user_id; it is a research signal
+    // collector, not a data-access route, so it was left out of phase 3.
     await submitFeedback({
       sessionId: msg.session_id || getState().sessions.activeId,
       userId,
@@ -242,6 +236,12 @@ export const rateMessage = createAsyncThunk(
     });
   },
 );
+
+/** Signing out, or losing the session, clears the transcript. */
+const resetChat = state => {
+  state.messages = []; state.sending = false;
+  state.awaitingConsent = false; state.error = null;
+};
 
 const chatSlice = createSlice({
   name: "chat",
@@ -273,10 +273,8 @@ const chatSlice = createSlice({
       .addCase(activeSessionCleared, state => {
         state.messages = []; state.awaitingConsent = false; state.error = null;
       })
-      .addCase(loggedOut, state => {
-        state.messages = []; state.sending = false;
-        state.awaitingConsent = false; state.error = null;
-      });
+      .addCase(logout.fulfilled, resetChat)
+      .addCase(sessionExpired, resetChat);
   },
 });
 
