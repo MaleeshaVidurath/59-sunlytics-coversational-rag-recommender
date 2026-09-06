@@ -2,8 +2,9 @@ import { useDispatch, useSelector } from "react-redux";
 import CenteredTemplate from "../components/templates/CenteredTemplate";
 import CredentialsForm from "../components/organisms/CredentialsForm";
 import Wordmark from "../components/atoms/Wordmark";
+import Button from "../components/atoms/Button";
 import { login, selectAuthError, authErrorCleared } from "../store/slices/authSlice";
-import { C } from "../styles/theme";
+import styles from "./AuthCard.module.css";
 
 export default function LoginPage({ onShowRegister }) {
   const dispatch = useDispatch();
@@ -11,14 +12,10 @@ export default function LoginPage({ onShowRegister }) {
   const busy  = useSelector(s => s.auth.status === "bootstrapping");
 
   return (
-    <CenteredTemplate fontFamily="'Playfair Display',Georgia,serif">
-      <div style={{ width:440, maxWidth:"92vw", background:C.sidebar,
-        border:`1px solid ${C.border}`, borderRadius:16, padding:"48px 40px", textAlign:"center" }}>
-        <Wordmark size={36} letterSpacing={6} color={C.accent} weight={700} marginBottom={8} />
-        <div style={{ fontSize:12, letterSpacing:3, color:C.textDim,
-          textTransform:"uppercase", marginBottom:36, fontFamily:"system-ui,sans-serif" }}>
-          Fashion Intelligence System
-        </div>
+    <CenteredTemplate font="serif">
+      <div className={styles.card}>
+        <Wordmark size={36} letterSpacing={6} marginBottom={8} />
+        <div className={styles.subtitle}>Fashion Intelligence System</div>
 
         <CredentialsForm
           mode="login"
@@ -28,14 +25,9 @@ export default function LoginPage({ onShowRegister }) {
           onSubmit={({ username, password }) => dispatch(login({ username, password }))}
         />
 
-        <div style={{ marginTop:20, fontSize:12, color:C.textDim,
-          fontFamily:"system-ui,sans-serif" }}>
+        <div className={styles.switch}>
           No account?{" "}
-          <button onClick={onShowRegister}
-            style={{ background:"none", border:"none", color:C.accent,
-              cursor:"pointer", fontSize:12, padding:0, textDecoration:"underline" }}>
-            Create one
-          </button>
+          <Button variant="link" onClick={onShowRegister}>Create one</Button>
         </div>
       </div>
     </CenteredTemplate>

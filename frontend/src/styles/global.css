@@ -1,17 +1,59 @@
-/* Global rules previously held in a <style> tag inside ChatPage. The Google
-   Fonts @import that sat here has been dropped: index.html already loads
-   Playfair Display via <link>, and a trailing @import is ignored by the CSS
-   parser anyway. */
+@import "./tokens.css";
+
+/**
+ * Global rules only — anything component-specific belongs in that component's
+ * .module.css file.
+ */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+}
+
+/**
+ * Keyboard focus was previously invisible everywhere in this app, which made it
+ * unusable without a mouse. `:focus-visible` shows the ring for keyboard
+ * navigation without putting an outline on every mouse click.
+ */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Only suppress the default ring where :focus-visible is supported, so older
+   browsers keep some indicator rather than none. */
+@supports selector(:focus-visible) {
+  :focus:not(:focus-visible) { outline: none; }
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+button:disabled { cursor: not-allowed; }
 
 @keyframes bounce {
   0%, 100% { transform: translateY(0);    opacity: 0.4; }
   50%      { transform: translateY(-5px); opacity: 1; }
 }
 
-* { box-sizing: border-box; }
-
 ::-webkit-scrollbar       { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--radius-sm); }
 
-select option { background: #1c1c1c; color: #f0ebe3; }
+/* Native dropdown options are painted by the OS and ignore most styling; these
+   two properties are the ones that do apply. */
+select option {
+  background: var(--card);
+  color: var(--text);
+}
+
+::placeholder { color: var(--text-muted); }

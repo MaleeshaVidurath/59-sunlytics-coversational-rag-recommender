@@ -1,24 +1,27 @@
-import { C } from "../../styles/theme";
+import styles from "./Avatar.module.css";
 
-/**
- * Square-or-round tile holding a glyph — the assistant "S" mark, the signed-in
- * user's initial, a model's "M3" tag, and the placeholder shown when a product
- * photo fails to load. Defaults to the gold gradient those marks share.
- */
 export default function Avatar({
   children,
   size = 32,
-  radius = "50%",
-  background = `linear-gradient(135deg,${C.accentDim},${C.accent})`,
-  fontSize = 14,
+  radius,
+  fontSize,
+  variant,               // undefined (assistant) | user | tag
+  className = "",
   style = {},
 }) {
+  const classes = [styles.avatar, variant ? styles[variant] : "", className]
+    .filter(Boolean).join(" ");
+
   return (
-    <div style={{
-      width: size, height: size, borderRadius: radius, flexShrink: 0, background,
-      display: "flex", alignItems: "center", justifyContent: "center", fontSize,
-      ...style,
-    }}>
+    <div
+      className={classes}
+      style={{
+        "--avatar-size": `${size}px`,
+        ...(radius !== undefined && { "--avatar-radius": typeof radius === "number" ? `${radius}px` : radius }),
+        ...(fontSize !== undefined && { "--avatar-font-size": `${fontSize}px` }),
+        ...style,
+      }}
+    >
       {children}
     </div>
   );

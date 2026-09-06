@@ -1,0 +1,10 @@
+/* The SUNLYTICS wordmark, at four sizes across the app. */
+.wordmark {
+  font-family: var(--font-serif);
+  font-size: var(--wordmark-size, var(--text-xl));
+  letter-spacing: var(--wordmark-tracking, 3px);
+  color: var(--wordmark-color, var(--accent));
+  font-weight: var(--wordmark-weight, 700);
+  margin-bottom: var(--wordmark-gap, 0);
+  line-height: 1.1;
+}

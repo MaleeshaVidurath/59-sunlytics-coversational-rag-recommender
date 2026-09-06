@@ -1,3 +1,5 @@
+import styles from "./FeedbackButtons.module.css";
+
 /**
  * Thumbs up/down on a recommendation, feeding the RL signal collector.
  *
@@ -10,35 +12,33 @@ export default function FeedbackButtons({ msg, onFeedback }) {
 
   const given = msg.feedbackGiven;
 
-  const rating = (kind, activeBg, activeBorder, activeColor) => ({
-    background: given === kind ? activeBg : "#1a1a1a",
-    border: `1px solid ${given === kind ? activeBorder : "#333"}`,
-    borderRadius: 8,
-    padding: "3px 10px",
-    cursor: given ? "default" : "pointer",
-    color: given === kind ? activeColor : "#555",
-    fontSize: 14,
-    transition: "all 0.15s",
-    opacity: given && given !== kind ? 0.35 : 1,
-  });
+  const classesFor = kind => [
+    styles.rating,
+    styles[kind],
+    given === kind ? styles.chosen : "",
+    given ? styles.locked : "",
+    given && given !== kind ? styles.dimmed : "",
+  ].filter(Boolean).join(" ");
 
   return (
-    <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:8 }}>
-      <span style={{ fontSize:10, color:"#555", marginRight:2 }}>Was this helpful?</span>
+    <div className={styles.row}>
+      <span className={styles.prompt}>Was this helpful?</span>
       <button
+        className={classesFor("up")}
         onClick={() => !given && onFeedback(msg, "up")}
         title="Good recommendation"
-        style={rating("up", "#1e3a2f", "#2d5a3d", "#7ec87e")}>
+        aria-pressed={given === "up"}>
         👍
       </button>
       <button
+        className={classesFor("down")}
         onClick={() => !given && onFeedback(msg, "down")}
         title="Could be better"
-        style={rating("down", "#3a1e1e", "#5a2d2d", "#f87171")}>
+        aria-pressed={given === "down"}>
         👎
       </button>
       {given && (
-        <span style={{ fontSize:10, color: given === "up" ? "#7ec87e" : "#f87171" }}>
+        <span className={`${styles.thanks} ${given === "up" ? styles.thanksUp : styles.thanksDown}`}>
           {given === "up" ? "Thanks for your feedback!" : "We'll improve!"}
         </span>
       )}

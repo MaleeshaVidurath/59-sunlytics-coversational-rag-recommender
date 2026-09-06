@@ -1,0 +1,55 @@
+.row {
+  display: flex;
+  margin-bottom: var(--space-7);
+  padding: 0 var(--space-7);
+}
+
+.fromUser { justify-content: flex-end; }
+.fromBot  { justify-content: flex-start; }
+
+.avatarBot  { margin-right: var(--space-4); margin-top: 2px; }
+.avatarUser { margin-left: var(--space-4); margin-top: 2px; }
+
+.column {
+  max-width: var(--message-max-width);
+  min-width: 60px;
+}
+
+.bubble {
+  padding: var(--space-4) 15px;
+  color: var(--text);
+  font-size: var(--text-md);
+  line-height: 1.6;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.bubbleUser {
+  background: var(--user-bubble);
+  border: 1px solid var(--user-bubble-border);
+  border-radius: 18px 18px 4px 18px;
+}
+
+.bubbleBot {
+  background: var(--bot-bubble);
+  border: 1px solid var(--border);
+  border-radius: 18px 18px 18px 4px;
+}
+
+/* A failed turn reads as an assistant message, but should not look like a
+   normal answer. */
+.bubbleError {
+  background: var(--flag);
+  border-color: #a33;
+  color: var(--flag-text);
+}
+
+.items { margin-top: var(--space-2); }
+
+.timestamp {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  margin-top: var(--space-1);
+}
+
+.timestampUser { text-align: right; }

@@ -5,7 +5,7 @@ import IconButton from "../atoms/IconButton";
 import ModelBadge from "../atoms/ModelBadge";
 import SessionListItem from "../molecules/SessionListItem";
 import ErrorBanner from "../molecules/ErrorBanner";
-import { C } from "../../styles/theme";
+import styles from "./Sidebar.module.css";
 
 /**
  * Chat sidebar: new-chat action, the session list, and the signed-in user.
@@ -23,23 +23,19 @@ export default function Sidebar({
 
   return (
     <>
-      <div style={{ padding:"18px 14px 12px", borderBottom:`1px solid ${C.border}` }}>
-        <Wordmark size={18} letterSpacing={3} color={C.accent} weight={700} marginBottom={12} />
-        <Button onClick={onNewChat}
-          style={{ width:"100%", background:"transparent", border:`1px solid ${C.border}`,
-            borderRadius:8, color:C.textDim, padding:"8px 12px", fontSize:13,
-            cursor:"pointer", display:"flex", alignItems:"center", gap:8, transition:"all 0.15s" }}
-          hoverStyle={{ border:`1px solid ${C.accent}`, color:C.accent }}>
-          <span style={{fontSize:16}}>+</span> New Chat
+      <div className={styles.header}>
+        <Wordmark size={18} letterSpacing={3} marginBottom={12} />
+        <Button variant="ghost" fullWidth onClick={onNewChat}>
+          <span>+</span> New Chat
         </Button>
       </div>
 
-      <div style={{ flex:1, overflowY:"auto", padding:"10px" }}>
+      <div className={styles.list}>
         {/* A failed list read keeps whatever was already loaded, so the error and
             the stale list can legitimately appear together. */}
         <ErrorBanner message={error} onRetry={onRetry} />
         {visible.length === 0
-          ? <div style={{color:C.textMuted,fontSize:12,padding:"16px 4px"}}>No previous chats yet.</div>
+          ? <div className={styles.emptyList}>No previous chats yet.</div>
           : visible.map(s => (
               <SessionListItem key={s.session_id} session={s}
                 active={s.session_id === activeSession}
@@ -48,26 +44,22 @@ export default function Sidebar({
             ))}
       </div>
 
-      <div style={{ padding:"8px 14px", borderTop:`1px solid ${C.border}` }}>
+      <div className={styles.modelRow}>
         <ModelBadge model={model} size="small" />
       </div>
 
-      <div style={{ padding:"10px 14px", borderTop:`1px solid ${C.border}` }}>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <Avatar background={C.user} fontSize={13}
-            style={{ border:"1px solid #2d5a3d", color:C.accent, fontWeight:700 }}>
-            {user.age?user.age.toString()[0]:"U"}
+      <div className={styles.userRow}>
+        <div className={styles.user}>
+          <Avatar variant="user" fontSize={13}>
+            {user.age ? user.age.toString()[0] : "U"}
           </Avatar>
-          <div style={{ flex:1, minWidth:0 }}>
-            <div style={{ color:C.text, fontSize:12, fontWeight:500,
-              whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
-              {user.customer_id?.slice(0,18)}...
-            </div>
-            <div style={{ color:C.textDim, fontSize:11 }}>
+          <div className={styles.userDetails}>
+            <div className={styles.username}>{user.username}</div>
+            <div className={styles.userMeta}>
               {user.purchase_summary?.budget_tier || ""}
             </div>
           </div>
-          <IconButton onClick={onLogout} title="Sign out" hoverColor={C.flagText}>↩</IconButton>
+          <IconButton onClick={onLogout} title="Sign out" aria-label="Sign out">↩</IconButton>
         </div>
       </div>
     </>

@@ -6,7 +6,7 @@ import { modelSelected } from "../store/slices/modelSlice";
 export default function ModelSelectPage() {
   const dispatch = useDispatch();
   return (
-    <CenteredTemplate fontFamily="system-ui,-apple-system,sans-serif">
+    <CenteredTemplate font="sans">
       <ModelGrid onSelect={model => dispatch(modelSelected(model))} />
     </CenteredTemplate>
   );

@@ -1,8 +1,8 @@
 import { useState } from "react";
 import Button from "../atoms/Button";
 import ErrorBanner from "../molecules/ErrorBanner";
-import { C } from "../../styles/theme";
 import { MIN_PASSWORD_LENGTH } from "../../utils/validation";
+import styles from "./CredentialsForm.module.css";
 
 /**
  * Username + password form, shared by sign-in and registration.
@@ -13,7 +13,7 @@ import { MIN_PASSWORD_LENGTH } from "../../utils/validation";
  */
 export default function CredentialsForm({
   mode,               // "login" | "register"
-  onSubmit,           // ({ username, password }) => void
+  onSubmit,
   busy,
   error,
   onDismissError,
@@ -39,17 +39,12 @@ export default function CredentialsForm({
     onSubmit({ username: username.trim(), password });
   };
 
-  const field = {
-    width: "100%", background: C.card, border: `1px solid ${C.border}`,
-    borderRadius: 8, color: C.text, padding: "12px 14px", fontSize: 13,
-    fontFamily: "system-ui,sans-serif", outline: "none", marginBottom: 12,
-  };
-
   return (
-    <form onSubmit={submit} style={{ fontFamily: "system-ui,sans-serif" }}>
+    <form className={styles.form} onSubmit={submit}>
       <ErrorBanner message={error} onDismiss={onDismissError} />
 
       <input
+        className={styles.field}
         value={username}
         onChange={e => setUsername(e.target.value)}
         placeholder="Username"
@@ -57,10 +52,10 @@ export default function CredentialsForm({
         autoComplete="username"
         autoCapitalize="none"
         autoFocus
-        style={field}
       />
 
       <input
+        className={`${styles.field} ${tooShort ? styles.invalid : ""}`.trim()}
         type="password"
         value={password}
         onChange={e => setPassword(e.target.value)}
@@ -70,11 +65,11 @@ export default function CredentialsForm({
         // Tells password managers whether to offer a saved password or to
         // generate a new one.
         autoComplete={isRegister ? "new-password" : "current-password"}
-        style={{ ...field, borderColor: tooShort ? C.flagText : C.border }}
       />
 
       {isRegister && (
         <input
+          className={`${styles.field} ${mismatch ? styles.invalid : ""}`.trim()}
           type="password"
           value={confirm}
           onChange={e => setConfirm(e.target.value)}
@@ -82,28 +77,17 @@ export default function CredentialsForm({
           placeholder="Confirm password"
           aria-label="Confirm password"
           autoComplete="new-password"
-          style={{ ...field, borderColor: mismatch ? C.flagText : C.border }}
         />
       )}
 
       {tooShort && (
-        <div style={{ color: C.flagText, fontSize: 11, marginBottom: 10, textAlign: "left" }}>
+        <div className={styles.hint}>
           Password must be at least {MIN_PASSWORD_LENGTH} characters.
         </div>
       )}
-      {mismatch && (
-        <div style={{ color: C.flagText, fontSize: 11, marginBottom: 10, textAlign: "left" }}>
-          Passwords do not match.
-        </div>
-      )}
+      {mismatch && <div className={styles.hint}>Passwords do not match.</div>}
 
-      <Button
-        type="submit"
-        disabled={!canSubmit}
-        style={{ width: "100%", background: canSubmit ? C.accent : C.textMuted,
-          border: "none", borderRadius: 8, color: "#0f0f0f", padding: "13px",
-          fontSize: 14, fontWeight: 700, cursor: canSubmit ? "pointer" : "not-allowed",
-          letterSpacing: 1, textTransform: "uppercase", transition: "background 0.2s" }}>
+      <Button type="submit" variant="primary" fullWidth disabled={!canSubmit}>
         {busy
           ? (isRegister ? "Creating account…" : "Signing in…")
           : (isRegister ? "Create account" : "Sign in")}

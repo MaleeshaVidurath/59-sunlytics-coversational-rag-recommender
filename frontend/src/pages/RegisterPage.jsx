@@ -2,8 +2,9 @@ import { useDispatch, useSelector } from "react-redux";
 import CenteredTemplate from "../components/templates/CenteredTemplate";
 import CredentialsForm from "../components/organisms/CredentialsForm";
 import Wordmark from "../components/atoms/Wordmark";
+import Button from "../components/atoms/Button";
 import { register, selectAuthError, authErrorCleared } from "../store/slices/authSlice";
-import { C } from "../styles/theme";
+import styles from "./AuthCard.module.css";
 
 /**
  * New accounts start cold: no linked H&M persona, so no purchase history.
@@ -15,18 +16,12 @@ export default function RegisterPage({ onShowLogin }) {
   const error = useSelector(selectAuthError);
 
   return (
-    <CenteredTemplate fontFamily="'Playfair Display',Georgia,serif">
-      <div style={{ width:440, maxWidth:"92vw", background:C.sidebar,
-        border:`1px solid ${C.border}`, borderRadius:16, padding:"48px 40px", textAlign:"center" }}>
-        <Wordmark size={36} letterSpacing={6} color={C.accent} weight={700} marginBottom={8} />
-        <div style={{ fontSize:12, letterSpacing:3, color:C.textDim,
-          textTransform:"uppercase", marginBottom:24, fontFamily:"system-ui,sans-serif" }}>
-          Create an account
-        </div>
+    <CenteredTemplate font="serif">
+      <div className={styles.card}>
+        <Wordmark size={36} letterSpacing={6} marginBottom={8} />
+        <div className={`${styles.subtitle} ${styles.subtitleTight}`}>Create an account</div>
 
-        <div style={{ fontSize:12, color:C.textMuted, lineHeight:1.6, marginBottom:24,
-          fontFamily:"system-ui,sans-serif", textAlign:"left",
-          background:C.card, border:`1px solid ${C.border}`, borderRadius:8, padding:"10px 12px" }}>
+        <div className={styles.notice}>
           A new account starts with no shopping history, so early recommendations
           are based on what you ask for rather than what you have bought before.
         </div>
@@ -38,14 +33,9 @@ export default function RegisterPage({ onShowLogin }) {
           onSubmit={({ username, password }) => dispatch(register({ username, password }))}
         />
 
-        <div style={{ marginTop:20, fontSize:12, color:C.textDim,
-          fontFamily:"system-ui,sans-serif" }}>
+        <div className={styles.switch}>
           Already have an account?{" "}
-          <button onClick={onShowLogin}
-            style={{ background:"none", border:"none", color:C.accent,
-              cursor:"pointer", fontSize:12, padding:0, textDecoration:"underline" }}>
-            Sign in
-          </button>
+          <Button variant="link" onClick={onShowLogin}>Sign in</Button>
         </div>
       </div>
     </CenteredTemplate>

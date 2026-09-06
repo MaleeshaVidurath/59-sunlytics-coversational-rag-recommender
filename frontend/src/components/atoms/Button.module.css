@@ -1,0 +1,93 @@
+/* Base: every variant shares geometry and motion. */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  border-radius: var(--radius);
+  font-size: var(--text-base);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition),
+              color var(--transition);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.fullWidth { width: 100%; }
+
+/* Outlined, used for "New Chat". Hover is now a CSS rule rather than two
+   React state updates per mouse crossing. */
+.ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: var(--space-3) var(--space-5);
+  justify-content: flex-start;
+}
+.ghost:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Rounded suggestion chips on the empty chat screen. */
+.chip {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: var(--space-3) var(--space-7);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  font-weight: 400;
+}
+.chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Solid call to action — sign in, create account. */
+.primary {
+  background: var(--accent);
+  border: none;
+  color: var(--accent-contrast);
+  padding: var(--space-5);
+  font-size: var(--text-md);
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.primary:hover:not(:disabled) { background: #d8bb80; }
+.primary:disabled { background: var(--text-muted); }
+
+/* Consent "Yes". */
+.success {
+  background: var(--user-bubble);
+  border: 1px solid var(--user-bubble-border);
+  color: var(--positive);
+  padding: var(--space-2) var(--space-8);
+}
+.success:hover:not(:disabled) { background: #253f35; }
+
+/* Consent "No". */
+.neutral {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: var(--space-2) var(--space-8);
+}
+.neutral:hover:not(:disabled) { border-color: var(--border-strong); }
+
+/* Inline text link, e.g. "Create one" under the sign-in form. */
+.link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  padding: 0;
+  text-decoration: underline;
+}
+.link:hover:not(:disabled) { color: var(--text); }

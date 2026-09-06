@@ -1,0 +1,34 @@
+/**
+ * Square-or-round tile holding a glyph — the assistant mark, a user initial, a
+ * model tag, or the placeholder when a product photo fails to load.
+ *
+ * Size and radius vary per use, so they come in as custom properties set
+ * inline. That keeps the dynamic part to two values instead of an entire
+ * style object.
+ */
+.avatar {
+  width: var(--avatar-size, 32px);
+  height: var(--avatar-size, 32px);
+  border-radius: var(--avatar-radius, var(--radius-round));
+  font-size: var(--avatar-font-size, var(--text-md));
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-gradient);
+}
+
+/* The signed-in person, distinguished from the assistant mark. */
+.user {
+  background: var(--user-bubble);
+  border: 1px solid var(--user-bubble-border);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* Model tag tile on the model-select cards. */
+.tag {
+  color: var(--accent-contrast);
+  font-weight: 700;
+  font-family: var(--font-mono);
+}

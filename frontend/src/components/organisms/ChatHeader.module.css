@@ -1,0 +1,31 @@
+.header {
+  padding: 0 var(--space-8);
+  height: var(--header-height);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  background: var(--bg);
+  flex-shrink: 0;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.session {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The model pill is wide; on a phone the session label matters less. */
+@media (max-width: 520px) {
+  .header { padding: 0 var(--space-5); }
+  .session { display: none; }
+}

@@ -1,14 +1,12 @@
-import { C } from "../../styles/theme";
+import styles from "./CenteredTemplate.module.css";
 
 /**
- * Full-height centred shell shared by the login and model-select screens —
- * the two views that appear before a chat exists.
+ * Full-height centred shell shared by the login, register and model-select
+ * screens — the views that appear before a chat exists.
  */
-export default function CenteredTemplate({ children, fontFamily }) {
+export default function CenteredTemplate({ children, font = "sans" }) {
   return (
-    <div style={{ minHeight:"100vh", background:C.bg,
-      display:"flex", alignItems:"center", justifyContent:"center",
-      fontFamily }}>
+    <div className={`${styles.centered} ${styles[font]}`}>
       {children}
     </div>
   );

@@ -3,7 +3,7 @@ import Wordmark from "../atoms/Wordmark";
 import Button from "../atoms/Button";
 import TypingIndicator from "../atoms/TypingIndicator";
 import ErrorBanner from "../molecules/ErrorBanner";
-import { C } from "../../styles/theme";
+import styles from "./MessageList.module.css";
 
 const SUGGESTIONS = [
   "I want a black dress under £50",
@@ -14,22 +14,14 @@ const SUGGESTIONS = [
 /** Prompt shown before the first message of a chat. */
 function EmptyState({ onSuggestion }) {
   return (
-    <div style={{ height:"100%", display:"flex", flexDirection:"column",
-      alignItems:"center", justifyContent:"center",
-      color:C.textMuted, padding:40 }}>
-      <Wordmark size={42} letterSpacing={6} color={C.accentDim} marginBottom={12} />
-      <div style={{ fontSize:14, maxWidth:340, textAlign:"center", lineHeight:1.7 }}>
-        Your personalised fashion assistant.<br/>Tell me what you are looking for today.
+    <div className={styles.empty}>
+      <Wordmark size={42} letterSpacing={6} color="var(--accent-dim)" marginBottom={12} />
+      <div className={styles.tagline}>
+        Your personalised fashion assistant.<br />Tell me what you are looking for today.
       </div>
-      <div style={{ marginTop:28, display:"flex", gap:10, flexWrap:"wrap", justifyContent:"center" }}>
+      <div className={styles.suggestions}>
         {SUGGESTIONS.map(s => (
-          <Button key={s} onClick={() => onSuggestion(s)}
-            style={{ background:C.card, border:`1px solid ${C.border}`,
-              borderRadius:20, color:C.textDim, padding:"8px 16px",
-              fontSize:12, cursor:"pointer", transition:"all 0.15s" }}
-            hoverStyle={{ border:`1px solid ${C.accent}`, color:C.accent }}>
-            {s}
-          </Button>
+          <Button key={s} variant="chip" onClick={() => onSuggestion(s)}>{s}</Button>
         ))}
       </div>
     </div>
@@ -47,7 +39,7 @@ export default function MessageList({
 }) {
   const empty = messages.length === 0 && !sending && !error;
   return (
-    <div style={{ flex:1, overflowY:"auto", padding:"24px 0 8px" }}>
+    <div className={styles.list}>
       <ErrorBanner message={error} onDismiss={onDismissError} />
       {empty ? (
         <EmptyState onSuggestion={onSuggestion} />

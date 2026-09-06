@@ -1,0 +1,24 @@
+.block {
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.heading {
+  color: var(--text-muted);
+  font-size: var(--text-3xs);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+
+.reason {
+  color: var(--text-dim);
+  font-size: var(--text-2xs);
+  margin-top: 2px;
+  display: flex;
+  gap: 5px;
+  line-height: 1.35;
+}
+
+.tick { color: var(--accent); flex-shrink: 0; }

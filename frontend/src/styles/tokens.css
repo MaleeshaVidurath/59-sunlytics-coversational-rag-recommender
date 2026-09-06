@@ -1,0 +1,122 @@
+/**
+ * Design tokens.
+ *
+ * Replaces the JS palette in theme.js. As CSS custom properties these are
+ * readable by every stylesheet, resolvable at runtime (so a theme can change
+ * without re-rendering React), and usable inside pseudo-classes and media
+ * queries — none of which a JS object can do.
+ */
+
+:root {
+  /* ── Surfaces ───────────────────────────────────────────────────────────── */
+  --bg: #0f0f0f;
+  --sidebar: #161616;
+  --card: #1c1c1c;
+  --card-raised: #1a1a1a;
+  --border: #2a2a2a;
+  --border-strong: #333;
+
+  /* ── Brand ──────────────────────────────────────────────────────────────── */
+  --accent: #c9a96e;
+  --accent-dim: #8a6f3e;
+  --accent-contrast: #0f0f0f;      /* text on an accent background */
+  --accent-gradient: linear-gradient(135deg, var(--accent-dim), var(--accent));
+
+  /* ── Text ───────────────────────────────────────────────────────────────── */
+  --text: #f0ebe3;
+  --text-dim: #8a8078;
+  --text-muted: #555;
+
+  /* ── Chat bubbles ───────────────────────────────────────────────────────── */
+  --user-bubble: #1e3a2f;
+  --user-bubble-border: #2d5a3d;
+  --bot-bubble: #1c1c1c;
+
+  /* ── Status ─────────────────────────────────────────────────────────────── */
+  --flag: #7c2d2d;                 /* hallucination — a problem */
+  --flag-text: #fca5a5;
+  --contra: #2d4a1e;               /* contradiction corrected — resolved */
+  --contra-text: #86efac;
+  --tag: #222;
+
+  /* Catalogue revisions are not errors — the message was true when sent — so
+     they read as an informational amber note, distinct from the red
+     hallucination flag and the green contradiction badge. */
+  --revise: #3a2f16;
+  --revise-text: #e0c079;
+  --revise-border: #5c4a22;
+
+  --positive: #7ec87e;
+  --negative: #f87171;
+  --info: #6e9bcf;
+
+  /* ── Model identity ─────────────────────────────────────────────────────── */
+  --m1: #7ec87e;  --m1-bg: #1e3a1e;
+  --m2: #6e9bcf;  --m2-bg: #1e2a3a;
+  --m3: #c9a96e;  --m3-bg: #2a200e;
+
+  /* ── Type ───────────────────────────────────────────────────────────────── */
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-serif: "Playfair Display", Georgia, serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --text-3xs: 9px;
+  --text-2xs: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+
+  /* ── Spacing ────────────────────────────────────────────────────────────── */
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  --space-4: 10px;
+  --space-5: 12px;
+  --space-6: 14px;
+  --space-7: 16px;
+  --space-8: 20px;
+  --space-9: 24px;
+
+  /* ── Radii ──────────────────────────────────────────────────────────────── */
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 16px;
+  --radius-pill: 20px;
+  --radius-round: 50%;
+
+  /* ── Motion ─────────────────────────────────────────────────────────────── */
+  --transition: 0.15s ease;
+  --transition-slow: 0.25s ease;
+
+  /* ── Layout ─────────────────────────────────────────────────────────────── */
+  --sidebar-width: 260px;
+  --header-height: 56px;
+  --message-max-width: 70%;
+  --z-overlay: 1000;
+}
+
+/**
+ * Everyone who asked for less motion gets it. Respecting this is not optional
+ * for users with vestibular disorders — the bouncing typing indicator is
+ * exactly the kind of animation that causes problems.
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --transition: 0s;
+    --transition-slow: 0s;
+  }
+}
+
+/* Narrow screens: the sidebar overlays instead of squeezing the chat, and a
+   message bubble is allowed nearly the full width. */
+@media (max-width: 720px) {
+  :root {
+    --sidebar-width: 240px;
+    --message-max-width: 88%;
+  }
+}

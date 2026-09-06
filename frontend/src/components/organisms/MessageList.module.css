@@ -1,0 +1,30 @@
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-9) 0 var(--space-3);
+}
+
+.empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  padding: 40px var(--space-8);
+  text-align: center;
+}
+
+.tagline {
+  font-size: var(--text-md);
+  max-width: 340px;
+  line-height: 1.7;
+}
+
+.suggestions {
+  margin-top: 28px;
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  justify-content: center;
+}

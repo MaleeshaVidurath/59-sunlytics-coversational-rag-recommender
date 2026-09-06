@@ -1,5 +1,6 @@
 import { Component } from "react";
-import { C } from "../../styles/theme";
+import Button from "../atoms/Button";
+import styles from "./ErrorBoundary.module.css";
 
 /**
  * Catches render-time errors so one bad message or malformed product payload
@@ -35,38 +36,20 @@ export default class ErrorBoundary extends Component {
     if (!error) return this.props.children;
 
     return (
-      <div style={{ minHeight:"100vh", background:C.bg, color:C.text,
-        display:"flex", alignItems:"center", justifyContent:"center", padding:24,
-        fontFamily:"system-ui,-apple-system,sans-serif" }}>
-        <div style={{ maxWidth:460, background:C.sidebar, border:`1px solid ${C.border}`,
-          borderRadius:14, padding:"32px 28px", textAlign:"center" }}>
-          <div style={{ fontSize:30, marginBottom:12 }}>⚠</div>
-          <div style={{ fontSize:16, fontWeight:600, marginBottom:8 }}>
-            Something went wrong displaying this page.
-          </div>
-          <div style={{ fontSize:13, color:C.textDim, lineHeight:1.6, marginBottom:20 }}>
+      <div className={styles.screen}>
+        <div className={styles.panel}>
+          <div className={styles.icon} aria-hidden="true">⚠</div>
+          <div className={styles.title}>Something went wrong displaying this page.</div>
+          <div className={styles.explanation}>
             The error has been logged to the browser console. You can try rendering
             again, or reload if the problem persists.
           </div>
-          <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
-            <button onClick={this.handleReset}
-              style={{ background:C.accent, border:"none", borderRadius:8, color:"#0f0f0f",
-                padding:"10px 20px", fontSize:13, fontWeight:700, cursor:"pointer" }}>
-              Try again
-            </button>
-            <button onClick={() => window.location.reload()}
-              style={{ background:"transparent", border:`1px solid ${C.border}`,
-                borderRadius:8, color:C.textDim, padding:"10px 20px",
-                fontSize:13, cursor:"pointer" }}>
-              Reload
-            </button>
+          <div className={styles.actions}>
+            <Button variant="primary" onClick={this.handleReset}>Try again</Button>
+            <Button variant="neutral" onClick={() => window.location.reload()}>Reload</Button>
           </div>
           {import.meta.env?.DEV && (
-            <pre style={{ marginTop:18, textAlign:"left", fontSize:11, color:C.textMuted,
-              background:C.bg, border:`1px solid ${C.border}`, borderRadius:8,
-              padding:10, overflowX:"auto", maxHeight:160 }}>
-              {String(error?.stack || error)}
-            </pre>
+            <pre className={styles.stack}>{String(error?.stack || error)}</pre>
           )}
         </div>
       </div>

@@ -1,0 +1,47 @@
+.item {
+  position: relative;
+  padding: var(--space-5) var(--space-6);
+  cursor: pointer;
+  border-radius: var(--radius);
+  margin-bottom: var(--space-1);
+  background: transparent;
+  border: 1px solid transparent;
+  transition: background var(--transition), border-color var(--transition);
+}
+
+.item:hover { background: #1e1e1e; }
+
+.active {
+  background: #252525;
+  border-color: var(--border);
+}
+
+.title {
+  color: var(--text-dim);
+  font-size: var(--text-base);
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Room for the delete control, which fades in on hover. Reserved always so
+     the title does not reflow under the pointer. */
+  padding-right: var(--space-9);
+}
+
+.active .title { color: var(--text); font-weight: 500; }
+
+.meta {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  margin-top: 3px;
+}
+
+/* Revealed on hover or when anything inside has keyboard focus, so the delete
+   control is reachable without a mouse. */
+.delete {
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+
+.item:hover .delete,
+.item:focus-within .delete { opacity: 1; }

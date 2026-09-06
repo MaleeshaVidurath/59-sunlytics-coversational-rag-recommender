@@ -1,0 +1,11 @@
+.grid { width: 500px; max-width: 92vw; }
+
+.heading {
+  text-align: center;
+  margin-bottom: 36px;
+}
+
+.subtitle {
+  font-size: var(--text-base);
+  color: var(--text-dim);
+}

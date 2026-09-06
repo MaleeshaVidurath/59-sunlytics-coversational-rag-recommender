@@ -1,0 +1,37 @@
+/* Small pill label. Colour comes from a variant, geometry is shared. */
+.badge {
+  display: inline-block;
+  font-size: var(--text-2xs);
+  padding: 2px 7px;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  background: var(--tag);
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+
+/* Intent label — colour is set per label by the caller. */
+.intent {
+  font-family: var(--font-mono);
+  background: var(--tag);
+  border: 1px solid var(--badge-color, var(--border-strong));
+  color: var(--badge-color, var(--text-dim));
+}
+
+.flag {
+  background: var(--flag);
+  color: var(--flag-text);
+  padding: 2px var(--space-3);
+  font-weight: 600;
+}
+
+.contra {
+  background: var(--contra);
+  color: var(--contra-text);
+  padding: 2px var(--space-3);
+  font-weight: 600;
+}

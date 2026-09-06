@@ -1,0 +1,47 @@
+/* Shared card shell for the sign-in and registration screens. */
+.card {
+  width: 440px;
+  max-width: 92vw;
+  background: var(--sidebar);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 48px 40px;
+  text-align: center;
+}
+
+.subtitle {
+  font-size: var(--text-sm);
+  letter-spacing: 3px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 36px;
+  font-family: var(--font-sans);
+}
+
+.subtitleTight { margin-bottom: var(--space-9); }
+
+/* Sets expectations before the user signs up, because a cold-start account
+   genuinely behaves differently. */
+.notice {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin-bottom: var(--space-9);
+  font-family: var(--font-sans);
+  text-align: left;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-4) var(--space-5);
+}
+
+.switch {
+  margin-top: var(--space-8);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+}
+
+@media (max-width: 520px) {
+  .card { padding: 32px var(--space-9); }
+}

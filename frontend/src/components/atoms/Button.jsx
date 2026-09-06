@@ -1,25 +1,26 @@
-import { useState } from "react";
+import styles from "./Button.module.css";
 
 /**
- * Button with a declarative hover state.
+ * Button.
  *
- * Replaces the onMouseEnter/onMouseLeave pairs that were mutating
- * `e.currentTarget.style` by hand in eight places. `hoverStyle` is merged over
- * `style` while hovered, so callers describe the hover appearance instead of
- * the transition into and out of it. Hover is suppressed while disabled.
+ * Hover, focus and disabled states live in Button.module.css. The previous
+ * version tracked hover in React state and merged style objects, which meant a
+ * re-render every time the pointer crossed a button — CSS does it for free, and
+ * can also express :focus-visible, which inline styles cannot.
  */
-export default function Button({ children, style = {}, hoverStyle, disabled = false, ...rest }) {
-  const [hovered, setHovered] = useState(false);
-  const applied = hovered && !disabled && hoverStyle ? { ...style, ...hoverStyle } : style;
-  return (
-    <button
-      disabled={disabled}
-      style={applied}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      {...rest}
-    >
-      {children}
-    </button>
-  );
+export default function Button({
+  children,
+  variant = "ghost",     // ghost | chip | primary | success | neutral | link
+  fullWidth = false,
+  className = "",
+  ...rest
+}) {
+  const classes = [
+    styles.button,
+    styles[variant],
+    fullWidth ? styles.fullWidth : "",
+    className,
+  ].filter(Boolean).join(" ");
+
+  return <button className={classes} {...rest}>{children}</button>;
 }

@@ -1,0 +1,13 @@
+.centered {
+  min-height: 100vh;
+  /* Small viewport unit avoids the mobile-browser toolbar shifting the layout. */
+  min-height: 100svh;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-8);
+}
+
+.serif { font-family: var(--font-serif); }
+.sans  { font-family: var(--font-sans); }

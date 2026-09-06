@@ -1,0 +1,7 @@
+.splash { text-align: center; }
+
+.splashText {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-family: var(--font-sans);
+}

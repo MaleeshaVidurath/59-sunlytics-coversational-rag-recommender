@@ -1,0 +1,37 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--model-bg);
+  border: 1px solid color-mix(in srgb, var(--model-color) 33%, transparent);
+  border-radius: var(--radius-pill);
+  padding: var(--space-1) var(--space-5);
+  flex-shrink: 0;
+}
+
+.tag {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-round);
+  flex-shrink: 0;
+  background: var(--model-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--accent-contrast);
+  font-family: var(--font-mono);
+}
+
+.label {
+  color: var(--model-color);
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+/* Compact form for the sidebar footer. */
+.small { padding: 2px var(--space-3); gap: var(--space-1); }
+.small .tag { width: 16px; height: 16px; font-size: var(--text-3xs); }
+.small .label { font-size: var(--text-2xs); }

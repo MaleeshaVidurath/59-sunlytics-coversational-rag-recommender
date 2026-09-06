@@ -8,7 +8,7 @@ import CenteredTemplate from "./components/templates/CenteredTemplate";
 import Wordmark from "./components/atoms/Wordmark";
 import { bootstrapSession, selectAuthStatus } from "./store/slices/authSlice";
 import { selectModel } from "./store/slices/modelSlice";
-import { C } from "./styles/theme";
+import styles from "./App.module.css";
 
 /**
  * Gate: sign in -> choose a model -> chat.
@@ -30,13 +30,10 @@ export default function App() {
 
   if (status === "bootstrapping") {
     return (
-      <CenteredTemplate fontFamily="'Playfair Display',Georgia,serif">
-        <div style={{ textAlign: "center" }}>
-          <Wordmark size={30} letterSpacing={5} color={C.accentDim} weight={700} marginBottom={10} />
-          <div style={{ color: C.textMuted, fontSize: 12,
-            fontFamily: "system-ui,sans-serif" }}>
-            Restoring your session…
-          </div>
+      <CenteredTemplate font="serif">
+        <div className={styles.splash}>
+          <Wordmark size={30} letterSpacing={5} color="var(--accent-dim)" marginBottom={10} />
+          <div className={styles.splashText}>Restoring your session…</div>
         </div>
       </CenteredTemplate>
     );

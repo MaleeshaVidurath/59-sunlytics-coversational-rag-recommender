@@ -1,0 +1,40 @@
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  background: var(--flag);
+  color: var(--flag-text);
+  border: 1px solid #a33;
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-5);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  margin: 0 var(--space-7) var(--space-4);
+}
+
+.icon { flex-shrink: 0; }
+.message { flex: 1; min-width: 0; }
+
+.retry {
+  background: transparent;
+  border: 1px solid var(--flag-text);
+  border-radius: var(--radius-sm);
+  color: var(--flag-text);
+  font-size: var(--text-xs);
+  padding: 3px var(--space-4);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--transition);
+}
+
+.retry:hover { background: rgba(255, 255, 255, 0.1); }
+
+.dismiss {
+  background: transparent;
+  border: none;
+  color: var(--flag-text);
+  font-size: 15px;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+}

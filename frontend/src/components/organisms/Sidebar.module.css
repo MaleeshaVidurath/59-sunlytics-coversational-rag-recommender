@@ -1,0 +1,48 @@
+.header {
+  padding: 18px var(--space-6) var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+}
+
+.emptyList {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  padding: var(--space-7) var(--space-1);
+}
+
+.modelRow {
+  padding: var(--space-3) var(--space-6);
+  border-top: 1px solid var(--border);
+}
+
+.userRow {
+  padding: var(--space-4) var(--space-6);
+  border-top: 1px solid var(--border);
+}
+
+.user {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.userDetails { flex: 1; min-width: 0; }
+
+.username {
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.userMeta { color: var(--text-dim); font-size: var(--text-xs); }
+
+/* Sidebar content must not reflow while the panel animates closed. */
+.header, .list, .modelRow, .userRow { min-width: var(--sidebar-width); }

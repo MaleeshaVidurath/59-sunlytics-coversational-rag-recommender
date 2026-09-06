@@ -1,0 +1,33 @@
+/* Transparent glyph button — sidebar toggle, sign out, delete chat. */
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xl);
+  color: var(--text-muted);
+  transition: color var(--transition), background var(--transition);
+}
+
+.iconButton:hover { background: rgba(255, 255, 255, 0.05); }
+
+/* Destructive intent: sign out and delete both turn red on hover. */
+.danger:hover { color: var(--flag-text); }
+
+/* Neutral chrome, e.g. the sidebar toggle. */
+.muted { color: var(--text-dim); }
+.muted:hover { color: var(--text); }
+
+.small { font-size: var(--text-md); }
+
+/* Positioned over a list row rather than sitting in flow. */
+.floating {
+  position: absolute;
+  right: var(--space-3);
+  top: 50%;
+  transform: translateY(-50%);
+}

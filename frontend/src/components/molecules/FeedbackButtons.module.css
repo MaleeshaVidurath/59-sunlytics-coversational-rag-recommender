@@ -1,0 +1,47 @@
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.prompt {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  margin-right: 2px;
+}
+
+.rating {
+  background: var(--card-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 3px var(--space-4);
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--text-md);
+  transition: background var(--transition), border-color var(--transition),
+              opacity var(--transition);
+}
+
+.rating:hover:not(.locked) { border-color: var(--text-dim); }
+
+/* Once a rating is given the pair is inert: the backend treats the first
+   signal per turn as the real one, so a second click must do nothing. */
+.locked { cursor: default; }
+.dimmed { opacity: 0.35; }
+
+.up.chosen {
+  background: var(--user-bubble);
+  border-color: var(--user-bubble-border);
+  color: var(--positive);
+}
+
+.down.chosen {
+  background: #3a1e1e;
+  border-color: #5a2d2d;
+  color: var(--negative);
+}
+
+.thanks { font-size: var(--text-2xs); }
+.thanksUp { color: var(--positive); }
+.thanksDown { color: var(--negative); }

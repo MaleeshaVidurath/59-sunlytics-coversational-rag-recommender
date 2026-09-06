@@ -1,0 +1,36 @@
+.wrapper {
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-7);
+  margin-bottom: var(--space-7);
+}
+
+.avatar { margin-right: var(--space-4); }
+
+.bubble {
+  background: var(--bot-bubble);
+  border: 1px solid var(--border);
+  border-radius: 18px 18px 18px 4px;
+  padding: var(--space-5) var(--space-8);
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-round);
+  background: var(--accent-dim);
+  animation: bounce 1.2s ease-in-out infinite;
+}
+
+/* Staggered so the three dots ripple rather than pulse together. */
+.dot:nth-child(2) { animation-delay: 0.2s; }
+.dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* The bouncing dots are exactly the kind of motion that causes problems for
+   vestibular disorders. Fade in place instead of moving. */
+@media (prefers-reduced-motion: reduce) {
+  .dot { animation: none; opacity: 0.6; }
+}

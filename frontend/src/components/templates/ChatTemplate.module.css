@@ -1,0 +1,43 @@
+.layout {
+  height: 100vh;
+  height: 100svh;
+  display: flex;
+  background: var(--bg);
+  font-family: var(--font-sans);
+  overflow: hidden;
+}
+
+.sidebar {
+  width: var(--sidebar-width);
+  flex-shrink: 0;
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width var(--transition-slow);
+}
+
+.collapsed { width: 0; }
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/**
+ * Below 720px the sidebar overlays the chat instead of squeezing it — at these
+ * widths a 240px panel plus a conversation leaves neither usable.
+ */
+@media (max-width: 720px) {
+  .sidebar {
+    position: absolute;
+    inset-block: 0;
+    left: 0;
+    z-index: 20;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
+  }
+  .collapsed { box-shadow: none; }
+}
